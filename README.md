@@ -56,7 +56,7 @@ Pre-built binaries are available on the [Releases](https://github.com/arcanite24
 
 ```bash
 # Clone and enter the repository
-git clone https://github.com/yourname/gb-recompiled.git
+git clone https://github.com/arcanite24/gb-recompiled.git
 cd gb-recompiled
 
 # Configure and build
@@ -89,6 +89,7 @@ ninja -C output/game/build
 ```
 
 The recompiler will:
+
 1. Load and parse the ROM header
 2. Analyze control flow across all memory banks
 3. Decode instructions and track bank switches
@@ -106,6 +107,7 @@ The recompiler will:
 | `--use-trace <file>` | Use runtime trace to seed entry points |
 
 **Example:**
+
 ```bash
 # Debug a problematic ROM
 ./build/bin/gbrecomp game.gb -o output/game --trace --limit 5000
@@ -117,6 +119,7 @@ The recompiler will:
 Complex games (like *Pokémon Blue*) often use computed jumps that static analysis cannot resolve. You can use execution traces to "seed" the analyzer with every instruction physically executed during a real emulated session.
 
 1. **Generate a trace**: Run any recompiled version of the game with tracing enabled, or use the **[Ground Truth Capture Tool](GROUND_TRUTH_WORKFLOW.md)** with PyBoy.
+
    ```bash
    # Option A: Using recompiled game
    ./output/game/build/game --trace-entries game.trace --limit 1000000
@@ -124,14 +127,16 @@ Complex games (like *Pokémon Blue*) often use computed jumps that static analys
    # Option B: Using PyBoy "Ground Truth" Capture (Recommended for new games)
    python3 tools/capture_ground_truth.py roms/game.gb -o game.trace --random
    ```
+
 2. **Recompile with grounding**: Feed the trace back into the recompiler.
+
    ```bash
    ./build/bin/gbrecomp roms/game.gb -o output/game --use-trace game.trace
    ```
 
 For a detailed walkthrough, see **[GROUND_TRUTH_WORKFLOW.md](GROUND_TRUTH_WORKFLOW.md)**.
 **Generic Indirect Jump Solver:**
-The recompiler includes an advanced static solver for `JP HL` and `CALL HL` instructions. It tracks the contents of all 8-bit registers and 16-bit pairs throughout the program's control flow. 
+The recompiler includes an advanced static solver for `JP HL` and `CALL HL` instructions. It tracks the contents of all 8-bit registers and 16-bit pairs throughout the program's control flow.
 
 - **Register Tracking**: Accurately handles constant pointers loaded into `HL` or table bases loaded into `DE`.
 - **Table Backtracking**: When a `JP HL` is encountered with an unknown `HL`, the recompiler scans back for jump table patterns (e.g., page-aligned pointers) and automatically discovers all potential branch targets.
@@ -139,12 +144,14 @@ The recompiler includes an advanced static solver for `JP HL` and `CALL HL` inst
 
 **Manual Entry Points:**
 If you see `[GB] Interpreter` messages in the logs at specific addresses, you can manually force the recompiler to analyze them:
+
 ```bash
 ./build/bin/gbrecomp roms/game.gb -o out_dir --add-entry-point 28:602B
 ```
 
 **Aggressive Scanning:**
 The recompiler automatically scans memory banks for code that isn't directly reachable (e.g. unreferenced functions). This improves compatibility but may occasionally misidentify data as code. To disable it:
+
 ```bash
 ./build/bin/gbrecomp roms/game.gb -o out_dir --no-scan
 ```
@@ -179,14 +186,18 @@ When running a recompiled game:
 ## How It Works
 
 ### 1. Analysis Phase
+
 The recompiler performs static control flow analysis:
+
 - Discovers all reachable code starting from entry points (`0x100`, interrupt vectors)
 - Tracks bank switches to follow cross-bank calls and jumps
 - Detects computed jumps (e.g., `JP HL`) and resolves jump tables
 - Separates code from data using heuristics
 
 ### 2. Code Generation
+
 Instructions are translated to C:
+
 ```c
 // Original: LD A, [HL+]
 ctx->a = gb_read8(ctx, ctx->hl++);
@@ -201,7 +212,9 @@ if (!ctx->flag_z) { func_00_1234(ctx); return; }
 Each ROM bank becomes a separate C file with functions for reachable code blocks.
 
 ### 3. Runtime Execution
+
 The generated code links against `libgbrt`, which provides:
+
 - Memory-mapped I/O (`gb_read8`, `gb_write8`)
 - CPU flag manipulation
 - PPU scanline rendering
@@ -223,6 +236,7 @@ Recompilation doesn't mean fully playable. Most of the games are not fully playa
 | 🔧 EXCEPTION | 7 | 0.44% |
 
 Manually confirmed working examples:
+
 - **Tetris (Japan) (En)** (md5: 084f1e457749cdec86183189bd88ce69)
   - Title screen sometimes glitches
   - After completing a line, you need to pause and resume to fix the graphics
@@ -233,25 +247,30 @@ Manually confirmed working examples:
 ## Project Status & Roadmap
 
 ### Current Limitations
+
 1. **RAM Execution**: Code that runs from RAM (e.g., self-modifying code in `cpu_instrs.gb`) cannot be statically recompiled yet.
 2. **Computed Jumps**: Complex jump tables using `JP HL` (like switch statements) require better heuristic detection.
 3. **Audio**: Some channel quirks and "zombie mode" envelope glitches are not yet implemented.
 
 ### Missing Features (Roadmap)
+
 The following features are prioritized for future updates:
 
 #### Game Boy Color (CGB)
+
 - [ ] **Double Speed Mode**: CPU speed switching.
 - [ ] **Memory Banking**: VRAM (16KB) and WRAM (32KB) banking support.
 - [ ] **CGB Palettes**: Support for 0xFF68-0xFF6B registers.
 - [ ] **DMA**: HDMA and GDMA transfer implementation.
 
 #### Accuracy & Enhancements
+
 - [ ] **PPU Timing**: Variable Mode 3 length for perfect pixel timing.
 - [ ] **Recompiler**: Improved detection for switch-statement-style jump tables.
 - [ ] **Self-Modifying Code**: Detection and interpreter fallback for RAM-executed code.
 
 #### Misc
+
 - [x] Tools to identify entry-points (Trace-Guided Analysis)
 - [ ] Tools for better graphical debugging (outputting PNGs grid instead of raw PPMs)
 
@@ -262,13 +281,17 @@ The following features are prioritized for future updates:
 The `tools/` directory contains utilities for analysis and verification:
 
 ### 1. Ground Truth Capturer
+
 Automate instruction discovery using a high-speed headless emulator (**PyBoy** recommended).
+
 ```bash
 python3 tools/capture_ground_truth.py roms/game.gb --frames 3600 --random -o game.trace
 ```
 
 ### 2. Coverage Analyzer
+
 Audit your recompiled code against a dynamic trace to see exactly what instructions are missing.
+
 ```bash
 python3 tools/compare_ground_truth.py --trace game.trace output/game
 ```
@@ -289,6 +312,7 @@ ROM → Decoder → IR Builder → Analyzer → C Emitter → Output
 ```
 
 Key components:
+
 - **Decoder** (`decoder.h`): Parses raw bytes into structured opcodes
 - **IR Builder** (`ir_builder.h`): Converts opcodes to intermediate representation
 - **Analyzer** (`analyzer.h`): Builds control flow graph and tracks bank switches
@@ -318,8 +342,10 @@ This project is licensed under the MIT License.
 Contributions are welcome! Please open an issue first to discuss major changes.
 
 Areas of interest:
+
 - Game Boy Color support improvements
 - Audio accuracy enhancements
 - Performance optimizations
 - Debugging tools
 - Improve compatibility with more ROMs
+

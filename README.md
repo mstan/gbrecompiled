@@ -80,6 +80,46 @@ ninja -C output/game/build
 
 ---
 
+## Quick Setup
+
+### Automated Setup (Recommended)
+
+**macOS/Linux:**
+```bash
+# Download and run the setup script
+git clone https://github.com/arcanite24/gb-recompiled.git
+cd gb-recompiled
+chmod +x tools/setup.sh
+./tools/setup.sh
+```
+
+**Windows:**
+```bash
+# Download and run the setup script (run as Administrator)
+git clone https://github.com/arcanite24/gb-recompiled.git
+cd gb-recompiled
+powershell -ExecutionPolicy Bypass -File tools/setup.ps1
+```
+
+### Manual Setup
+
+**Prerequisites:**
+- CMake 3.15+
+- Ninja build system
+- SDL2 development libraries
+- A C/C++ compiler (Clang, GCC, or MSVC)
+
+**Building:**
+```bash
+# Clone and enter the repository
+git clone https://github.com/arcanite24/gb-recompiled.git
+cd gb-recompiled
+
+# Configure and build
+cmake -G Ninja -B build .
+ninja -C build
+```
+
 ## Usage
 
 ### Basic Recompilation
@@ -114,6 +154,14 @@ The recompiler will:
 ```
 
 ### Advanced Usage
+
+**Automated Ground Truth Workflow (Recommended):**
+For complex games (like *Pokémon Blue*) with computed jumps, use the automated workflow:
+
+```bash
+# Full automated workflow (capture trace, compile, verify coverage)
+python3 tools/run_ground_truth.py roms/pokeblue.gb
+```
 
 **Trace-Guided Recompilation (Recommended):**
 Complex games (like *Pokémon Blue*) often use computed jumps that static analysis cannot resolve. You can use execution traces to "seed" the analyzer with every instruction physically executed during a real emulated session.

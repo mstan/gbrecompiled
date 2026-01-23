@@ -7,7 +7,24 @@ Static analysis alone can struggle with "computed control flow" (e.g., jump tabl
 
 ---
 
-## Step 1: Capture Ground Truth (Dynamic)
+## Quick Start: Automated Workflow (Recommended)
+
+For most cases, use the automated workflow script:
+
+```bash
+# Full automated workflow (capture trace, compile, verify coverage)
+python3 tools/run_ground_truth.py roms/pokeblue.gb
+```
+
+This single command will:
+1. Capture a 5-minute execution trace with random input
+2. Recompile the ROM with trace-guided analysis
+3. Verify the coverage of the recompiled code
+4. Optionally refine and merge traces for better coverage
+
+## Manual Workflow Steps
+
+### Step 1: Capture Ground Truth (Dynamic)
 First, we run the original ROM in a headless PyBoy instance to record every unique instruction address executed.
 
 ```bash
@@ -18,7 +35,7 @@ python3 tools/capture_ground_truth.py roms/pokeblue.gb -o pokeblue_ground.trace 
 - **Output**: `pokeblue_ground.trace` containing `Bank:Address` pairs.
 - **Benefit**: This trace contains the "Ground Truth"—code that is guaranteed to be executable.
 
-## Step 2: Trace-Guided Recompilation
+### Step 2: Trace-Guided Recompilation
 Now, we feed this trace into the recompiler. The recompiler will use these addresses as "roots" for its recursive descent analysis.
 
 ```bash
@@ -28,7 +45,7 @@ Now, we feed this trace into the recompiler. The recompiler will use these addre
 
 - **What happens**: The recompiler loads the trace and immediately marks those addresses as function entry points. It then follows every subsequent branch from those points, discovering much more code than a blind scan would.
 
-## Step 3: Verify Coverage
+### Step 3: Verify Coverage
 Use the comparison tool to see how much of the dynamic execution was successfully recompiled.
 
 ```bash
@@ -61,6 +78,7 @@ If you find the game crashes in a specific section that wasn't covered by the ra
 
 | Tool | Purpose |
 |------|---------|
+| `tools/run_ground_truth.py` | **Automated workflow** - captures trace, recompiles, and verifies coverage in one command. |
 | `tools/capture_ground_truth.py` | Runs original ROM in PyBoy to generate a `.trace` file. |
 | `gbrecomp --use-trace <file>` | Loads a `.trace` file to seed function discovery. |
 | `tools/compare_ground_truth.py` | Measures coverage of a recompiled project against a `.trace`. |

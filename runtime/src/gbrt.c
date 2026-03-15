@@ -1230,16 +1230,18 @@ void gbrt_log_interrupt_service(GBContext* ctx,
             ie_reg);
 }
 
-__attribute__((weak)) void gb_dispatch(GBContext* ctx, uint16_t addr) { 
+#ifndef _MSC_VER
+__attribute__((weak)) void gb_dispatch(GBContext* ctx, uint16_t addr) {
     gbrt_log_trace(ctx, (addr < 0x4000) ? 0 : ctx->rom_bank, addr);
-    ctx->pc = addr; 
-    gb_interpret(ctx, addr); 
+    ctx->pc = addr;
+    gb_interpret(ctx, addr);
 }
 
-__attribute__((weak)) void gb_dispatch_call(GBContext* ctx, uint16_t addr) { 
+__attribute__((weak)) void gb_dispatch_call(GBContext* ctx, uint16_t addr) {
     gbrt_log_trace(ctx, (addr < 0x4000) ? 0 : ctx->rom_bank, addr);
-    ctx->pc = addr; 
+    ctx->pc = addr;
 }
+#endif
 
 void gbrt_note_dispatch_fallback(GBContext* ctx, uint8_t bank, uint16_t addr) {
     if (!ctx) return;

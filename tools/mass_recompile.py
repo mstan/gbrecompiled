@@ -193,13 +193,14 @@ def process_single_rom(zip_path: str, run_test: bool = False, limit: int = 10000
     return RomResult(zip_name, game_title, md5, "SUCCESS", None, time.time() - start_time)
 
 def generate_report(results):
-    report_path = os.path.join(PROJECT_ROOT, "COMPATIBILITY.md")
+    report_path = os.path.join(LOGS_DIR, "mass_recompile_report.md")
     
     total = len(results)
     success = sum(1 for r in results if r.status == "SUCCESS")
     
     with open(report_path, "w") as f:
-        f.write("# GB Recompiled Compatibility Report\n\n")
+        f.write("# GB Recompiled Bulk Recompile Report\n\n")
+        f.write("> This is a naive batch recompilation/run report for triage only. It is not a playability or compatibility guarantee.\n\n")
         f.write(f"**Total ROMs Processed:** {total}\n")
         f.write(f"**Success Rate:** {success}/{total} ({success/total*100:.2f}%)\n\n")
         

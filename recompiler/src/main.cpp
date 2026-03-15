@@ -51,6 +51,40 @@ void print_usage(const char* program) {
     std::cout << "  -h, --help            Show this help\n";
 }
 
+static bool detect_oam_dma_overlay(const gbrecomp::ROM& rom,
+                                   gbrecomp::AnalyzerOptions::RamOverlay& overlay) {
+    const std::vector<uint8_t>& data = rom.bytes();
+    const std::vector<uint8_t> wait_pattern = {0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9};
+
+    auto it = std::search(data.begin(), data.end(), wait_pattern.begin(), wait_pattern.end());
+    if (it == data.end()) {
+        return false;
+    }
+
+    size_t rom_idx = static_cast<size_t>(std::distance(data.begin(), it));
+    size_t overlay_start = rom_idx;
+    uint16_t overlay_size = static_cast<uint16_t>(wait_pattern.size());
+
+    // Many games copy the full helper starting with LD A,imm8 before the
+    // standard wait loop body. If that prefix is present, compile the actual
+    // copied entry point instead of the inner loop.
+    if (rom_idx >= 2 && data[rom_idx - 2] == 0x3E) {
+        overlay_start = rom_idx - 2;
+        overlay_size += 2;
+    }
+
+    uint8_t bank = static_cast<uint8_t>(overlay_start / 0x4000);
+    uint16_t offset = static_cast<uint16_t>(overlay_start % 0x4000);
+    if (bank > 0) {
+        offset = static_cast<uint16_t>(offset + 0x4000);
+    }
+
+    overlay.ram_addr = 0xFF80;
+    overlay.rom_addr = gbrecomp::AnalysisResult::make_addr(bank, offset);
+    overlay.size = overlay_size;
+    return true;
+}
+
 std::string sanitize_prefix(const std::string& name) {
     std::string result = name;
     for (char& c : result) {
@@ -206,25 +240,18 @@ int main(int argc, char* argv[]) {
     analyze_opts.aggressive_scan = aggressive_scan;
     analyze_opts.trace_file_path = trace_file_path;
 
-    // Detect standard HRAM DMA routine
-    // Routine: LDH (46),A; LD A,28; DEC A; JR NZ,-3; RET
-    const std::vector<uint8_t> pattern = {0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9};
-    const std::vector<uint8_t>& data = rom.bytes();
-    
-    auto it = std::search(data.begin(), data.end(), pattern.begin(), pattern.end());
-    if (it != data.end()) {
-            size_t rom_idx = std::distance(data.begin(), it);
-            uint8_t bank = rom_idx / 0x4000;
-            uint16_t offset = rom_idx % 0x4000;
-            if (bank > 0) offset += 0x4000;
-        
-            std::cout << "Detected OAM DMA routine at ROM 0x" << std::hex << rom_idx 
-                        << " (Bank " << (int)bank << ":0x" << offset << "). Mapping to HRAM 0xFF80.\n" << std::dec;
-            
-            gbrecomp::AnalyzerOptions::RamOverlay overlay;
-            overlay.ram_addr = 0xFF80;
-            overlay.rom_addr = gbrecomp::AnalysisResult::make_addr(bank, offset);
-            overlay.size = 8;
+    gbrecomp::AnalyzerOptions::RamOverlay overlay;
+    if (detect_oam_dma_overlay(rom, overlay)) {
+            uint8_t bank = static_cast<uint8_t>(overlay.rom_addr >> 16);
+            uint16_t offset = static_cast<uint16_t>(overlay.rom_addr & 0xFFFF);
+            size_t rom_idx = (offset < 0x4000)
+                ? offset
+                : static_cast<size_t>(bank) * 0x4000 + (offset - 0x4000);
+
+            std::cout << "Detected OAM DMA routine at ROM 0x" << std::hex << rom_idx
+                        << " (Bank " << (int)bank << ":0x" << offset << ", size "
+                        << std::dec << overlay.size << "). Mapping to HRAM 0xFF80.\n";
+
             analyze_opts.ram_overlays.push_back(overlay);
     }
 

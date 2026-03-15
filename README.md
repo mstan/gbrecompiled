@@ -2,7 +2,6 @@
 
 A **static recompiler** for original GameBoy ROMs that translates Z80 assembly directly into portable, modern C code. Run your favorite classic games without a traditional emulator—just compile and play.
 
-![Compatibility](https://img.shields.io/badge/compatibility-98.9%25-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
@@ -29,7 +28,7 @@ Pre-built binaries are available on the [Releases](https://github.com/arcanite24
 
 ## Features
 
-- **High Compatibility**: Successfully recompiles **98.9%** of the tested ROM library (1592/1609 ROMs) **MOST OF THE GAMES ARE NOT FULLY PLAYABLE YET**
+- **Validated Against Real Games**: compatibility is tracked with manually tested ROMs, differential checks, and exact ROM hashes instead of bulk recompile-only numbers
 - **Native Performance**: Generated C code compiles to native machine code
 - **Accurate Runtime**:
   - Cycle-accurate instruction emulation (including HALT bug)
@@ -340,29 +339,31 @@ The generated code links against `libgbrt`, which provides:
 
 ## Compatibility
 
-See [COMPATIBILITY.md](COMPATIBILITY.md) for the full test report.
-Recompilation doesn't mean fully playable. Most of the games are not fully playable yet and some are not even playable.
+This is a living list, not a claim that every ROM that recompiles is fully compatible. If you want to reproduce the same behavior or compare logs, make sure your ROM hash matches one of the entries below. On macOS use `md5 <rom>`; on Linux use `md5sum <rom>`.
 
-| Status | Count | Percentage |
-|--------|-------|------------|
-| ✅ SUCCESS | 1592 | 98.94% |
-| ❌ RECOMPILE_FAIL | 1 | 0.06% |
-| ⚠️ RUN_TIMEOUT | 1 | 0.06% |
-| 🔧 EXCEPTION | 7 | 0.44% |
+| Game | MD5 | Current state | Notes |
+|------|-----|---------------|-------|
+| Tetris | `982ed5d2b12a0377eb14bcdc4123744e` | Playable | Rebuilt repeatedly as the baseline test ROM; differential smoke-tested after recent runtime and recompiler changes |
+| Pokemon Blue | `50927e843568814f7ed45ec4f944bd8b` | Playable | Audio, PPU timing, slowdown, and recompiler correctness issues were investigated and fixed against this dump |
+| Donkey Kong Land | `89bb0d67d5af35c2ebf09d9aef2e34ad` | Playable | Startup freeze, DMA/HRAM behavior, and raster flicker issues were debugged and fixed against this dump |
+| Kirby's Dream Land | `a66e4918edcd042ec171a57fe3ce36c3` | Playable | HRAM DMA overlay detection was fixed so Kirby renders correctly |
+| The Legend of Zelda: Link's Awakening | `c4360f89e2b09a21307fe864258ecab7` | Playable | Built, launched, and smoke-tested successfully |
+| Castlevania: The Adventure | `0b4410c6b94d6359dba5609ae9a32909` | Playable | Built, launched, and smoke-tested successfully |
+| Super Mario Land | `b48161623f12f86fec88320166a21fce` | Playable | Startup `HALT`/`STOP` differential mismatch was fixed for better timing accuracy |
 
-Manually confirmed working examples:
+If you report a game-specific bug, please include:
 
-- **Tetris (Japan) (En)** (md5: 084f1e457749cdec86183189bd88ce69)
-  - Title screen sometimes glitches
-  - After completing a line, you need to pause and resume to fix the graphics
-  - Audio glitches
+- The ROM filename and MD5
+- The exact command you ran
+- A `--log-file` capture
+- A `--record-input` capture if the bug depends on gameplay steps
 
 ---
 
 ## Roadmap
 
 - [x] Tools to identify entry-points (Trace-Guided Analysis)
-- [ ] Tools for better graphical debugging (outputting PNGs grid instead of raw PPMs)
+- [x] Tools for better graphical debugging (outputting PNGs grid instead of raw PPMs)
 - [ ] Android builds
 - [ ] Game Boy Color support
 - [ ] Cached interpreter

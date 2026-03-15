@@ -330,6 +330,10 @@ void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
          // printf("[PPU] Frame debug: LCDC=%02X BGP=%02X\n", ppu->lcdc, ppu->bgp);
     }
 
+    if (ppu->ly == 0) {
+        gbrt_log_oam_snapshot(ctx, "scanline-0");
+    }
+
     gbrt_log_ppu_scanline(ctx,
                           ppu->ly,
                           ppu->mode,

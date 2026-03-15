@@ -612,6 +612,7 @@ void gbrt_log_ppu_register_write(GBContext* ctx,
                                  uint8_t new_value,
                                  uint8_t ly,
                                  uint8_t mode);
+void gbrt_log_oam_snapshot(GBContext* ctx, const char* reason);
 void gbrt_log_stat_irq_check(GBContext* ctx,
                              const char* reason,
                              uint8_t ly,

@@ -1290,6 +1290,10 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             if (next_pc_val != 0) {
                  emit_indent(); out << "    ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
             }
+            if (options.emit_cycle_counting && group_cycles > 0) {
+                emit_indent(); out << "    gb_tick(ctx, " << (int)group_cycles << ");\n";
+                emit_indent(); out << "    if (ctx->stopped) return;\n";
+            }
             emit_indent(); out << "    return; /* Force interpreter to handle bug */\n";
             emit_indent(); out << "} else {\n";
             emit_indent(); out << "    /* Update PC to next instruction so interrupt return address is correct */\n";
@@ -1297,12 +1301,25 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                  emit_indent(); out << "    ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
             }
             emit_indent(); out << "    gb_halt(ctx);\n";
-            emit_indent(); out << "    if (ctx->halted) return;\n";
+            if (options.emit_cycle_counting && group_cycles > 0) {
+                emit_indent(); out << "    gb_tick(ctx, " << (int)group_cycles << ");\n";
+                emit_indent(); out << "    if (ctx->stopped) return;\n";
+            }
+            emit_indent(); out << "    return;\n";
             emit_indent(); out << "}\n";
             break;
             
         case ir::Opcode::STOP:
+            if (next_pc_val != 0) {
+                out << "ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
+                emit_indent();
+            }
             out << "gb_stop(ctx);\n";
+            if (options.emit_cycle_counting && group_cycles > 0) {
+                emit_indent(); out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
+                emit_indent(); out << "if (ctx->stopped) return;\n";
+            }
+            emit_indent(); out << "return;\n";
             break;
             
         case ir::Opcode::DI:
@@ -1520,11 +1537,11 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         if (options.emit_cycle_counting && instr.cycles > 0) {
             emit_indent();
             out << "gb_tick(ctx, " << (int)instr.cycles << ");\n";
-            emit_indent();
-            out << "if (ctx->stopped) return;\n";
         }
 
         if (is_last_in_group) {
+            emit_indent();
+            out << "if (ctx->stopped) return;\n";
             emit_indent();
             out << "if (ctx->single_step_mode) return;\n";
         }

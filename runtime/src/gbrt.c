@@ -1112,6 +1112,35 @@ void gbrt_log_ppu_register_write(GBContext* ctx,
             new_value);
 }
 
+void gbrt_log_oam_snapshot(GBContext* ctx, const char* reason) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[OAM-SNAPSHOT] frame=%llu cyc=%u pc=%04X bank=%u ly=%u mode=%u reason=%s\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ctx->pc,
+            (ctx->pc < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            ctx->io[0x44],
+            ctx->io[0x41] & 0x03,
+            reason ? reason : "-");
+
+    for (int i = 0; i < 40; i++) {
+        const uint8_t* sprite = ctx->oam + (i * 4);
+        fprintf((FILE*)ctx->ppu_trace_file,
+                "[OAM] frame=%llu idx=%02d y=%02X x=%02X tile=%02X flags=%02X\n",
+                (unsigned long long)frame_index,
+                i,
+                sprite[0],
+                sprite[1],
+                sprite[2],
+                sprite[3]);
+    }
+}
+
 void gbrt_log_stat_irq_check(GBContext* ctx,
                              const char* reason,
                              uint8_t ly,

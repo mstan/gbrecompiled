@@ -454,6 +454,14 @@ void gb_audio_get_samples(void* audio, int16_t* left, int16_t* right) {
 uint8_t gb_audio_read(GBContext* ctx, uint16_t addr) {
     GBAudio* apu = (GBAudio*)ctx->apu;
     if (!apu) return 0xFF;
+
+    if (addr >= 0xFF30 && addr <= 0xFF3F) {
+        if (apu->ch3.enabled) {
+            /* On DMG, if channel 3 is enabled, reading Wave RAM returns the byte currently being accessed */
+            return apu->ch3.wave_ram[apu->ch3.wave_pos / 2];
+        }
+        return apu->ch3.wave_ram[addr - 0xFF30];
+    }
     
     /* If audio is disabled via NR52 bit 7, most registers are 0xFF? 
        Actually, on DMG they are mostly readable. Stick to mask behavior for now. */
@@ -502,14 +510,6 @@ uint8_t gb_audio_read(GBContext* ctx, uint16_t addr) {
             return val;
         }
         
-        /* Wave RAM */
-        case 0xFF30 ... 0xFF3F:
-            if (apu->ch3.enabled) {
-                /* On DMG, if channel 3 is enabled, reading Wave RAM returns the byte currently being accessed */
-                return apu->ch3.wave_ram[apu->ch3.wave_pos / 2];
-            }
-            return apu->ch3.wave_ram[addr - 0xFF30];
-            
         default: return 0xFF;
     }
 }
@@ -526,6 +526,16 @@ void gb_audio_write(GBContext* ctx, uint16_t addr, uint8_t value) {
     
     /* If APU disabled (NR52 bit 7 off), write to registers ignored unless it's NR52 or Wave RAM */
     bool power_on = (apu->nr52 & 0x80) != 0;
+
+    if (addr >= 0xFF30 && addr <= 0xFF3F) {
+        /* If channel 3 is enabled, writes to Wave RAM are ignored (or weird on DMG).
+         * For simplicity/safety, we block writes if enabled.
+         */
+        if (!apu->ch3.enabled) {
+            apu->ch3.wave_ram[addr - 0xFF30] = value;
+        }
+        return;
+    }
     
     if (addr == 0xFF26) {
         /* NR52 - Power Control */
@@ -676,15 +686,6 @@ void gb_audio_write(GBContext* ctx, uint16_t addr, uint8_t value) {
         case 0xFF24: apu->nr50 = value; break;
         case 0xFF25: apu->nr51 = value; break;
         
-        /* Wave RAM */
-        case 0xFF30 ... 0xFF3F:
-            /* If channel 3 is enabled, writes to Wave RAM are ignored (or weird on DMG)
-             * For simplicity/safety, we block writes if enabled. 
-             */
-            if (!apu->ch3.enabled) {
-                apu->ch3.wave_ram[addr - 0xFF30] = value;
-            }
-            break;
     }
 }
 

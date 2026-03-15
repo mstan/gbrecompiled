@@ -29,7 +29,7 @@ void print_banner() {
   \____|\__,_|_| |_| |_|\___|____/ \___/ \__, |_| \_\___|\___\___/|_| |_| |_| .__/|_|_|\___|\__,_|
                                          |___/                              |_|                   
 )" << '\n';
-    std::cout << "  GameBoy Static Recompiler v0.1.0\n";
+    std::cout << "  GameBoy Static Recompiler v0.0.2\n";
     std::cout << "  https://github.com/arcanite24/gb-recompiled\n\n";
 }
 

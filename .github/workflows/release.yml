@@ -1,8 +1,9 @@
 name: Build and Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -153,7 +154,7 @@ jobs:
   upload-release:
     needs: [build-linux, build-macos, build-macos-arm, build-windows]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     permissions:
       contents: write
     steps:
@@ -165,6 +166,9 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          generate_release_notes: true
           files: |
             artifacts/gb-recompiled-linux-x64/gb-recompiled-linux-x64.tar.gz
             artifacts/gb-recompiled-macos-x64/gb-recompiled-macos-x64.tar.gz

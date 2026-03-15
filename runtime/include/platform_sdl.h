@@ -67,7 +67,10 @@ void gb_platform_present_framebuffer(const uint32_t* framebuffer);
 void gb_platform_render_lcd_off_frame(void);
 
 /**
- * @brief Set input automation script (format: "frame:buttons:duration,...")
+ * @brief Set input automation script.
+ *
+ * Legacy entries use "frame:buttons:duration". Cycle-anchored entries use
+ * "c<cycle>:buttons:<duration_cycles>".
  */
 void gb_platform_set_input_script(const char* script);
 
@@ -80,6 +83,12 @@ void gb_platform_set_input_record_file(const char* path);
  * @brief Set frames to dump screenshots (format: "frame1,frame2,...")
  */
 void gb_platform_set_dump_frames(const char* frames);
+
+/**
+ * @brief Dump every host present that occurs while one of the selected guest
+ * frames is current (format: "frame1,frame2,...")
+ */
+void gb_platform_set_dump_present_frames(const char* frames);
 
 /**
  * @brief Set filename prefix for screenshots

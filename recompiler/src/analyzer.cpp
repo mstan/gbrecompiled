@@ -473,6 +473,20 @@ static bool is_likely_direct_branch_target(const ROM& rom, uint8_t bank, uint16_
     return is_likely_valid_code(rom, bank, addr) != 0;
 }
 
+static bool is_bank_entry_stub(const ROM& rom, uint8_t bank, uint16_t addr) {
+    Decoder decoder(rom);
+    Instruction instr = decoder.decode(addr, bank);
+    if (instr.type == InstructionType::UNDEFINED || instr.type == InstructionType::INVALID) {
+        return false;
+    }
+
+    if (!(instr.is_jump || instr.is_call || instr.is_return || instr.type == InstructionType::JP_HL)) {
+        return false;
+    }
+
+    return is_likely_direct_branch_target(rom, bank, addr);
+}
+
 /**
  * @brief Scan for 16-bit pointers that likely lead to code
  */
@@ -598,15 +612,25 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     if (rom.header().mbc_type != MBCType::NONE && options.analyze_all_banks) {
         std::cerr << "Analyzing all " << known_banks.size() << " banks\n";
         for (uint8_t bank : known_banks) {
-                if (bank > 0) {
-                    if (is_likely_valid_code(rom, bank, 0x4000)) {
-                        work_queue.push({make_address(bank, 0x4000), -1, -1, -1, -1, -1, -1, -1, -1, bank});
-                        result.call_targets.insert(make_address(bank, 0x4000));
-                        result.strong_call_targets.insert(make_address(bank, 0x4000));
-                    } else {
-                        // std::cout << "[INFO] Skipping likely data bank " << (int)bank << " at 0x4000\n";
-                    }
-                }
+            if (bank == 0) continue;
+
+            bool seeded_bank = false;
+            for (uint16_t addr = 0x4000; addr < 0x4008; addr++) {
+                if (!is_bank_entry_stub(rom, bank, addr)) continue;
+
+                uint32_t target = make_address(bank, addr);
+                work_queue.push({target, -1, -1, -1, -1, -1, -1, -1, -1, bank});
+                result.call_targets.insert(target);
+                result.strong_call_targets.insert(target);
+                seeded_bank = true;
+            }
+
+            if (!seeded_bank && is_likely_valid_code(rom, bank, 0x4000)) {
+                uint32_t target = make_address(bank, 0x4000);
+                work_queue.push({target, -1, -1, -1, -1, -1, -1, -1, -1, bank});
+                result.call_targets.insert(target);
+                result.strong_call_targets.insert(target);
+            }
         }
     }
     
@@ -971,7 +995,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 }
 
                 if (target_valid) {
-                    if (target >= 0x4000 && target <= 0x7FFF) {
+                    if ((target >= 0x4000 && target <= 0x7FFF) || tbank != bank) {
                         result.call_targets.insert(make_address(tbank, target));
                         result.strong_call_targets.insert(make_address(tbank, target));
                     }
@@ -1156,29 +1180,37 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             const Instruction& instr = result.instructions[it->second];
             
             block.end_address = get_offset(curr) + instr.length;
-            
+
             // Track successors for control flow
             if (instr.is_jump) {
                 if (instr.type == InstructionType::JP_NN || instr.type == InstructionType::JP_CC_NN) {
-                    block.successors.push_back(instr.imm16);
+                    uint8_t succ_bank = instr.resolved_target_bank;
+                    if (succ_bank == 255) {
+                        succ_bank = (instr.imm16 < 0x4000) ? 0 : block.bank;
+                    }
+                    uint32_t succ_addr = make_address(succ_bank, instr.imm16);
+                    block.successors.push_back(succ_addr);
+                    if (succ_bank != block.bank) {
+                        block.has_cross_bank_successor = true;
+                    }
                 } else if (instr.type == InstructionType::JR_N || instr.type == InstructionType::JR_CC_N) {
                     uint16_t target = get_offset(curr) + instr.length + instr.offset;
-                    block.successors.push_back(target);
+                    block.successors.push_back(make_address(block.bank, target));
                 }
                 // Conditional jumps also fall through
                 if (instr.is_conditional) {
-                    block.successors.push_back(get_offset(curr) + instr.length);
+                    block.successors.push_back(make_address(block.bank, get_offset(curr) + instr.length));
                 }
             } else if (instr.is_return && instr.is_conditional) {
                 // Conditional returns fall through if condition is false
-                block.successors.push_back(get_offset(curr) + instr.length);
+                block.successors.push_back(make_address(block.bank, get_offset(curr) + instr.length));
             }
             
             // Check if this ends the block
             if (instr.is_jump || instr.is_return || instr.is_call) {
                 // CALLs fall through to next instruction after return
                 if (instr.is_call) {
-                    block.successors.push_back(get_offset(curr) + instr.length);
+                    block.successors.push_back(make_address(block.bank, get_offset(curr) + instr.length));
                 }
                 break;
             }
@@ -1188,7 +1220,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             // Check if next instruction starts a new block
             if (block_starts.count(curr)) {
                 // Fall through to the new block - add as successor
-                block.successors.push_back(get_offset(curr));
+                block.successors.push_back(curr);
                 break;
             }
         }
@@ -1240,8 +1272,11 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             }
             
             // Follow successors
-            for (uint16_t succ : blk->second.successors) {
-                uint32_t succ_addr = make_address(blk->second.bank, succ);
+            for (uint32_t succ_addr : blk->second.successors) {
+                if (get_bank(succ_addr) != func.bank) {
+                    func.crosses_banks = true;
+                    continue;
+                }
                 if (!func_visited.count(succ_addr)) {
                     func_queue.push(succ_addr);
                 }

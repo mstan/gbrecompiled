@@ -28,6 +28,124 @@ uint64_t gbrt_instruction_count = 0;
 uint64_t gbrt_instruction_limit = 0;
 
 static char* gbrt_trace_filename = NULL;
+static bool gbrt_ppu_trace_config_loaded = false;
+static char* gbrt_ppu_trace_filename = NULL;
+static uint64_t gbrt_ppu_trace_start_frame = 0;
+static uint64_t gbrt_ppu_trace_end_frame = 0;
+
+static inline void gb_sync(GBContext* ctx);
+
+static void gbrt_load_ppu_trace_config(void) {
+    if (gbrt_ppu_trace_config_loaded) {
+        return;
+    }
+
+    gbrt_ppu_trace_config_loaded = true;
+
+    const char* trace_path = getenv("GBRT_PPU_TRACE");
+    if (trace_path && trace_path[0] != '\0') {
+        gbrt_ppu_trace_filename = strdup(trace_path);
+    }
+
+    const char* frame_spec = getenv("GBRT_PPU_TRACE_FRAMES");
+    if (!frame_spec || frame_spec[0] == '\0') {
+        return;
+    }
+
+    char* spec_copy = strdup(frame_spec);
+    if (!spec_copy) {
+        return;
+    }
+
+    char* dash = strchr(spec_copy, '-');
+    if (dash) {
+        *dash = '\0';
+        gbrt_ppu_trace_start_frame = strtoull(spec_copy, NULL, 10);
+        gbrt_ppu_trace_end_frame = strtoull(dash + 1, NULL, 10);
+    } else {
+        gbrt_ppu_trace_start_frame = strtoull(spec_copy, NULL, 10);
+        gbrt_ppu_trace_end_frame = gbrt_ppu_trace_start_frame;
+    }
+
+    free(spec_copy);
+}
+
+static bool gbrt_ppu_trace_enabled_for_frame(const GBContext* ctx, uint64_t frame_index) {
+    if (!ctx || !ctx->ppu_trace_file || !gbrt_ppu_trace_filename) {
+        return false;
+    }
+
+    if (gbrt_ppu_trace_start_frame == 0 && gbrt_ppu_trace_end_frame == 0) {
+        return true;
+    }
+
+    return frame_index >= gbrt_ppu_trace_start_frame && frame_index <= gbrt_ppu_trace_end_frame;
+}
+
+static void gbrt_log_oam_write(GBContext* ctx,
+                               uint16_t addr,
+                               uint8_t value,
+                               uint8_t accepted,
+                               const char* reason) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[OAM-WRITE] frame=%llu cyc=%u pc=%04X bank=%u ly=%u mode=%u addr=%04X val=%02X accepted=%u reason=%s\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ctx->pc,
+            (ctx->pc < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            ctx->io[0x44],
+            ctx->io[0x41] & 0x03,
+            addr,
+            value,
+            accepted,
+            reason ? reason : "-");
+}
+
+static void gbrt_log_dma_start(GBContext* ctx, uint8_t source_high) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[DMA-START] frame=%llu cyc=%u pc=%04X bank=%u ly=%u mode=%u src=%02X00\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ctx->pc,
+            (ctx->pc < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            ctx->io[0x44],
+            ctx->io[0x41] & 0x03,
+            source_high);
+}
+
+static void gbrt_log_vram_write(GBContext* ctx,
+                                uint16_t addr,
+                                uint8_t value,
+                                uint8_t accepted,
+                                const char* reason) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[VRAM-WRITE] frame=%llu cyc=%u pc=%04X bank=%u ly=%u mode=%u addr=%04X val=%02X accepted=%u reason=%s\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ctx->pc,
+            (ctx->pc < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            ctx->io[0x44],
+            ctx->io[0x41] & 0x03,
+            addr,
+            value,
+            accepted,
+            reason ? reason : "-");
+}
 
 
 /* ============================================================================
@@ -35,6 +153,8 @@ static char* gbrt_trace_filename = NULL;
  * ========================================================================== */
 
 GBContext* gb_context_create(const GBConfig* config) {
+    gbrt_load_ppu_trace_config();
+
     GBContext* ctx = (GBContext*)calloc(1, sizeof(GBContext));
     if (!ctx) return NULL;
     
@@ -68,6 +188,17 @@ GBContext* gb_context_create(const GBConfig* config) {
         }
     }
 
+    if (gbrt_ppu_trace_filename) {
+        ctx->ppu_trace_file = fopen(gbrt_ppu_trace_filename, "w");
+        if (ctx->ppu_trace_file) {
+            fprintf(stderr,
+                    "[GBRT] Tracing PPU state to %s (frames %llu-%llu)\n",
+                    gbrt_ppu_trace_filename,
+                    (unsigned long long)gbrt_ppu_trace_start_frame,
+                    (unsigned long long)gbrt_ppu_trace_end_frame);
+        }
+    }
+
     return ctx;
 }
 
@@ -80,6 +211,7 @@ void gb_context_destroy(GBContext* ctx) {
     }
     
     if (ctx->trace_file) fclose((FILE*)ctx->trace_file);
+    if (ctx->ppu_trace_file) fclose((FILE*)ctx->ppu_trace_file);
     free(ctx->wram);
     free(ctx->vram);
     free(ctx->oam);
@@ -118,6 +250,7 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->used_dispatch_fallback = 0;
     ctx->dispatch_fallback_bank = 0;
     ctx->dispatch_fallback_addr = 0;
+    ctx->completed_frames = 0;
     ctx->frame_dispatch_fallbacks = 0;
     ctx->total_dispatch_fallbacks = 0;
     ctx->frame_first_fallback_bank = 0;
@@ -343,6 +476,7 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
     
     /* VRAM (0x8000-0x9FFF) */
     if (addr < 0xA000) {
+        gb_sync(ctx);
         if ((ctx->io[0x41] & 3) == 3) return 0xFF;
         return ctx->vram[(ctx->vram_bank * VRAM_SIZE) + (addr - 0x8000)];
     }
@@ -385,6 +519,7 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
     if (addr < 0xE000) return ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)];
     if (addr < 0xFE00) return gb_read8(ctx, addr - 0x2000);
     if (addr < 0xFEA0) {
+        gb_sync(ctx);
         uint8_t stat = ctx->io[0x41] & 3;
         if (stat == 2 || stat == 3) return 0xFF;
         return ctx->oam[addr - 0xFE00];
@@ -402,7 +537,10 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
             return res;
         }
         if (addr == 0xFF04) return (uint8_t)(ctx->div_counter >> 8);
-        if (addr >= 0xFF40 && addr <= 0xFF4B) return ppu_read_register((GBPPU*)ctx->ppu, addr);
+        if (addr >= 0xFF40 && addr <= 0xFF4B) {
+            gb_sync(ctx);
+            return ppu_read_register((GBPPU*)ctx->ppu, addr);
+        }
         if (addr >= 0xFF10 && addr <= 0xFF3F) return gb_audio_read(ctx, addr);
         return ctx->io[addr - 0xFF00];
     }
@@ -545,10 +683,15 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         return;
     }
     if (addr < 0xA000) {
-        /* VRAM Write - Check STAT mode 3 */
-        // if ((ctx->io[0x41] & 3) == 3) return;
-        
+        gb_sync(ctx);
+        /* VRAM is not CPU-accessible during mode 3. */
+        if ((ctx->io[0x41] & 3) == 3) {
+            gbrt_log_vram_write(ctx, addr, value, 0, "mode-blocked");
+            return;
+        }
+
         ctx->vram[(ctx->vram_bank * VRAM_SIZE) + (addr - 0x8000)] = value;
+        gbrt_log_vram_write(ctx, addr, value, 1, "cpu");
         return;
     }
     if (addr < 0xC000) {
@@ -591,16 +734,35 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
     if (addr < 0xD000) { ctx->wram[addr - 0xC000] = value; return; }
     if (addr < 0xE000) { ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)] = value; return; }
     if (addr < 0xFE00) { gb_write8(ctx, addr - 0x2000, value); return; }
-    if (addr < 0xFEA0) { 
-        /* OAM Write - Check STAT mode 2 or 3 */
+    if (addr < 0xFEA0) {
+        gb_sync(ctx);
+        /* OAM is not CPU-accessible during modes 2 and 3. */
         uint8_t stat = ctx->io[0x41] & 3;
-        // if (stat == 2 || stat == 3) return;
-        
-        ctx->oam[addr - 0xFE00] = value; 
-        return; 
+        if (stat == 2 || stat == 3) {
+            gbrt_log_oam_write(ctx, addr, value, 0, "mode-blocked");
+            return;
+        }
+
+        ctx->oam[addr - 0xFE00] = value;
+        gbrt_log_oam_write(ctx, addr, value, 1, "cpu");
+        return;
     }
     if (addr < 0xFF00) return;
     if (addr < 0xFF80) {
+        if (addr == 0xFF46) {
+            gb_sync(ctx);
+            /* OAM DMA: start transfer and expose the written source page. */
+            if (ctx->ppu) {
+                ((GBPPU*)ctx->ppu)->dma = value;
+            }
+            ctx->io[0x46] = value;
+            gbrt_log_dma_start(ctx, value);
+            ctx->dma.source_high = value;
+            ctx->dma.progress = 0;
+            ctx->dma.cycles_remaining = 640;
+            ctx->dma.active = 1;
+            return;
+        }
         if (addr >= 0xFF40 && addr <= 0xFF4B) { ppu_write_register((GBPPU*)ctx->ppu, ctx, addr, value); return; }
         if (addr >= 0xFF10 && addr <= 0xFF3F) { gb_audio_write(ctx, addr, value); return; }
         if (addr == 0xFF04) { 
@@ -635,18 +797,12 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
              }
             return; 
         }
-        if (addr == 0xFF46) {
-             /* OAM DMA: Start transfer (takes 160 M-cycles = 640 T-cycles) */
-             /* Prevent DMA from invalid regions if needed, but hardware allows it (reads FF/garbage) */
-             ctx->dma.source_high = value;
-             ctx->dma.progress = 0;
-             ctx->dma.cycles_remaining = 640;
-             ctx->dma.active = 1;
-             return;
-        }
         if (addr == 0xFF02 && (value & 0x80)) {
             printf("%c", ctx->io[0x01]); fflush(stdout);
             ctx->io[0x0F] |= 0x08;
+        }
+        if (addr >= 0xFF40 && addr <= 0xFF4B) {
+            gb_sync(ctx);
         }
         ctx->io[addr - 0xFF00] = value;
         return;
@@ -802,33 +958,86 @@ void gbrt_jump_hl(GBContext* ctx) { ctx->pc = ctx->hl; }
 void gb_rst(GBContext* ctx, uint8_t vec) { gb_push16(ctx, ctx->pc); ctx->pc = vec; }
 
 uint8_t gbrt_try_execute_hram_stub(GBContext* ctx, uint16_t addr) {
-    if (!ctx || addr < 0xFF80 || addr > 0xFFFE) {
+    (void)ctx;
+    (void)addr;
+    /* Do not shortcut HRAM DMA helpers here.
+     *
+     * Games like Donkey Kong copy the standard OAM DMA wait routine into
+     * HRAM and call it. Returning immediately after LDH (0x46),A executes
+     * RET while DMA is still active, so the stack pop sees 0xFF and jumps
+     * to 0xFFFF. Let the interpreter execute the real HRAM bytes instead.
+     */
+    return 0;
+}
+
+uint8_t gbrt_try_execute_ram_stub(GBContext* ctx, uint16_t addr) {
+    if (!ctx) {
         return 0;
     }
 
-    /* Match the interpreter's HRAM DMA shortcut exactly:
-     * - Optional "LD A,imm" prefix to load the DMA source high byte
-     * - "LDH (0x46),A" performs DMA and immediately returns from the helper
-     */
-    if (gb_read8(ctx, addr) == 0x3E &&
-        addr <= 0xFFFC &&
-        gb_read8(ctx, (uint16_t)(addr + 2)) == 0xE0 &&
-        gb_read8(ctx, (uint16_t)(addr + 3)) == 0x46) {
-        ctx->a = gb_read8(ctx, (uint16_t)(addr + 1));
-        ctx->pc = (uint16_t)(addr + 2);
-        gb_tick(ctx, 8);
-        return 1;
+    if (ctx->dma.active) {
+        /* During OAM DMA, only HRAM is accessible and helper routines rely on
+         * real instruction timing before touching the stack again. Avoid
+         * shortcutting control flow while DMA is in flight.
+         */
+        return 0;
     }
 
-    if (gb_read8(ctx, addr) == 0xE0 &&
-        addr < 0xFFFF &&
-        gb_read8(ctx, (uint16_t)(addr + 1)) == 0x46) {
-        gb_write8(ctx, 0xFF46, ctx->a);
-        gb_ret(ctx);
-        return 1;
+    /* Only handle copied helper code from writable memory areas. */
+    bool in_wram = (addr >= 0xC000 && addr < 0xFE00);
+    bool in_hram = (addr >= 0xFF80 && addr <= 0xFFFE);
+    if (!in_wram && !in_hram) {
+        return 0;
     }
 
-    return 0;
+    uint8_t opcode = gb_read8(ctx, addr);
+    switch (opcode) {
+        case 0x00: /* NOP */
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 4);
+            return 1;
+
+        case 0xC3: { /* JP nn */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            uint16_t target = gb_read16(ctx, (uint16_t)(addr + 1));
+            ctx->pc = target;
+            gb_tick(ctx, 16);
+            return 1;
+        }
+
+        case 0xC9: /* RET */
+            gb_ret(ctx);
+            gb_tick(ctx, 16);
+            return 1;
+
+        case 0xCD: { /* CALL nn */
+            if (addr >= 0xFFFD) {
+                return 0;
+            }
+            uint16_t target = gb_read16(ctx, (uint16_t)(addr + 1));
+            gb_push16(ctx, (uint16_t)(addr + 3));
+            ctx->pc = target;
+            gb_tick(ctx, 24);
+            return 1;
+        }
+
+        case 0xD9: /* RETI */
+            gb_ret(ctx);
+            ctx->ime = 1;
+            ctx->ime_pending = 0;
+            gb_tick(ctx, 16);
+            return 1;
+
+        case 0xE9: /* JP HL */
+            ctx->pc = ctx->hl;
+            gb_tick(ctx, 4);
+            return 1;
+
+        default:
+            return 0;
+    }
 }
 
 void gbrt_set_trace_file(const char* filename) {
@@ -841,6 +1050,155 @@ void gbrt_log_trace(GBContext* ctx, uint16_t bank, uint16_t addr) {
     if (ctx->trace_entries_enabled && ctx->trace_file) {
         fprintf((FILE*)ctx->trace_file, "%d:%04x\n", (int)bank, (int)addr);
     }
+}
+
+void gbrt_log_ppu_scanline(GBContext* ctx,
+                           uint8_t ly,
+                           uint8_t mode,
+                           uint8_t lcdc,
+                           uint8_t stat,
+                           uint8_t scx,
+                           uint8_t scy,
+                           uint8_t wx,
+                           uint8_t wy,
+                           uint8_t bgp,
+                           uint8_t obp0,
+                           uint8_t obp1,
+                           uint8_t window_line,
+                           bool window_triggered) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[PPU-LINE] frame=%llu cyc=%u ly=%u mode=%u lcdc=%02X stat=%02X scx=%u scy=%u wx=%u wy=%u bgp=%02X obp0=%02X obp1=%02X window_line=%u window_triggered=%u\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ly,
+            mode,
+            lcdc,
+            stat,
+            scx,
+            scy,
+            wx,
+            wy,
+            bgp,
+            obp0,
+            obp1,
+            window_line,
+            window_triggered ? 1u : 0u);
+}
+
+void gbrt_log_ppu_register_write(GBContext* ctx,
+                                 uint16_t addr,
+                                 uint8_t old_value,
+                                 uint8_t new_value,
+                                 uint8_t ly,
+                                 uint8_t mode) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[PPU-WRITE] frame=%llu cyc=%u ly=%u mode=%u addr=%04X old=%02X new=%02X\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ly,
+            mode,
+            addr,
+            old_value,
+            new_value);
+}
+
+void gbrt_log_stat_irq_check(GBContext* ctx,
+                             const char* reason,
+                             uint8_t ly,
+                             uint8_t mode,
+                             uint8_t stat,
+                             uint8_t source_state_mask,
+                             uint8_t source_enable_mask,
+                             uint8_t active_source_mask,
+                             bool previous_line_state,
+                             bool current_line_state) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[STAT-CHECK] frame=%llu cyc=%u pc=%04X bank=%u ly=%u mode=%u stat=%02X if=%02X ie=%02X reason=%s state=%X enable=%X active=%X prev=%u line=%u\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ctx->pc,
+            (ctx->pc < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            ly,
+            mode,
+            stat,
+            ctx->io[0x0F],
+            ctx->io[0x80],
+            reason ? reason : "-",
+            source_state_mask,
+            source_enable_mask,
+            active_source_mask,
+            previous_line_state ? 1u : 0u,
+            current_line_state ? 1u : 0u);
+}
+
+void gbrt_log_stat_irq_request(GBContext* ctx,
+                               const char* reason,
+                               uint8_t ly,
+                               uint8_t mode,
+                               uint8_t stat,
+                               uint8_t active_source_mask,
+                               uint8_t if_before,
+                               uint8_t if_after) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[STAT-REQ] frame=%llu cyc=%u pc=%04X bank=%u ly=%u mode=%u stat=%02X reason=%s active=%X if_before=%02X if_after=%02X\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            ctx->pc,
+            (ctx->pc < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            ly,
+            mode,
+            stat,
+            reason ? reason : "-",
+            active_source_mask,
+            if_before,
+            if_after);
+}
+
+void gbrt_log_interrupt_service(GBContext* ctx,
+                                const char* name,
+                                uint16_t vector,
+                                uint8_t if_before,
+                                uint8_t ie_reg,
+                                uint8_t interrupt_bit,
+                                uint16_t pc_before,
+                                uint16_t sp_before) {
+    uint64_t frame_index = ctx ? (ctx->completed_frames + 1) : 0;
+    if (!gbrt_ppu_trace_enabled_for_frame(ctx, frame_index)) {
+        return;
+    }
+
+    fprintf((FILE*)ctx->ppu_trace_file,
+            "[IRQ-SVC] frame=%llu cyc=%u pc=%04X bank=%u sp=%04X vec=%04X name=%s bit=%02X if_before=%02X ie=%02X\n",
+            (unsigned long long)frame_index,
+            ctx->frame_cycles,
+            pc_before,
+            (pc_before < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            sp_before,
+            vector,
+            name ? name : "-",
+            interrupt_bit,
+            if_before,
+            ie_reg);
 }
 
 __attribute__((weak)) void gb_dispatch(GBContext* ctx, uint16_t addr) { 
@@ -1140,12 +1498,22 @@ void gb_handle_interrupts(GBContext* ctx) {
     if (pending) {
         ctx->ime = 0; ctx->halted = 0;
         uint16_t vec = 0; uint8_t bit = 0;
+        const char* name = NULL;
         if (pending & 0x01) { vec = 0x0040; bit = 0x01; }
         else if (pending & 0x02) { vec = 0x0048; bit = 0x02; }
         else if (pending & 0x04) { vec = 0x0050; bit = 0x04; }
         else if (pending & 0x08) { vec = 0x0058; bit = 0x08; }
         else if (pending & 0x10) { vec = 0x0060; bit = 0x10; }
         if (vec) {
+            switch (bit) {
+                case 0x01: name = "VBLANK"; break;
+                case 0x02: name = "STAT"; break;
+                case 0x04: name = "TIMER"; break;
+                case 0x08: name = "SERIAL"; break;
+                case 0x10: name = "JOYPAD"; break;
+                default: name = "UNKNOWN"; break;
+            }
+            gbrt_log_interrupt_service(ctx, name, vec, if_reg, ie_reg, bit, ctx->pc, ctx->sp);
             ctx->io[0x0F] &= ~bit;
             
             /* ISR takes 5 M-cycles (20 T-cycles) as per Pan Docs:
@@ -1260,6 +1628,9 @@ uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
 }
 
 void gb_reset_frame(GBContext* ctx) {
+    if (ctx->frame_done || ctx->frame_cycles > 0) {
+        ctx->completed_frames++;
+    }
     ctx->frame_done = 0;
     ctx->frame_cycles = 0;
     ctx->frame_dispatch_fallbacks = 0;

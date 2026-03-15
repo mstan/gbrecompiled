@@ -50,7 +50,10 @@ static const uint32_t g_palettes[][4] = {
     { 0xFFFFB000, 0xFFCB4F0E, 0xFF800000, 0xFF330000 }  // Amber
 };
 static uint32_t g_lcd_off_framebuffer[GB_FRAMEBUFFER_SIZE];
+static uint32_t g_last_guest_framebuffer[GB_FRAMEBUFFER_SIZE];
 static bool g_lcd_off_framebuffer_initialized = false;
+static bool g_last_guest_framebuffer_valid = false;
+static uint64_t g_present_count = 0;
 
 static void update_audio_stats_from_ring(void);
 static uint32_t current_audio_underruns(void);
@@ -72,11 +75,18 @@ static uint8_t g_script_joypad_dpad = 0xFF;
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 #define MAX_SCRIPT_ENTRIES 100
+typedef enum {
+    SCRIPT_ANCHOR_FRAME = 0,
+    SCRIPT_ANCHOR_CYCLE = 1,
+} ScriptAnchor;
+
 typedef struct {
-    uint32_t start_frame;
-    uint32_t duration;
+    ScriptAnchor anchor;
+    uint64_t start;
+    uint64_t duration;
     uint8_t dpad;    /* Active LOW mask to apply (0 = Pressed) */
     uint8_t buttons; /* Active LOW mask to apply (0 = Pressed) */
 } ScriptEntry;
@@ -87,15 +97,26 @@ static FILE* g_input_record_file = NULL;
 static bool g_input_record_exit_handler_registered = false;
 static bool g_input_record_wrote_entry = false;
 static bool g_input_record_has_segment = false;
-static uint32_t g_input_record_start_frame = 0;
-static uint32_t g_input_record_duration = 0;
+static uint64_t g_input_record_start_cycle = 0;
+static uint64_t g_input_record_end_cycle = 0;
 static uint8_t g_input_record_dpad = 0xFF;
 static uint8_t g_input_record_buttons = 0xFF;
 
 #define MAX_DUMP_FRAMES 100
 static uint32_t g_dump_frames[MAX_DUMP_FRAMES];
 static int g_dump_count = 0;
+static uint32_t g_dump_present_frames[MAX_DUMP_FRAMES];
+static int g_dump_present_count = 0;
 static char g_screenshot_prefix[64] = "screenshot";
+
+static bool frame_is_selected_for_dump(const uint32_t* frames, int count, uint32_t frame) {
+    for (int i = 0; i < count; i++) {
+        if (frames[i] == frame) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* Helper to parse button string "U,D,L,R,A,B,S,T" */
 static void parse_buttons(const char* btn_str, uint8_t* dpad, uint8_t* buttons) {
@@ -138,23 +159,98 @@ static void write_buttons(FILE* file, uint8_t dpad, uint8_t buttons) {
     if (!(buttons & 0x04)) fputc('T', file);
 }
 
+static char* trim_ascii(char* text) {
+    while (text && *text && isspace((unsigned char)*text)) {
+        text++;
+    }
+    if (!text || !*text) {
+        return text;
+    }
+
+    char* end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    *end = '\0';
+    return text;
+}
+
+static bool parse_script_token(char* token, ScriptEntry* entry, char* button_buf, size_t button_buf_size) {
+    char* start_text = trim_ascii(token);
+    if (!start_text || !*start_text) {
+        return false;
+    }
+
+    char* first_colon = strchr(start_text, ':');
+    if (!first_colon) {
+        return false;
+    }
+    *first_colon = '\0';
+
+    char* buttons_text = trim_ascii(first_colon + 1);
+    char* second_colon = strchr(buttons_text, ':');
+    if (!second_colon) {
+        return false;
+    }
+    *second_colon = '\0';
+
+    char* duration_text = trim_ascii(second_colon + 1);
+    start_text = trim_ascii(start_text);
+    buttons_text = trim_ascii(buttons_text);
+    duration_text = trim_ascii(duration_text);
+    if (!*start_text || !*duration_text) {
+        return false;
+    }
+
+    entry->anchor = SCRIPT_ANCHOR_FRAME;
+    if (*start_text == 'c' || *start_text == 'C') {
+        entry->anchor = SCRIPT_ANCHOR_CYCLE;
+        start_text++;
+    } else if (*start_text == 'f' || *start_text == 'F') {
+        start_text++;
+    }
+    start_text = trim_ascii(start_text);
+    if (!*start_text) {
+        return false;
+    }
+
+    char* start_end = NULL;
+    char* duration_end = NULL;
+    entry->start = strtoull(start_text, &start_end, 10);
+    entry->duration = strtoull(duration_text, &duration_end, 10);
+    if ((start_end && *trim_ascii(start_end)) || (duration_end && *trim_ascii(duration_end))) {
+        return false;
+    }
+    if (entry->duration == 0) {
+        return false;
+    }
+
+    snprintf(button_buf, button_buf_size, "%s", buttons_text);
+    return true;
+}
+
 static void flush_input_record_segment(void) {
     if (!g_input_record_file || !g_input_record_has_segment) return;
 
-    if (g_input_record_duration > 0 && input_state_has_press(g_input_record_dpad, g_input_record_buttons)) {
+    uint64_t duration_cycles = 0;
+    if (g_input_record_end_cycle > g_input_record_start_cycle) {
+        duration_cycles = g_input_record_end_cycle - g_input_record_start_cycle;
+    }
+
+    if (duration_cycles > 0 && input_state_has_press(g_input_record_dpad, g_input_record_buttons)) {
         if (g_input_record_wrote_entry) {
             fputc(',', g_input_record_file);
         }
-        fprintf(g_input_record_file, "%u:", g_input_record_start_frame);
+        fprintf(g_input_record_file, "c%llu:", (unsigned long long)g_input_record_start_cycle);
         write_buttons(g_input_record_file, g_input_record_dpad, g_input_record_buttons);
-        fprintf(g_input_record_file, ":%u", g_input_record_duration);
+        fprintf(g_input_record_file, ":%llu", (unsigned long long)duration_cycles);
         fflush(g_input_record_file);
         g_input_record_wrote_entry = true;
     }
 
     g_input_record_has_segment = false;
-    g_input_record_start_frame = 0;
-    g_input_record_duration = 0;
+    g_input_record_start_cycle = 0;
+    g_input_record_end_cycle = 0;
     g_input_record_dpad = 0xFF;
     g_input_record_buttons = 0xFF;
 }
@@ -168,33 +264,34 @@ static void close_input_record_file(void) {
     g_input_record_wrote_entry = false;
 }
 
-static void record_manual_input_frame(uint32_t frame_index) {
+static void record_manual_input_state(uint64_t cycle_count) {
     if (!g_input_record_file) return;
 
     if (!g_input_record_has_segment) {
         g_input_record_has_segment = true;
-        g_input_record_start_frame = frame_index;
-        g_input_record_duration = 1;
+        g_input_record_start_cycle = cycle_count;
+        g_input_record_end_cycle = cycle_count;
         g_input_record_dpad = g_manual_joypad_dpad;
         g_input_record_buttons = g_manual_joypad_buttons;
         return;
     }
 
     if (g_input_record_dpad == g_manual_joypad_dpad && g_input_record_buttons == g_manual_joypad_buttons) {
-        g_input_record_duration++;
+        g_input_record_end_cycle = cycle_count;
         return;
     }
 
+    g_input_record_end_cycle = cycle_count;
     flush_input_record_segment();
     g_input_record_has_segment = true;
-    g_input_record_start_frame = frame_index;
-    g_input_record_duration = 1;
+    g_input_record_start_cycle = cycle_count;
+    g_input_record_end_cycle = cycle_count;
     g_input_record_dpad = g_manual_joypad_dpad;
     g_input_record_buttons = g_manual_joypad_buttons;
 }
 
 void gb_platform_set_input_script(const char* script) {
-    // Format: frame:buttons:duration,...
+    // Formats: frame:buttons:duration,... or ccycle:buttons:duration,...
     g_script_count = 0;
     g_script_joypad_dpad = 0xFF;
     g_script_joypad_buttons = 0xFF;
@@ -206,15 +303,20 @@ void gb_platform_set_input_script(const char* script) {
     char* token = strtok(copy, ",");
     
     while (token && g_script_count < MAX_SCRIPT_ENTRIES) {
-        uint32_t frame = 0, duration = 0;
         char btn_buf[16] = {0};
-        
-        if (sscanf(token, "%u:%15[^:]:%u", &frame, btn_buf, &duration) == 3) {
+        ScriptEntry parsed = {};
+
+        if (parse_script_token(token, &parsed, btn_buf, sizeof(btn_buf))) {
             ScriptEntry* e = &g_input_script[g_script_count++];
-            e->start_frame = frame;
-            e->duration = duration;
+            *e = parsed;
             parse_buttons(btn_buf, &e->dpad, &e->buttons);
-            printf("[AUTO] Added input: Frame %u, Btns '%s', Dur %u\n", frame, btn_buf, duration);
+            printf("[AUTO] Added input: %s %llu, Btns '%s', Dur %llu\n",
+                   e->anchor == SCRIPT_ANCHOR_CYCLE ? "Cycle" : "Frame",
+                   (unsigned long long)e->start,
+                   btn_buf,
+                   (unsigned long long)e->duration);
+        } else {
+            fprintf(stderr, "[AUTO] Ignoring invalid input token '%s'\n", token);
         }
         token = strtok(NULL, ",");
     }
@@ -229,8 +331,8 @@ void gb_platform_set_input_record_file(const char* path) {
 
     close_input_record_file();
     g_input_record_has_segment = false;
-    g_input_record_start_frame = 0;
-    g_input_record_duration = 0;
+    g_input_record_start_cycle = 0;
+    g_input_record_end_cycle = 0;
     g_input_record_dpad = 0xFF;
     g_input_record_buttons = 0xFF;
 
@@ -242,7 +344,7 @@ void gb_platform_set_input_record_file(const char* path) {
         return;
     }
 
-    fprintf(stderr, "[AUTO] Recording live input to %s\n", path);
+    fprintf(stderr, "[AUTO] Recording live input to %s (cycle anchored)\n", path);
 }
 
 void gb_platform_set_dump_frames(const char* frames) {
@@ -252,6 +354,18 @@ void gb_platform_set_dump_frames(const char* frames) {
     g_dump_count = 0;
     while (token && g_dump_count < MAX_DUMP_FRAMES) {
         g_dump_frames[g_dump_count++] = (uint32_t)strtoul(token, NULL, 10);
+        token = strtok(NULL, ",");
+    }
+    free(copy);
+}
+
+void gb_platform_set_dump_present_frames(const char* frames) {
+    if (!frames) return;
+    char* copy = strdup(frames);
+    char* token = strtok(copy, ",");
+    g_dump_present_count = 0;
+    while (token && g_dump_present_count < MAX_DUMP_FRAMES) {
+        g_dump_present_frames[g_dump_present_count++] = (uint32_t)strtoul(token, NULL, 10);
         token = strtok(NULL, ",");
     }
     free(copy);
@@ -319,19 +433,31 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     }
 
     double total_render_start_ms = sdl_now_ms();
+    g_present_count++;
     if (count_guest_frame) {
         g_frame_count++;
+        memcpy(g_last_guest_framebuffer, framebuffer, sizeof(g_last_guest_framebuffer));
+        g_last_guest_framebuffer_valid = true;
     }
 
     if (count_guest_frame) {
         /* Handle Screenshot Dumping */
-        for (int i = 0; i < g_dump_count; i++) {
-            if (g_dump_frames[i] == (uint32_t)g_frame_count) {
-                char filename[128];
-                snprintf(filename, sizeof(filename), "%s_%05d.ppm", g_screenshot_prefix, g_frame_count);
-                save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
-            }
+        if (frame_is_selected_for_dump(g_dump_frames, g_dump_count, (uint32_t)g_frame_count)) {
+            char filename[128];
+            snprintf(filename, sizeof(filename), "%s_%05d.ppm", g_screenshot_prefix, g_frame_count);
+            save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
         }
+    }
+
+    if (frame_is_selected_for_dump(g_dump_present_frames, g_dump_present_count, (uint32_t)g_frame_count)) {
+        char filename[160];
+        snprintf(filename,
+                 sizeof(filename),
+                 "%s_guest_%05d_present_%06llu.ppm",
+                 g_screenshot_prefix,
+                 g_frame_count,
+                 (unsigned long long)g_present_count);
+        save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
     }
 
     /* Debug: check framebuffer content on first few guest frames */
@@ -351,6 +477,16 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     if (count_guest_frame && (g_frame_count % 60) == 0) {
         char title[64];
         snprintf(title, sizeof(title), "GameBoy Recompiled - Frame %d", g_frame_count);
+        SDL_SetWindowTitle(g_window, title);
+    } else if (!count_guest_frame && (g_present_count % 30) == 0) {
+        char title[96];
+        if (g_frame_count == 0) {
+            snprintf(title, sizeof(title), "GameBoy Recompiled - Starting... (%llu)",
+                     (unsigned long long)(g_present_count / 30));
+        } else {
+            snprintf(title, sizeof(title), "GameBoy Recompiled - Frame %d (Working...)",
+                     g_frame_count);
+        }
         SDL_SetWindowTitle(g_window, title);
     }
 
@@ -901,11 +1037,21 @@ bool gb_platform_poll_events(GBContext* ctx) {
     g_script_joypad_dpad = 0xFF;
     g_script_joypad_buttons = 0xFF;
 
+    uint64_t current_cycles = ctx ? ctx->cycles : 0;
     for (int i = 0; i < g_script_count; i++) {
         ScriptEntry* e = &g_input_script[i];
-        if (g_frame_count >= e->start_frame && g_frame_count < (e->start_frame + e->duration)) {
-             g_script_joypad_dpad &= e->dpad;
-             g_script_joypad_buttons &= e->buttons;
+        bool active = false;
+        if (e->anchor == SCRIPT_ANCHOR_CYCLE) {
+            active = current_cycles >= e->start &&
+                     current_cycles < (e->start + e->duration);
+        } else {
+            uint64_t current_frame = (uint64_t)g_frame_count;
+            active = current_frame >= e->start &&
+                     current_frame < (e->start + e->duration);
+        }
+        if (active) {
+            g_script_joypad_dpad &= e->dpad;
+            g_script_joypad_buttons &= e->buttons;
         }
     }
 
@@ -916,7 +1062,7 @@ bool gb_platform_poll_events(GBContext* ctx) {
     }
 
     update_effective_joypad_state();
-    record_manual_input_frame((uint32_t)g_frame_count);
+    record_manual_input_state(current_cycles);
 
     return true;
 }
@@ -928,12 +1074,14 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
 }
 
 void gb_platform_present_framebuffer(const uint32_t* framebuffer) {
-    render_frame_internal(framebuffer, false);
+    const uint32_t* stable_framebuffer = g_last_guest_framebuffer_valid ? g_last_guest_framebuffer : framebuffer;
+    render_frame_internal(stable_framebuffer, false);
 }
 
 void gb_platform_render_lcd_off_frame(void) {
     ensure_lcd_off_framebuffer();
-    render_frame_internal(g_lcd_off_framebuffer, false);
+    const uint32_t* stable_framebuffer = g_last_guest_framebuffer_valid ? g_last_guest_framebuffer : g_lcd_off_framebuffer;
+    render_frame_internal(stable_framebuffer, false);
 }
 
 void gb_platform_get_timing_info(GBPlatformTimingInfo* out) {

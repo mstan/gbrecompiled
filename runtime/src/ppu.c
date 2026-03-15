@@ -44,6 +44,14 @@ void ppu_reset(GBPPU* ppu) {
     ppu->obp1 = 0xFF;
     ppu->wy = 0;
     ppu->wx = 0;
+    ppu->latched_lcdc = ppu->lcdc;
+    ppu->latched_scy = ppu->scy;
+    ppu->latched_scx = ppu->scx;
+    ppu->latched_bgp = ppu->bgp;
+    ppu->latched_obp0 = ppu->obp0;
+    ppu->latched_obp1 = ppu->obp1;
+    ppu->latched_wy = ppu->wy;
+    ppu->latched_wx = ppu->wx;
     
     /* Internal state */
     ppu->mode = PPU_MODE_OAM;
@@ -69,8 +77,8 @@ void ppu_reset(GBPPU* ppu) {
 /**
  * @brief Get tile data address for a tile index
  */
-static uint16_t get_tile_data_addr(GBPPU* ppu, uint8_t tile_idx, bool is_obj) {
-    if (is_obj || (ppu->lcdc & LCDC_TILE_DATA)) {
+static uint16_t get_tile_data_addr(uint8_t lcdc, uint8_t tile_idx, bool is_obj) {
+    if (is_obj || (lcdc & LCDC_TILE_DATA)) {
         /* 8000 addressing mode - unsigned indexing */
         return 0x8000 + (tile_idx * 16);
     } else {
@@ -82,12 +90,12 @@ static uint16_t get_tile_data_addr(GBPPU* ppu, uint8_t tile_idx, bool is_obj) {
 /**
  * @brief Get tile map address
  */
-static uint16_t get_bg_tilemap_addr(GBPPU* ppu) {
-    return (ppu->lcdc & LCDC_BG_TILEMAP) ? 0x9C00 : 0x9800;
+static uint16_t get_bg_tilemap_addr(uint8_t lcdc) {
+    return (lcdc & LCDC_BG_TILEMAP) ? 0x9C00 : 0x9800;
 }
 
-static uint16_t get_window_tilemap_addr(GBPPU* ppu) {
-    return (ppu->lcdc & LCDC_WINDOW_TILEMAP) ? 0x9C00 : 0x9800;
+static uint16_t get_window_tilemap_addr(uint8_t lcdc) {
+    return (lcdc & LCDC_WINDOW_TILEMAP) ? 0x9C00 : 0x9800;
 }
 
 /**
@@ -98,6 +106,17 @@ static uint8_t vram_read(GBContext* ctx, uint16_t addr) {
         return ctx->vram[addr - 0x8000];
     }
     return 0xFF;
+}
+
+static void latch_scanline_registers(GBPPU* ppu) {
+    ppu->latched_lcdc = ppu->lcdc;
+    ppu->latched_scy = ppu->scy;
+    ppu->latched_scx = ppu->scx;
+    ppu->latched_bgp = ppu->bgp;
+    ppu->latched_obp0 = ppu->obp0;
+    ppu->latched_obp1 = ppu->obp1;
+    ppu->latched_wy = ppu->wy;
+    ppu->latched_wx = ppu->wx;
 }
 
 /* ============================================================================
@@ -116,18 +135,20 @@ static uint8_t apply_palette(uint8_t color, uint8_t palette) {
  */
 static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
     uint8_t scanline = ppu->ly;
+    uint8_t lcdc = ppu->latched_lcdc;
     
-    if (!(ppu->lcdc & LCDC_LCD_ENABLE)) {
+    if (!(lcdc & LCDC_LCD_ENABLE)) {
         /* LCD disabled - blank line */
         memset(&ppu->framebuffer[scanline * GB_SCREEN_WIDTH], 0, GB_SCREEN_WIDTH);
         if (bg_prio) memset(bg_prio, 0, GB_SCREEN_WIDTH);
         return;
     }
     
-    bool bg_enable = (ppu->lcdc & LCDC_BG_ENABLE);
+    bool bg_enable = (lcdc & LCDC_BG_ENABLE);
     /* Note: on DMG, LCDC_BG_ENABLE (bit 0) also controls Master Enable (BG+Window). 
        On CGB, it controls priority. Assuming DMG mostly here. */
-    bool window_enable = bg_enable && (ppu->lcdc & LCDC_WINDOW_ENABLE) && (ppu->wx <= 166) && (ppu->wy <= scanline);
+    bool window_enable = bg_enable && (lcdc & LCDC_WINDOW_ENABLE) &&
+                         (ppu->latched_wx <= 166) && (ppu->latched_wy <= scanline);
     
     /* Track if window was triggered */
     if (window_enable && !ppu->window_triggered) {
@@ -138,21 +159,21 @@ static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
         uint8_t color = 0;
         
         /* Check if we're in window area */
-        bool in_window = window_enable && (x >= (ppu->wx - 7));
+        bool in_window = window_enable && (x >= (ppu->latched_wx - 7));
         
         if (in_window) {
             /* Render window */
-            int win_x = x - (ppu->wx - 7);
+            int win_x = x - (ppu->latched_wx - 7);
             int win_y = ppu->window_line;
             
             /* Get tile from window tilemap */
-            uint16_t tilemap_addr = get_window_tilemap_addr(ppu);
+            uint16_t tilemap_addr = get_window_tilemap_addr(lcdc);
             uint8_t tile_x = win_x / 8;
             uint8_t tile_y = win_y / 8;
             uint8_t tile_idx = vram_read(ctx, tilemap_addr + tile_y * 32 + tile_x);
             
             /* Get pixel from tile */
-            uint16_t tile_addr = get_tile_data_addr(ppu, tile_idx, false);
+            uint16_t tile_addr = get_tile_data_addr(lcdc, tile_idx, false);
             uint8_t pixel_y = win_y % 8;
             uint8_t pixel_x = win_x % 8;
             
@@ -163,17 +184,17 @@ static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
             color = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
         } else if (bg_enable) {
             /* Render background */
-            int bg_x = (x + ppu->scx) & 0xFF;
-            int bg_y = (scanline + ppu->scy) & 0xFF;
+            int bg_x = (x + ppu->latched_scx) & 0xFF;
+            int bg_y = (scanline + ppu->latched_scy) & 0xFF;
             
             /* Get tile from background tilemap */
-            uint16_t tilemap_addr = get_bg_tilemap_addr(ppu);
+            uint16_t tilemap_addr = get_bg_tilemap_addr(lcdc);
             uint8_t tile_x = bg_x / 8;
             uint8_t tile_y = bg_y / 8;
             uint8_t tile_idx = vram_read(ctx, tilemap_addr + tile_y * 32 + tile_x);
             
             /* Get pixel from tile */
-            uint16_t tile_addr = get_tile_data_addr(ppu, tile_idx, false);
+            uint16_t tile_addr = get_tile_data_addr(lcdc, tile_idx, false);
             uint8_t pixel_y = bg_y % 8;
             uint8_t pixel_x = bg_x % 8;
             
@@ -185,7 +206,7 @@ static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
         }
         
         /* Apply palette and store */
-        ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = apply_palette(color, ppu->bgp);
+        ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = apply_palette(color, ppu->latched_bgp);
         if (bg_prio) bg_prio[x] = color;
     }
     
@@ -199,64 +220,108 @@ static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
  * @brief Render sprites for current scanline
  */
 static void render_sprites_scanline(GBPPU* ppu, GBContext* ctx, const uint8_t* bg_prio) {
-    if (!(ppu->lcdc & LCDC_OBJ_ENABLE)) {
+    if (!(ppu->latched_lcdc & LCDC_OBJ_ENABLE)) {
         return;  /* Sprites disabled */
     }
     
     uint8_t scanline = ppu->ly;
-    uint8_t sprite_height = (ppu->lcdc & LCDC_OBJ_SIZE) ? 16 : 8;
+    uint8_t sprite_height = (ppu->latched_lcdc & LCDC_OBJ_SIZE) ? 16 : 8;
+
+    typedef struct {
+        int oam_index;
+        int screen_x;
+        uint8_t x_pos;
+        uint8_t flags;
+        uint8_t palette;
+        bool behind_bg;
+        uint8_t lo;
+        uint8_t hi;
+    } ScanlineSprite;
     
     /* Find sprites on this scanline (max 10) */
     int sprite_count = 0;
-    int sprites[10];
+    ScanlineSprite sprites[10];
     
     for (int i = 0; i < 40 && sprite_count < 10; i++) {
         OAMEntry* sprite = (OAMEntry*)(ctx->oam + i * 4);
         int sprite_y = sprite->y - 16;
         
         if (scanline >= sprite_y && scanline < sprite_y + sprite_height) {
-            sprites[sprite_count++] = i;
+            int line = scanline - sprite_y;
+            uint8_t tile_idx = sprite->tile;
+            if (sprite_height == 16) {
+                tile_idx &= 0xFE;  /* Clear bit 0 for 8x16 sprites */
+            }
+
+            if (sprite->flags & OAM_FLIP_Y) {
+                line = sprite_height - 1 - line;
+            }
+
+            uint16_t tile_addr = 0x8000 + tile_idx * 16 + line * 2;
+            sprites[sprite_count].oam_index = i;
+            sprites[sprite_count].screen_x = sprite->x - 8;
+            sprites[sprite_count].x_pos = sprite->x;
+            sprites[sprite_count].flags = sprite->flags;
+            sprites[sprite_count].palette = (sprite->flags & OAM_PALETTE) ? ppu->latched_obp1 : ppu->latched_obp0;
+            sprites[sprite_count].behind_bg = (sprite->flags & OAM_PRIORITY) != 0;
+            sprites[sprite_count].lo = vram_read(ctx, tile_addr);
+            sprites[sprite_count].hi = vram_read(ctx, tile_addr + 1);
+            sprite_count++;
         }
     }
-    
-    /* Render sprites in reverse order (priority - lower index = higher priority) */
-    for (int i = sprite_count - 1; i >= 0; i--) {
-        OAMEntry* sprite = (OAMEntry*)(ctx->oam + sprites[i] * 4);
-        int sprite_y = sprite->y - 16;
-        int sprite_x = sprite->x - 8;
-        
-        uint8_t tile_idx = sprite->tile;
-        if (sprite_height == 16) {
-            tile_idx &= 0xFE;  /* Clear bit 0 for 8x16 sprites */
+
+    /* On DMG, smaller X has higher priority; ties are resolved by OAM order. */
+    for (int i = 1; i < sprite_count; i++) {
+        ScanlineSprite sprite = sprites[i];
+        int j = i - 1;
+
+        while (j >= 0) {
+            bool sprite_has_higher_priority = (sprite.x_pos < sprites[j].x_pos) ||
+                                              (sprite.x_pos == sprites[j].x_pos &&
+                                               sprite.oam_index < sprites[j].oam_index);
+            if (!sprite_has_higher_priority) {
+                break;
+            }
+            sprites[j + 1] = sprites[j];
+            j--;
         }
-        
-        int line = scanline - sprite_y;
-        if (sprite->flags & OAM_FLIP_Y) {
-            line = sprite_height - 1 - line;
+
+        sprites[j + 1] = sprite;
+    }
+
+    for (int screen_x = 0; screen_x < GB_SCREEN_WIDTH; screen_x++) {
+        const ScanlineSprite* chosen_sprite = NULL;
+        uint8_t chosen_color = 0;
+
+        for (int i = 0; i < sprite_count; i++) {
+            const ScanlineSprite* sprite = &sprites[i];
+            int sprite_px = screen_x - sprite->screen_x;
+            if (sprite_px < 0 || sprite_px >= 8) {
+                continue;
+            }
+
+            int bit_pos = (sprite->flags & OAM_FLIP_X) ? sprite_px : (7 - sprite_px);
+            uint8_t color = ((sprite->lo >> bit_pos) & 1) | (((sprite->hi >> bit_pos) & 1) << 1);
+            if (color == 0) {
+                continue;
+            }
+
+            chosen_sprite = sprite;
+            chosen_color = color;
+            break;
         }
-        
-        uint16_t tile_addr = 0x8000 + tile_idx * 16 + line * 2;
-        uint8_t lo = vram_read(ctx, tile_addr);
-        uint8_t hi = vram_read(ctx, tile_addr + 1);
-        
-        uint8_t palette = (sprite->flags & OAM_PALETTE) ? ppu->obp1 : ppu->obp0;
-        bool behind_bg = (sprite->flags & OAM_PRIORITY);
-        
-        for (int px = 0; px < 8; px++) {
-            int screen_x = sprite_x + px;
-            if (screen_x < 0 || screen_x >= GB_SCREEN_WIDTH) continue;
-            
-            int bit_pos = (sprite->flags & OAM_FLIP_X) ? px : (7 - px);
-            uint8_t color = ((lo >> bit_pos) & 1) | (((hi >> bit_pos) & 1) << 1);
-            
-            if (color == 0) continue;  /* Color 0 is transparent */
-            
-            /* Check priority */
-            uint8_t bg_raw_color = bg_prio ? bg_prio[screen_x] : 0;
-            if (behind_bg && bg_raw_color != 0) continue;
-            
-            ppu->framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] = apply_palette(color, palette);
+
+        if (!chosen_sprite) {
+            continue;
         }
+
+        uint8_t bg_raw_color = bg_prio ? bg_prio[screen_x] : 0;
+        if (chosen_sprite->behind_bg && bg_raw_color != 0) {
+            continue;
+        }
+
+        ppu->framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] =
+            apply_palette(chosen_color, chosen_sprite->palette);
     }
 }
 
@@ -264,6 +329,21 @@ void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
     if (ppu->ly == 0 && (ctx->cycles % 6000 == 0)) {  // Log occasionally
          // printf("[PPU] Frame debug: LCDC=%02X BGP=%02X\n", ppu->lcdc, ppu->bgp);
     }
+
+    gbrt_log_ppu_scanline(ctx,
+                          ppu->ly,
+                          ppu->mode,
+                          ppu->lcdc,
+                          ppu->stat,
+                          ppu->scx,
+                          ppu->scy,
+                          ppu->wx,
+                          ppu->wy,
+                          ppu->bgp,
+                          ppu->obp0,
+                          ppu->obp1,
+                          ppu->window_line,
+                          ppu->window_triggered);
 
     uint8_t bg_prio[GB_SCREEN_WIDTH];
     memset(bg_prio, 0, sizeof(bg_prio));
@@ -322,30 +402,67 @@ static void update_stat(GBPPU* ppu, GBContext* ctx) {
 /**
  * @brief Request LCD STAT interrupt if conditions met
  */
-static void check_stat_interrupt(GBPPU* ppu, GBContext* ctx) {
+static void check_stat_interrupt(GBPPU* ppu, GBContext* ctx, const char* reason) {
+    uint8_t source_state_mask = 0;
+    uint8_t source_enable_mask = 0;
+    uint8_t active_source_mask = 0;
+    bool previous_state = ppu->stat_irq_state;
     bool current_state = false;
-    
-    if ((ppu->stat & STAT_HBLANK_INT) && ppu->mode == PPU_MODE_HBLANK) {
-        current_state = true;
+
+    if (ppu->mode == PPU_MODE_HBLANK) {
+        source_state_mask |= 0x1;
     }
-    if ((ppu->stat & STAT_VBLANK_INT) && ppu->mode == PPU_MODE_VBLANK) {
-        current_state = true;
+    if (ppu->mode == PPU_MODE_VBLANK) {
+        source_state_mask |= 0x2;
     }
-    if ((ppu->stat & STAT_OAM_INT) && ppu->mode == PPU_MODE_OAM) {
-        current_state = true;
+    if (ppu->mode == PPU_MODE_OAM) {
+        source_state_mask |= 0x4;
     }
-    if ((ppu->stat & STAT_LYC_INT) && (ppu->stat & STAT_LYC_MATCH)) {
-        current_state = true;
+    if (ppu->stat & STAT_LYC_MATCH) {
+        source_state_mask |= 0x8;
     }
-    
+
+    if (ppu->stat & STAT_HBLANK_INT) {
+        source_enable_mask |= 0x1;
+    }
+    if (ppu->stat & STAT_VBLANK_INT) {
+        source_enable_mask |= 0x2;
+    }
+    if (ppu->stat & STAT_OAM_INT) {
+        source_enable_mask |= 0x4;
+    }
+    if (ppu->stat & STAT_LYC_INT) {
+        source_enable_mask |= 0x8;
+    }
+
+    active_source_mask = source_state_mask & source_enable_mask;
+    current_state = (active_source_mask != 0);
+
+    gbrt_log_stat_irq_check(ctx,
+                            reason,
+                            ppu->ly,
+                            ppu->mode,
+                            ppu->stat,
+                            source_state_mask,
+                            source_enable_mask,
+                            active_source_mask,
+                            previous_state,
+                            current_state);
+
     /* Edge detection: only fire on rising edge */
-    if (current_state && !ppu->stat_irq_state) {
-        /* Request LCD STAT interrupt (IF bit 1) */
-        /* DISABLE STAT INTERRUPTS FOR DEBUGGING TETRIS */
+    if (current_state && !previous_state) {
+        uint8_t if_before = ctx->io[0x0F];
         ctx->io[0x0F] |= 0x02;
-        // fprintf(stderr, "[PPU] STAT Interrupt Fired! Mode=%d STAT=0x%02X LY=%d LYC=%d\n", ppu->mode, ppu->stat, ppu->ly, ppu->lyc);
+        gbrt_log_stat_irq_request(ctx,
+                                  reason,
+                                  ppu->ly,
+                                  ppu->mode,
+                                  ppu->stat,
+                                  active_source_mask,
+                                  if_before,
+                                  ctx->io[0x0F]);
     }
-    
+
     ppu->stat_irq_state = current_state;
 }
 
@@ -366,7 +483,9 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 }
                 ppu->mode_cycles -= CYCLES_OAM_SCAN;
                 ppu->mode = PPU_MODE_DRAW;
+                latch_scanline_registers(ppu);
                 update_stat(ppu, ctx);
+                check_stat_interrupt(ppu, ctx, "oam->draw");
                 break;
                 
             case PPU_MODE_DRAW:
@@ -380,7 +499,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 
                 ppu->mode = PPU_MODE_HBLANK;
                 update_stat(ppu, ctx);
-                check_stat_interrupt(ppu, ctx);
+                check_stat_interrupt(ppu, ctx, "draw->hblank");
                 break;
                 
             case PPU_MODE_HBLANK:
@@ -408,7 +527,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 }
                 
                 update_stat(ppu, ctx);
-                check_stat_interrupt(ppu, ctx);
+                check_stat_interrupt(ppu, ctx, "hblank->next");
                 break;
                 
             case PPU_MODE_VBLANK:
@@ -427,7 +546,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 }
                 
                 update_stat(ppu, ctx);
-                check_stat_interrupt(ppu, ctx);
+                check_stat_interrupt(ppu, ctx, "vblank->next");
                 break;
         }
     }
@@ -458,6 +577,7 @@ uint8_t ppu_read_register(GBPPU* ppu, uint16_t addr) {
 void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value) {
     static int ppu_write_count = 0;
     ppu_write_count++;
+    uint8_t old_value = ppu_read_register(ppu, addr);
     
     /* Only log first 100 and special values */
     if (ppu_write_count <= 100 || (addr == 0xFF40 && (value == 0x91 || value == 0x00))) {
@@ -506,6 +626,10 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
         case 0xFF41:
             /* Bits 0-2 are read-only */
             ppu->stat = (ppu->stat & 0x07) | (value & 0x78);
+            if (ppu->lcdc & LCDC_LCD_ENABLE) {
+                update_stat(ppu, ctx);
+                check_stat_interrupt(ppu, ctx, "stat-write");
+            }
             break;
         case 0xFF42: ppu->scy = value; break;
         case 0xFF43: ppu->scx = value; break;
@@ -514,19 +638,11 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
             /* Immediately check for LYC match */
             if (ppu->lcdc & LCDC_LCD_ENABLE) {
                 update_stat(ppu, ctx);
-                check_stat_interrupt(ppu, ctx);
+                check_stat_interrupt(ppu, ctx, "lyc-write");
             }
             break;
         case 0xFF46:
-            /* OAM DMA transfer */
-            DBG_REGS("DMA transfer from 0x%04X", (uint16_t)(value << 8));
             ppu->dma = value;
-            {
-                uint16_t src = value << 8;
-                for (int i = 0; i < OAM_SIZE; i++) {
-                    ctx->oam[i] = gb_read8(ctx, src + i);
-                }
-            }
             break;
         case 0xFF47: 
             DBG_REGS("BGP palette: 0x%02X -> 0x%02X", ppu->bgp, value);
@@ -537,6 +653,8 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
         case 0xFF4A: ppu->wy = value; break;
         case 0xFF4B: ppu->wx = value; break;
     }
+
+    gbrt_log_ppu_register_write(ctx, addr, old_value, ppu_read_register(ppu, addr), ppu->ly, ppu->mode);
 }
 
 /* ============================================================================

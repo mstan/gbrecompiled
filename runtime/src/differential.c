@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 #define DIFF_WRAM_SIZE (0x1000u * 8u)
 #define DIFF_VRAM_TOTAL_SIZE (VRAM_SIZE * 2u)
@@ -14,9 +15,15 @@
 #define DIFF_IO_TOTAL_SIZE 0x81u
 #define DIFF_MAX_SCRIPT_ENTRIES 256
 
+typedef enum {
+    GB_DIFF_INPUT_FRAME = 0,
+    GB_DIFF_INPUT_CYCLE = 1,
+} GBDiffInputAnchor;
+
 typedef struct {
-    uint32_t start_frame;
-    uint32_t duration;
+    GBDiffInputAnchor anchor;
+    uint64_t start;
+    uint64_t duration;
     uint8_t dpad;
     uint8_t buttons;
 } GBDiffScriptEntry;
@@ -112,6 +119,79 @@ static void gb_diff_parse_buttons(const char* buttons, uint8_t* dpad, uint8_t* j
     if (strchr(buttons, 'S')) *joypad_buttons &= (uint8_t)~0x08;
 }
 
+static char* gb_diff_trim_ascii(char* text) {
+    while (text && *text && isspace((unsigned char)*text)) {
+        text++;
+    }
+    if (!text || !*text) {
+        return text;
+    }
+
+    char* end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    *end = '\0';
+    return text;
+}
+
+static bool gb_diff_parse_input_token(char* token,
+                                      GBDiffScriptEntry* entry,
+                                      char* buttons,
+                                      size_t buttons_size) {
+    char* start_text = gb_diff_trim_ascii(token);
+    if (!start_text || !*start_text) {
+        return false;
+    }
+
+    char* first_colon = strchr(start_text, ':');
+    if (!first_colon) {
+        return false;
+    }
+    *first_colon = '\0';
+
+    char* buttons_text = gb_diff_trim_ascii(first_colon + 1);
+    char* second_colon = strchr(buttons_text, ':');
+    if (!second_colon) {
+        return false;
+    }
+    *second_colon = '\0';
+
+    char* duration_text = gb_diff_trim_ascii(second_colon + 1);
+    start_text = gb_diff_trim_ascii(start_text);
+    buttons_text = gb_diff_trim_ascii(buttons_text);
+    duration_text = gb_diff_trim_ascii(duration_text);
+    if (!*start_text || !*duration_text) {
+        return false;
+    }
+
+    entry->anchor = GB_DIFF_INPUT_FRAME;
+    if (*start_text == 'c' || *start_text == 'C') {
+        entry->anchor = GB_DIFF_INPUT_CYCLE;
+        start_text++;
+    } else if (*start_text == 'f' || *start_text == 'F') {
+        start_text++;
+    }
+    start_text = gb_diff_trim_ascii(start_text);
+    if (!*start_text) {
+        return false;
+    }
+
+    char* start_end = NULL;
+    char* duration_end = NULL;
+    entry->start = strtoull(start_text, &start_end, 10);
+    entry->duration = strtoull(duration_text, &duration_end, 10);
+    if ((start_end && *gb_diff_trim_ascii(start_end)) || (duration_end && *gb_diff_trim_ascii(duration_end))) {
+        return false;
+    }
+    if (entry->duration == 0) {
+        return false;
+    }
+
+    snprintf(buttons, buttons_size, "%s", buttons_text);
+    return true;
+}
+
 static bool gb_diff_parse_input_script(const char* script,
                                        GBDiffInputScript* parsed,
                                        char* message,
@@ -136,19 +216,16 @@ static bool gb_diff_parse_input_script(const char* script,
             return false;
         }
 
-        unsigned long start_frame = 0;
-        unsigned long duration = 0;
         char buttons[32] = {0};
 
-        if (sscanf(token, "%lu:%31[^:]:%lu", &start_frame, buttons, &duration) != 3) {
+        GBDiffScriptEntry* entry = &parsed->entries[parsed->count];
+        if (!gb_diff_parse_input_token(token, entry, buttons, sizeof(buttons))) {
             snprintf(message, message_size, "invalid input script token: %s", token);
             free(copy);
             return false;
         }
 
-        GBDiffScriptEntry* entry = &parsed->entries[parsed->count++];
-        entry->start_frame = (uint32_t)start_frame;
-        entry->duration = (uint32_t)duration;
+        parsed->count++;
         gb_diff_parse_buttons(buttons, &entry->dpad, &entry->buttons);
 
         token = strtok(NULL, ",");
@@ -187,16 +264,24 @@ static void gb_diff_request_joypad_interrupt(GBContext* ctx,
     }
 }
 
-static void gb_diff_apply_input_frame(const GBDiffInputScript* script,
+static void gb_diff_apply_input_state(const GBDiffInputScript* script,
                                       GBContext* ctx,
                                       GBJoypadState* state) {
     GBJoypadState next = {.dpad = 0xFF, .buttons = 0xFF};
+    uint64_t current_cycles = ctx ? ctx->cycles : 0;
 
     if (script != NULL) {
         for (size_t i = 0; i < script->count; i++) {
             const GBDiffScriptEntry* entry = &script->entries[i];
-            if (script->frame_index >= entry->start_frame &&
-                script->frame_index < ((uint64_t)entry->start_frame + entry->duration)) {
+            bool active = false;
+            if (entry->anchor == GB_DIFF_INPUT_CYCLE) {
+                active = current_cycles >= entry->start &&
+                         current_cycles < (entry->start + entry->duration);
+            } else {
+                active = script->frame_index >= entry->start &&
+                         script->frame_index < (entry->start + entry->duration);
+            }
+            if (active) {
                 next.dpad &= entry->dpad;
                 next.buttons &= entry->buttons;
             }
@@ -514,8 +599,8 @@ bool gb_run_differential(GBContext* generated_ctx,
     if (effective.input_script != NULL && *effective.input_script != '\0') {
         generated_ctx->joypad = &generated_joypad;
         interpreted_ctx->joypad = &interpreted_joypad;
-        gb_diff_apply_input_frame(&input_script, generated_ctx, &generated_joypad);
-        gb_diff_apply_input_frame(&input_script, interpreted_ctx, &interpreted_joypad);
+        gb_diff_apply_input_state(&input_script, generated_ctx, &generated_joypad);
+        gb_diff_apply_input_state(&input_script, interpreted_ctx, &interpreted_joypad);
     }
 
     uint64_t frames_completed = 0;
@@ -525,6 +610,11 @@ bool gb_run_differential(GBContext* generated_ctx,
     bool unlimited_steps = (effective.max_steps == 0);
     uint64_t step_limit = effective.max_steps;
     for (uint64_t step = 0; unlimited_steps || step < step_limit; step++) {
+        if (effective.input_script != NULL && *effective.input_script != '\0') {
+            gb_diff_apply_input_state(&input_script, generated_ctx, &generated_joypad);
+            gb_diff_apply_input_state(&input_script, interpreted_ctx, &interpreted_joypad);
+        }
+
         executed_steps = step + 1;
         uint16_t start_pc = generated_ctx->pc;
         uint16_t start_bank = gb_diff_current_bank(generated_ctx);
@@ -622,8 +712,8 @@ bool gb_run_differential(GBContext* generated_ctx,
 
             if (effective.input_script != NULL && *effective.input_script != '\0') {
                 input_script.frame_index++;
-                gb_diff_apply_input_frame(&input_script, generated_ctx, &generated_joypad);
-                gb_diff_apply_input_frame(&input_script, interpreted_ctx, &interpreted_joypad);
+                gb_diff_apply_input_state(&input_script, generated_ctx, &generated_joypad);
+                gb_diff_apply_input_state(&input_script, interpreted_ctx, &interpreted_joypad);
             }
 
             if (effective.max_frames > 0 && frames_completed >= effective.max_frames) {

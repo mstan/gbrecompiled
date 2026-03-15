@@ -214,9 +214,10 @@ When running a recompiled game:
 
 | Option | Description |
 |--------|-------------|
-| `--input <script>` | Automate input from an inline script like `120:S:1,240:A:1` |
-| `--record-input <file>` | Record live keyboard/controller input to a text file using the same script format accepted by `--input` |
+| `--input <script>` | Automate input from an inline script. Legacy frame entries look like `120:S:1`; cycle-anchored entries look like `c4412912:S:8192` |
+| `--record-input <file>` | Record live keyboard/controller input to a text file. New recordings are cycle-anchored for stable repro across builds |
 | `--dump-frames <list>` | Dump specific frames as screenshots |
+| `--dump-present-frames <list>` | Dump every host present that occurs while the selected guest frame(s) are current |
 | `--screenshot-prefix <path>` | Set screenshot output path |
 | `--log-file <file>` | Redirect stdout and stderr to a text log file for later inspection |
 | `--debug-performance` | Enable the full slowdown-debug preset: frame logs, vsync logs, fallback logs, and periodic audio stats |
@@ -225,6 +226,7 @@ When running a recompiled game:
 | `--log-slow-vsync <ms>` | Log pacing waits whose `gb_platform_vsync()` time exceeds the threshold |
 | `--log-frame-fallbacks` | Log any rendered frame that hit generated->interpreter fallback |
 | `--log-lcd-transitions` | Log exact LCDC on/off transitions and LCD-off span lengths in guest cycles |
+| `--limit-frames <n>` | Stop the run after `n` completed guest frames |
 | `--smooth-lcd-transitions` | Force the SDL host smoother on for long guest frames, including LCD-off stretches (default) |
 | `--no-smooth-lcd-transitions` | Disable the SDL host smoother for long guest frames |
 | `--differential [steps]` | Compare generated execution against the interpreter for N steps (default `10000`) |
@@ -254,7 +256,13 @@ Capture a useful slowdown log without manually enabling each individual perf fla
 
 `--debug-performance` now also includes exact `[LCD]` transition lines plus `lcd_off_cycles`, `lcd_transitions`, and `lcd_spans` in the `[FRAME]` logs, which makes LCD-off slowdown analysis much easier.
 
-The SDL menu now enables `Smooth Slow Frames` by default. It keeps host presentation and pacing steady during long guest frames, showing a blank frame while the LCD is off and otherwise re-presenting the last completed framebuffer without changing guest emulation timing. You can toggle it at runtime from the settings menu or override it on launch with `--smooth-lcd-transitions` / `--no-smooth-lcd-transitions`.
+Input script notes:
+
+- Plain `120:S:1` entries are frame-anchored and kept for backwards compatibility.
+- `c4412912:S:8192` entries are cycle-anchored and replay much more reliably after timing/runtime changes.
+- `--record-input` now writes cycle-anchored scripts by default so the same file can reproduce scene-specific bugs more accurately.
+
+The SDL menu now enables `Smooth Slow Frames` by default. It keeps host presentation and pacing steady during long guest frames by re-presenting the last completed framebuffer instead of showing an in-progress frame, without changing guest emulation timing. You can toggle it at runtime from the settings menu or override it on launch with `--smooth-lcd-transitions` / `--no-smooth-lcd-transitions`.
 
 Replay the recorded input later with the existing `--input` flag:
 
@@ -272,7 +280,7 @@ python3 tools/compare_lcd_transitions.py roms/game.gb \
   --end-frame 500
 ```
 
-The runtime side of that report uses exact LCDC transition logs. The PyBoy side is sampled at frame boundaries, so it is best used to confirm whether our LCD-off stretches are obviously longer or happening in different places than the reference.
+The runtime side of that report uses exact LCDC transition logs. The PyBoy side is sampled at frame boundaries, so it is best used to confirm whether our LCD-off stretches are obviously longer or happening in different places than the reference. The PyBoy helper tools accept cycle-anchored scripts too, but they quantize those presses to frame boundaries during replay.
 
 ### Controls
 

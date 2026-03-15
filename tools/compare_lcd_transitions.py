@@ -11,6 +11,8 @@ from pathlib import Path
 
 from pyboy import PyBoy
 
+DMG_FRAME_CYCLES = 70224
+
 
 BUTTON_MAP = {
     "U": "up",
@@ -40,7 +42,8 @@ LCD_ON_RE = re.compile(
 
 @dataclass
 class InputEntry:
-    start_frame: int
+    anchor: str
+    start: int
     buttons: str
     duration: int
 
@@ -86,12 +89,18 @@ def parse_input_script(text: str) -> list[InputEntry]:
         parts = token.split(":")
         if len(parts) != 3:
             raise ValueError(f"Invalid input token: {token}")
-        start_frame = int(parts[0])
+        start_text = parts[0].strip()
+        anchor = "frame"
+        if start_text[:1].lower() == "c":
+            anchor = "cycle"
+            start_text = start_text[1:]
+        elif start_text[:1].lower() == "f":
+            start_text = start_text[1:]
         buttons = parts[1].strip().upper()
         duration = int(parts[2])
         if duration <= 0:
             continue
-        entries.append(InputEntry(start_frame, buttons, duration))
+        entries.append(InputEntry(anchor, int(start_text), buttons, duration))
     return entries
 
 
@@ -105,8 +114,15 @@ def read_input_script(args: argparse.Namespace) -> str:
 
 def buttons_for_frame(entries: list[InputEntry], frame: int) -> set[str]:
     active: set[str] = set()
+    frame_start_cycles = frame * DMG_FRAME_CYCLES
+    frame_end_cycles = frame_start_cycles + DMG_FRAME_CYCLES
     for entry in entries:
-        if entry.start_frame <= frame < (entry.start_frame + entry.duration):
+        if entry.anchor == "cycle":
+            entry_end = entry.start + entry.duration
+            if entry.start < frame_end_cycles and entry_end > frame_start_cycles:
+                active.update(entry.buttons)
+            continue
+        if entry.start <= frame < (entry.start + entry.duration):
             active.update(entry.buttons)
     return active
 
@@ -299,7 +315,13 @@ def derive_end_frame(args: argparse.Namespace, runtime_frames: list[RuntimeFrame
     if args.end_frame is not None:
         return args.end_frame
     runtime_max = max((frame.frame for frame in runtime_frames), default=0)
-    script_max = max((entry.start_frame + entry.duration for entry in entries), default=0)
+    script_max = 0
+    for entry in entries:
+        if entry.anchor == "cycle":
+            entry_end = entry.start + entry.duration
+            script_max = max(script_max, (entry_end + DMG_FRAME_CYCLES - 1) // DMG_FRAME_CYCLES)
+        else:
+            script_max = max(script_max, entry.start + entry.duration)
     derived = max(runtime_max, script_max + 60, 60)
     return derived
 
@@ -310,8 +332,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("rom", help="Path to the ROM file")
     parser.add_argument("--runtime-log", required=True, help="Runtime log captured with --debug-performance")
-    parser.add_argument("--input-file", help="Recorded input file in frame:buttons:duration format")
-    parser.add_argument("--input-script", help="Inline input script in frame:buttons:duration format")
+    parser.add_argument("--input-file", help="Recorded input file in frame:buttons:duration or c<cycle>:buttons:duration format")
+    parser.add_argument("--input-script", help="Inline input script in frame:buttons:duration or c<cycle>:buttons:duration format")
     parser.add_argument("--start-frame", type=int, default=0, help="First frame to include in the comparison")
     parser.add_argument("--end-frame", type=int, help="Last frame to include in the comparison")
     return parser

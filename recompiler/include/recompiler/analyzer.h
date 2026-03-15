@@ -31,8 +31,8 @@ struct BasicBlock {
     std::vector<size_t> instruction_indices;
     
     // Control flow
-    std::vector<uint16_t> successors;   // Addresses of successor blocks
-    std::vector<uint16_t> predecessors; // Addresses of predecessor blocks
+    std::vector<uint32_t> successors;   // Full (bank << 16 | addr) successors
+    std::vector<uint32_t> predecessors; // Full (bank << 16 | addr) predecessors
     
     // Cross-bank info
     bool has_cross_bank_successor = false;

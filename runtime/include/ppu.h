@@ -112,6 +112,16 @@ typedef struct GBPPU {
     uint8_t obp1;       /* 0xFF49 - OBJ Palette 1 */
     uint8_t wy;         /* 0xFF4A - Window Y */
     uint8_t wx;         /* 0xFF4B - Window X */
+
+    /* Registers latched at the start of mode 3 for the active scanline */
+    uint8_t latched_lcdc;
+    uint8_t latched_scy;
+    uint8_t latched_scx;
+    uint8_t latched_bgp;
+    uint8_t latched_obp0;
+    uint8_t latched_obp1;
+    uint8_t latched_wy;
+    uint8_t latched_wx;
     
     /* Internal state */
     bool stat_irq_state;

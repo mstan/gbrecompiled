@@ -67,7 +67,7 @@ typedef struct {
     bool compare_memory;     /**< Compare mutable memory/PPU state on every step */
     bool log_fallbacks;      /**< Log generated-to-interpreter fallback events */
     bool fail_on_fallback;   /**< Treat generated-to-interpreter fallback as a mismatch */
-    const char* input_script;/**< Optional scripted input in frame:buttons:duration format */
+    const char* input_script;/**< Optional scripted input in frame:buttons:duration or c<cycle>:buttons:duration format */
 } GBDifferentialOptions;
 
 typedef struct {
@@ -226,6 +226,7 @@ typedef struct GBContext {
     uint16_t frame_first_fallback_addr; /**< First fallback PC in the current frame */
     uint8_t frame_last_fallback_bank; /**< Last fallback bank in the current frame */
     uint16_t frame_last_fallback_addr; /**< Last fallback PC in the current frame */
+    uint64_t completed_frames; /**< Number of completed guest frames */
     
     /* Platform interface */
     void* platform;       /**< Platform-specific data */
@@ -234,6 +235,7 @@ typedef struct GBContext {
     /* Trace context */
     void* trace_file;     /**< FILE* for trace output */
     bool trace_entries_enabled;
+    void* ppu_trace_file; /**< FILE* for focused PPU trace output */
 } GBContext;
 
 /* ============================================================================
@@ -420,6 +422,12 @@ void gb_interpret(GBContext* ctx, uint16_t addr);
  */
 uint8_t gbrt_try_execute_hram_stub(GBContext* ctx, uint16_t addr);
 
+/**
+ * @brief Execute simple copied RAM helper stubs in-place when possible
+ * @return 1 if a known RAM stub instruction was executed, 0 otherwise
+ */
+uint8_t gbrt_try_execute_ram_stub(GBContext* ctx, uint16_t addr);
+
 /* ============================================================================
  * CPU State
  * ========================================================================== */
@@ -553,7 +561,10 @@ void gbrt_note_dispatch_fallback(GBContext* ctx, uint8_t bank, uint16_t addr);
 void gb_audio_callback(GBContext* ctx, int16_t left, int16_t right);
 
 /**
- * @brief Set input automation script (format: "frame:buttons:duration,...")
+ * @brief Set input automation script.
+ *
+ * Legacy entries use "frame:buttons:duration". Cycle-anchored entries use
+ * "c<cycle>:buttons:<duration_cycles>".
  */
 void gb_platform_set_input_script(const char* script);
 
@@ -581,6 +592,52 @@ void gbrt_set_trace_file(const char* filename);
  * @brief Log an entry point to the trace file
  */
 void gbrt_log_trace(GBContext* ctx, uint16_t bank, uint16_t addr);
+void gbrt_log_ppu_scanline(GBContext* ctx,
+                           uint8_t ly,
+                           uint8_t mode,
+                           uint8_t lcdc,
+                           uint8_t stat,
+                           uint8_t scx,
+                           uint8_t scy,
+                           uint8_t wx,
+                           uint8_t wy,
+                           uint8_t bgp,
+                           uint8_t obp0,
+                           uint8_t obp1,
+                           uint8_t window_line,
+                           bool window_triggered);
+void gbrt_log_ppu_register_write(GBContext* ctx,
+                                 uint16_t addr,
+                                 uint8_t old_value,
+                                 uint8_t new_value,
+                                 uint8_t ly,
+                                 uint8_t mode);
+void gbrt_log_stat_irq_check(GBContext* ctx,
+                             const char* reason,
+                             uint8_t ly,
+                             uint8_t mode,
+                             uint8_t stat,
+                             uint8_t source_state_mask,
+                             uint8_t source_enable_mask,
+                             uint8_t active_source_mask,
+                             bool previous_line_state,
+                             bool current_line_state);
+void gbrt_log_stat_irq_request(GBContext* ctx,
+                               const char* reason,
+                               uint8_t ly,
+                               uint8_t mode,
+                               uint8_t stat,
+                               uint8_t active_source_mask,
+                               uint8_t if_before,
+                               uint8_t if_after);
+void gbrt_log_interrupt_service(GBContext* ctx,
+                                const char* name,
+                                uint16_t vector,
+                                uint8_t if_before,
+                                uint8_t ie_reg,
+                                uint8_t interrupt_bit,
+                                uint16_t pc_before,
+                                uint16_t sp_before);
 void gbrt_note_lcd_transition(GBContext* ctx, bool lcd_enabled, uint8_t old_lcdc, uint8_t new_lcdc, uint8_t ly, uint8_t mode);
 
 #ifdef __cplusplus

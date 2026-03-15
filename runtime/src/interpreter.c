@@ -147,26 +147,6 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
          * The interpreter is now a universal fallback for ANY uncompiled code.
          */
 
-        /* HRAM DMA Interception */
-        /* Check for standard HRAM DMA routine: LDH (0xFF46), A */
-        if (ctx->pc >= 0xFF80 && ctx->pc <= 0xFFFE) {
-             // DBG_GENERAL("Interpreter: Executing HRAM at 0x%04X", ctx->pc);
-             // if (ctx->pc == 0xFFB6) {
-             //     DBG_GENERAL("HRAM[0xFFB6]: %02X %02X %02X %02X %02X %02X %02X %02X", 
-             //        gb_read8(ctx, 0xFFB6), gb_read8(ctx, 0xFFB7), 
-             //        gb_read8(ctx, 0xFFB8), gb_read8(ctx, 0xFFB9),
-             //        gb_read8(ctx, 0xFFBA), gb_read8(ctx, 0xFFBB),
-             //        gb_read8(ctx, 0xFFBC), gb_read8(ctx, 0xFFBD));
-             // }
-             uint8_t op = gb_read8(ctx, ctx->pc);
-             if (op == 0xE0 && gb_read8(ctx, ctx->pc + 1) == 0x46) {
-                 // DBG_GENERAL("Interpreter: Intercepted HRAM DMA at 0x%04X", ctx->pc);
-                 gb_write8(ctx, 0xFF46, ctx->a);
-                 gb_ret(ctx); /* Execute RET */
-                 return;
-             }
-        }
-
         uint8_t opcode;
         if (ctx->halt_bug) {
             /* HALT bug: Read opcode without incrementing PC (PC fails to advance) */

@@ -1520,11 +1520,11 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         if (options.emit_cycle_counting && instr.cycles > 0) {
             emit_indent();
             out << "gb_tick(ctx, " << (int)instr.cycles << ");\n";
+            emit_indent();
+            out << "if (ctx->stopped) return;\n";
         }
 
         if (is_last_in_group) {
-            emit_indent();
-            out << "if (ctx->stopped) return;\n";
             emit_indent();
             out << "if (ctx->single_step_mode) return;\n";
         }
@@ -1780,11 +1780,16 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "            exit(0);\n";
     source_ss << "        }\n";
     source_ss << "        gbrt_instruction_count++;\n";
+    source_ss << "        gbrt_log_trace(ctx, bank, addr);\n";
     source_ss << "        if (gbrt_trace_enabled) {\n";
     source_ss << "            fprintf(stderr, \"[TRACE] Dispatch 0x%04X (Bank %d)\\n\", addr, bank);\n";
     source_ss << "        }\n";
     source_ss << "        if (gbrt_try_execute_hram_stub(ctx, addr)) {\n";
     source_ss << "            if (ctx->single_step_mode) break;\n";
+    source_ss << "            continue;\n";
+    source_ss << "        }\n";
+    source_ss << "        if (gbrt_try_execute_ram_stub(ctx, addr)) {\n";
+    source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
     source_ss << "            continue;\n";
     source_ss << "        }\n";
     source_ss << "        switch (addr >> 8) {\n";
@@ -2136,6 +2141,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    bool debug_performance = false;\n";
     main_ss << "    const char* input_script = NULL;\n";
     main_ss << "    const char* log_file = NULL;\n";
+    main_ss << "    unsigned long long frame_limit = 0;\n";
     main_ss << "    double slow_frame_ms = 0.0;\n";
     main_ss << "    double slow_vsync_ms = 0.0;\n";
     main_ss << "    bool log_frame_fallbacks = false;\n";
@@ -2159,6 +2165,9 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        } else if (strcmp(argv[i], \"--limit\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gbrt_instruction_limit = strtoull(argv[++i], NULL, 10);\n";
     main_ss << "            printf(\"Instruction limit: %llu\\n\", (unsigned long long)gbrt_instruction_limit);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--limit-frames\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            frame_limit = strtoull(argv[++i], NULL, 10);\n";
+    main_ss << "            printf(\"Frame limit: %llu\\n\", (unsigned long long)frame_limit);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--input\") == 0 && i + 1 < argc) {\n";
     main_ss << "            input_script = argv[++i];\n";
     main_ss << "            gb_platform_set_input_script(input_script);\n";
@@ -2166,6 +2175,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            gb_platform_set_input_record_file(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--dump-frames\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_dump_frames(argv[++i]);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--dump-present-frames\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            gb_platform_set_dump_present_frames(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--screenshot-prefix\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_screenshot_prefix(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--log-file\") == 0 && i + 1 < argc) {\n";
@@ -2363,6 +2374,12 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "                        frame_index,\n";
     main_ss << "                        vsync_ms,\n";
     main_ss << "                        final_pacing_cycles);\n";
+    main_ss << "            }\n";
+    main_ss << "            if (frame_limit > 0 && frame_index >= frame_limit) {\n";
+    main_ss << "                fprintf(stderr,\n";
+    main_ss << "                        \"[LIMIT] Reached frame limit %llu\\n\",\n";
+    main_ss << "                        (unsigned long long)frame_limit);\n";
+    main_ss << "                break;\n";
     main_ss << "            }\n";
     main_ss << "        }\n";
     main_ss << "    }\n";

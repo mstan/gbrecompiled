@@ -6,6 +6,7 @@
 #include "recompiler/rom.h"
 #include "recompiler/decoder.h"
 #include "recompiler/analyzer.h"
+#include "recompiler/symbol_table.h"
 #include "recompiler/ir/ir.h"
 #include "recompiler/ir/ir_builder.h"
 #include "recompiler/codegen/c_emitter.h"
@@ -47,6 +48,7 @@ void print_usage(const char* program) {
     std::cout << "  --bank <n>            Only process bank n\n";
     std::cout << "  --add-entry-point b:a Add manual entry point (e.g. 1:4000)\n";
     std::cout << "  --no-scan             Disable aggressive code scanning (enabled by default)\n";
+    std::cout << "  --symbols <file>      Load a .sym symbol file and use names for generated functions\n";
     std::cout << "  --use-trace <file>    Use runtime trace to find entry points\n";
     std::cout << "  -h, --help            Show this help\n";
 }
@@ -119,6 +121,7 @@ int main(int argc, char* argv[]) {
     int specific_bank = -1;
     std::vector<uint32_t> manual_entry_points;
     std::string trace_file_path;
+    std::string symbol_file_path;
     
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -173,6 +176,10 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 trace_file_path = argv[++i];
             }
+        } else if (arg == "--symbols") {
+            if (i + 1 < argc) {
+                symbol_file_path = argv[++i];
+            }
         } else if (arg[0] != '-') {
             rom_path = arg;
         } else {
@@ -207,6 +214,16 @@ int main(int argc, char* argv[]) {
     
     // Print ROM info
     gbrecomp::print_rom_info(rom);
+
+    gbrecomp::SymbolTable symbol_table;
+    if (!symbol_file_path.empty()) {
+        std::string error;
+        if (!symbol_table.load_sym_file(symbol_file_path, &error)) {
+            std::cerr << "Error: " << error << "\n";
+            return 1;
+        }
+        std::cout << "Loaded " << symbol_table.size() << " symbols from " << symbol_file_path << "\n";
+    }
     
     // Set default output directory
     if (output_dir.empty()) {
@@ -256,6 +273,9 @@ int main(int argc, char* argv[]) {
     }
 
     auto analysis = gbrecomp::analyze(rom, analyze_opts);
+    if (symbol_table.size() > 0) {
+        gbrecomp::apply_symbols_to_analysis(symbol_table, analysis);
+    }
     
     std::cout << "  Found " << analysis.stats.total_functions << " functions\n";
     std::cout << "  Found " << analysis.stats.total_blocks << " basic blocks\n";

@@ -1,203 +1,248 @@
-/**
- * @file symbol_table.cpp
- * @brief Symbol table for function and label names
- */
+#include "recompiler/symbol_table.h"
 
-#include <cstdint>
-#include <string>
-#include <unordered_map>
+#include <algorithm>
+#include <cctype>
 #include <fstream>
-#include <sstream>
 #include <iomanip>
+#include <set>
+#include <sstream>
+#include <unordered_set>
+#include <vector>
 
 namespace gbrecomp {
 
-/**
- * @brief Stores symbol information for addresses
- */
-struct Symbol {
-    std::string name;
+namespace {
+
+struct PendingSymbol {
     uint32_t addr;
-    enum class Type {
-        FUNCTION,
-        LABEL,
-        DATA,
-        UNKNOWN
-    } type;
+    std::string source_name;
     std::string comment;
+    SymbolType type;
 };
 
-/**
- * @brief Symbol table for managing named addresses
- */
-class SymbolTable {
-public:
-    /**
-     * @brief Add a symbol
-     */
-    void add_symbol(uint32_t addr, const std::string& name, Symbol::Type type = Symbol::Type::UNKNOWN) {
-        symbols_[addr] = {name, addr, type, ""};
-        name_to_addr_[name] = addr;
+std::string trim_copy(const std::string& input) {
+    const size_t start = input.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+        return "";
     }
-    
-    /**
-     * @brief Add a symbol with comment
-     */
-    void add_symbol(uint32_t addr, const std::string& name, Symbol::Type type, const std::string& comment) {
-        symbols_[addr] = {name, addr, type, comment};
-        name_to_addr_[name] = addr;
-    }
-    
-    /**
-     * @brief Get symbol at address
-     * @return Pointer to symbol or nullptr
-     */
-    const Symbol* get_symbol(uint32_t addr) const {
-        auto it = symbols_.find(addr);
-        return (it != symbols_.end()) ? &it->second : nullptr;
-    }
-    
-    /**
-     * @brief Get symbol name or generate one
-     */
-    std::string get_name(uint32_t addr) const {
-        auto it = symbols_.find(addr);
-        if (it != symbols_.end()) {
-            return it->second.name;
-        }
-        // Generate name from address
-        std::ostringstream ss;
-        uint8_t bank = static_cast<uint8_t>(addr >> 16);
-        uint16_t offset = static_cast<uint16_t>(addr & 0xFFFF);
-        if (bank > 0) {
-            ss << "loc_" << std::hex << (int)bank << "_" << offset;
+    const size_t end = input.find_last_not_of(" \t\r\n");
+    return input.substr(start, end - start + 1);
+}
+
+bool is_c_keyword(const std::string& name) {
+    static const std::unordered_set<std::string> keywords = {
+        "auto", "break", "case", "char", "const", "continue", "default",
+        "do", "double", "else", "enum", "extern", "float", "for", "goto",
+        "if", "inline", "int", "long", "register", "restrict", "return",
+        "short", "signed", "sizeof", "static", "struct", "switch",
+        "typedef", "union", "unsigned", "void", "volatile", "while",
+        "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
+        "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+        "main"
+    };
+    return keywords.find(name) != keywords.end();
+}
+
+bool is_reserved_runtime_name(const std::string& name) {
+    static const std::unordered_set<std::string> reserved = {
+        "gb_dispatch",
+        "gb_dispatch_call",
+        "gb_main",
+        "gbrt_jump_hl",
+    };
+    return reserved.find(name) != reserved.end();
+}
+
+std::string sanitize_symbol_name(const std::string& name) {
+    std::string sanitized;
+    sanitized.reserve(name.size() + 8);
+
+    for (unsigned char ch : name) {
+        if (std::isalnum(ch) || ch == '_') {
+            sanitized.push_back(static_cast<char>(ch));
         } else {
-            ss << "loc_" << std::hex << offset;
+            sanitized.push_back('_');
         }
-        return ss.str();
     }
-    
-    /**
-     * @brief Look up address by name
-     * @return Address or 0xFFFFFFFF if not found
-     */
-    uint32_t get_address(const std::string& name) const {
-        auto it = name_to_addr_.find(name);
-        return (it != name_to_addr_.end()) ? it->second : 0xFFFFFFFF;
+
+    if (sanitized.empty()) {
+        sanitized = "sym";
     }
-    
-    /**
-     * @brief Check if address has a symbol
-     */
-    bool has_symbol(uint32_t addr) const {
-        return symbols_.find(addr) != symbols_.end();
+
+    if (!(std::isalpha(static_cast<unsigned char>(sanitized[0])) || sanitized[0] == '_')) {
+        sanitized.insert(sanitized.begin(), '_');
     }
-    
-    /**
-     * @brief Load symbols from a .sym file (no$gmb format)
-     */
-    bool load_sym_file(const std::string& path) {
-        std::ifstream file(path);
-        if (!file) return false;
-        
-        std::string line;
-        while (std::getline(file, line)) {
-            // Skip empty lines and comments
-            if (line.empty() || line[0] == ';') continue;
-            
-            // Format: bank:addr name
-            // Example: 00:0150 Start
-            size_t colon = line.find(':');
-            size_t space = line.find(' ');
-            
-            if (colon != std::string::npos && space != std::string::npos && space > colon) {
-                try {
-                    uint8_t bank = std::stoi(line.substr(0, colon), nullptr, 16);
-                    uint16_t offset = std::stoi(line.substr(colon + 1, space - colon - 1), nullptr, 16);
-                    std::string name = line.substr(space + 1);
-                    
-                    // Trim whitespace from name
-                    size_t end = name.find_last_not_of(" \t\r\n");
-                    if (end != std::string::npos) {
-                        name = name.substr(0, end + 1);
-                    }
-                    
-                    uint32_t addr = (static_cast<uint32_t>(bank) << 16) | offset;
-                    add_symbol(addr, name);
-                } catch (...) {
-                    // Skip malformed lines
-                }
+
+    while (sanitized.find("__") != std::string::npos) {
+        sanitized.replace(sanitized.find("__"), 2, "_");
+    }
+
+    if (sanitized.rfind("sym_", 0) != 0) {
+        sanitized = "sym_" + sanitized;
+    }
+
+    if (is_c_keyword(sanitized) || is_reserved_runtime_name(sanitized)) {
+        sanitized = "sym_" + sanitized;
+    }
+
+    return sanitized;
+}
+
+std::string make_unique_symbol_name(const std::string& base_name, uint32_t addr,
+                                    const std::unordered_map<std::string, uint32_t>& used_names) {
+    auto existing = used_names.find(base_name);
+    if (existing == used_names.end() || existing->second == addr) {
+        return base_name;
+    }
+
+    std::ostringstream suffix;
+    suffix << base_name
+           << "_b"
+           << std::hex << std::nouppercase << std::setfill('0') << std::setw(2)
+           << static_cast<unsigned>(addr >> 16)
+           << "_"
+           << std::setw(4)
+           << static_cast<unsigned>(addr & 0xFFFF);
+    return suffix.str();
+}
+
+SymbolType infer_symbol_type(const std::string& source_name) {
+    return (source_name.find('.') == std::string::npos) ? SymbolType::FUNCTION : SymbolType::LABEL;
+}
+
+} // namespace
+
+bool SymbolTable::load_sym_file(const std::string& path, std::string* error) {
+    clear();
+
+    std::ifstream file(path);
+    if (!file) {
+        if (error) {
+            *error = "Failed to open symbol file: " + path;
+        }
+        return false;
+    }
+
+    std::vector<PendingSymbol> pending;
+    std::string line;
+    size_t line_number = 0;
+    while (std::getline(file, line)) {
+        line_number++;
+
+        const size_t comment_pos = line.find(';');
+        const std::string comment = (comment_pos == std::string::npos)
+            ? ""
+            : trim_copy(line.substr(comment_pos + 1));
+        const std::string body = trim_copy(line.substr(0, comment_pos));
+
+        if (body.empty()) {
+            continue;
+        }
+
+        std::istringstream iss(body);
+        std::string addr_token;
+        std::string name;
+        iss >> addr_token >> name;
+        if (addr_token.empty() || name.empty()) {
+            continue;
+        }
+
+        const size_t colon = addr_token.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+
+        try {
+            const uint8_t bank = static_cast<uint8_t>(std::stoul(addr_token.substr(0, colon), nullptr, 16));
+            const uint16_t offset = static_cast<uint16_t>(std::stoul(addr_token.substr(colon + 1), nullptr, 16));
+            pending.push_back({
+                AnalysisResult::make_addr(bank, offset),
+                name,
+                comment,
+                infer_symbol_type(name),
+            });
+        } catch (...) {
+            if (error) {
+                std::ostringstream ss;
+                ss << "Malformed symbol file line " << line_number << " in " << path;
+                *error = ss.str();
             }
+            clear();
+            return false;
         }
-        
-        return true;
     }
-    
-    /**
-     * @brief Save symbols to a .sym file
-     */
-    bool save_sym_file(const std::string& path) const {
-        std::ofstream file(path);
-        if (!file) return false;
-        
-        file << "; Symbol file generated by gbrecomp\n";
-        
-        for (const auto& [addr, sym] : symbols_) {
-            uint8_t bank = static_cast<uint8_t>(addr >> 16);
-            uint16_t offset = static_cast<uint16_t>(addr & 0xFFFF);
-            
-            file << std::hex << std::uppercase
-                 << std::setfill('0') << std::setw(2) << (int)bank << ":"
-                 << std::setfill('0') << std::setw(4) << offset << " "
-                 << sym.name << "\n";
+
+    std::sort(pending.begin(), pending.end(), [](const PendingSymbol& lhs, const PendingSymbol& rhs) {
+        if (lhs.addr != rhs.addr) {
+            return lhs.addr < rhs.addr;
         }
-        
-        return true;
+        return lhs.source_name < rhs.source_name;
+    });
+
+    std::unordered_map<std::string, uint32_t> used_names;
+    for (const PendingSymbol& pending_symbol : pending) {
+        Symbol symbol;
+        symbol.source_name = pending_symbol.source_name;
+        symbol.addr = pending_symbol.addr;
+        symbol.type = pending_symbol.type;
+        symbol.comment = pending_symbol.comment;
+
+        const std::string sanitized = sanitize_symbol_name(pending_symbol.source_name);
+        symbol.c_name = make_unique_symbol_name(sanitized, pending_symbol.addr, used_names);
+
+        symbols_[pending_symbol.addr] = symbol;
+        used_names[symbol.c_name] = pending_symbol.addr;
     }
-    
-    /**
-     * @brief Get all symbols
-     */
-    const std::unordered_map<uint32_t, Symbol>& symbols() const {
-        return symbols_;
+
+    return true;
+}
+
+void SymbolTable::clear() {
+    symbols_.clear();
+}
+
+const Symbol* SymbolTable::get_symbol(uint32_t addr) const {
+    const auto it = symbols_.find(addr);
+    return (it == symbols_.end()) ? nullptr : &it->second;
+}
+
+const Symbol* SymbolTable::get_symbol(uint8_t bank, uint16_t addr) const {
+    return get_symbol(AnalysisResult::make_addr(bank, addr));
+}
+
+bool SymbolTable::has_symbol(uint32_t addr) const {
+    return symbols_.find(addr) != symbols_.end();
+}
+
+size_t SymbolTable::size() const {
+    return symbols_.size();
+}
+
+void apply_symbols_to_analysis(const SymbolTable& symbols, AnalysisResult& analysis) {
+    std::set<uint32_t> ordered_addresses;
+    for (const auto& [addr, unused] : analysis.functions) {
+        (void)unused;
+        ordered_addresses.insert(addr);
     }
-    
-    /**
-     * @brief Clear all symbols
-     */
-    void clear() {
-        symbols_.clear();
-        name_to_addr_.clear();
+
+    std::unordered_map<std::string, uint32_t> used_names;
+    for (uint32_t addr : ordered_addresses) {
+        auto func_it = analysis.functions.find(addr);
+        if (func_it == analysis.functions.end()) {
+            continue;
+        }
+
+        Function& func = func_it->second;
+        std::string candidate_name = func.name;
+
+        if (const Symbol* symbol = symbols.get_symbol(addr)) {
+            candidate_name = symbol->c_name;
+        }
+
+        candidate_name = make_unique_symbol_name(candidate_name, addr, used_names);
+        func.name = candidate_name;
+        used_names[candidate_name] = addr;
     }
-    
-    /**
-     * @brief Add standard GameBoy symbols
-     */
-    void add_standard_symbols() {
-        // Interrupt vectors
-        add_symbol(0x0040, "vblank_handler", Symbol::Type::FUNCTION);
-        add_symbol(0x0048, "lcdc_handler", Symbol::Type::FUNCTION);
-        add_symbol(0x0050, "timer_handler", Symbol::Type::FUNCTION);
-        add_symbol(0x0058, "serial_handler", Symbol::Type::FUNCTION);
-        add_symbol(0x0060, "joypad_handler", Symbol::Type::FUNCTION);
-        
-        // RST vectors
-        add_symbol(0x0000, "rst_00", Symbol::Type::FUNCTION);
-        add_symbol(0x0008, "rst_08", Symbol::Type::FUNCTION);
-        add_symbol(0x0010, "rst_10", Symbol::Type::FUNCTION);
-        add_symbol(0x0018, "rst_18", Symbol::Type::FUNCTION);
-        add_symbol(0x0020, "rst_20", Symbol::Type::FUNCTION);
-        add_symbol(0x0028, "rst_28", Symbol::Type::FUNCTION);
-        add_symbol(0x0030, "rst_30", Symbol::Type::FUNCTION);
-        add_symbol(0x0038, "rst_38", Symbol::Type::FUNCTION);
-        
-        // Entry point
-        add_symbol(0x0100, "entry", Symbol::Type::FUNCTION);
-    }
-    
-private:
-    std::unordered_map<uint32_t, Symbol> symbols_;
-    std::unordered_map<std::string, uint32_t> name_to_addr_;
-};
+}
 
 } // namespace gbrecomp

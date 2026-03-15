@@ -695,12 +695,29 @@ static bool should_emit_named_address_constant(const ir::AddressSymbol& symbol) 
            (addr >= 0xFF00);
 }
 
-static std::string make_address_constant_name(const ir::AddressSymbol& symbol) {
-    std::string base = symbol.emitted_name;
+static std::string strip_symbol_prefix(const std::string& emitted_name) {
+    std::string base = emitted_name;
     if (base.rfind("sym_", 0) == 0) {
         base.erase(0, 4);
     }
+    return base;
+}
+
+static std::string make_address_constant_name(const ir::AddressSymbol& symbol) {
+    std::string base = strip_symbol_prefix(symbol.emitted_name);
     return "GB_ADDR_" + base;
+}
+
+static bool should_emit_named_rom_data_symbol(const ir::AddressSymbol& symbol) {
+    return symbol.kind == "data" && symbol.address < 0x8000;
+}
+
+static std::string make_rom_address_constant_name(const ir::AddressSymbol& symbol) {
+    return "GB_ROM_ADDR_" + strip_symbol_prefix(symbol.emitted_name);
+}
+
+static std::string make_rom_pointer_name(const ir::AddressSymbol& symbol) {
+    return "GB_ROM_PTR_" + strip_symbol_prefix(symbol.emitted_name);
 }
 
 static std::string format_base_offset(const char* base_name, uint16_t offset) {
@@ -742,17 +759,80 @@ static std::string format_builtin_memory_address(uint16_t addr) {
     return hex_literal(addr, 4);
 }
 
-static std::string format_memory_address(const ir::Program& program, uint16_t addr) {
+static const ir::AddressSymbol* find_address_symbol(const ir::Program& program,
+                                                    uint16_t addr,
+                                                    uint8_t source_bank) {
+    if (addr < 0x4000) {
+        auto symbol_it = program.address_symbols.find(addr);
+        if (symbol_it != program.address_symbols.end()) {
+            return &symbol_it->second;
+        }
+        return nullptr;
+    }
+
+    if (addr < 0x8000) {
+        if (source_bank > 0) {
+            const uint32_t banked_addr =
+                (static_cast<uint32_t>(source_bank) << 16) | static_cast<uint32_t>(addr);
+            auto symbol_it = program.address_symbols.find(banked_addr);
+            if (symbol_it != program.address_symbols.end()) {
+                return &symbol_it->second;
+            }
+        }
+
+        auto symbol_it = program.address_symbols.find(addr);
+        if (symbol_it != program.address_symbols.end()) {
+            return &symbol_it->second;
+        }
+        return nullptr;
+    }
+
     auto symbol_it = program.address_symbols.find(addr);
-    if (symbol_it != program.address_symbols.end() &&
-        should_emit_named_address_constant(symbol_it->second)) {
-        return make_address_constant_name(symbol_it->second);
+    if (symbol_it != program.address_symbols.end()) {
+        return &symbol_it->second;
+    }
+    return nullptr;
+}
+
+static std::string format_memory_address(const ir::Program& program,
+                                         uint16_t addr,
+                                         uint8_t source_bank) {
+    if (const ir::AddressSymbol* symbol = find_address_symbol(program, addr, source_bank)) {
+        if (should_emit_named_rom_data_symbol(*symbol)) {
+            return make_rom_address_constant_name(*symbol);
+        }
+        if (should_emit_named_address_constant(*symbol)) {
+            return make_address_constant_name(*symbol);
+        }
     }
     return format_builtin_memory_address(addr);
 }
 
-static std::string format_io_offset_address(const ir::Program& program, uint8_t offset) {
-    return format_memory_address(program, static_cast<uint16_t>(0xFF00u + offset));
+static bool try_get_rom_storage_index(uint8_t bank,
+                                      uint16_t addr,
+                                      size_t rom_size,
+                                      size_t* out_index) {
+    size_t index = 0;
+    if (addr < 0x4000) {
+        index = static_cast<size_t>(addr);
+    } else if (addr < 0x8000) {
+        index = static_cast<size_t>(bank) * 0x4000u + static_cast<size_t>(addr - 0x4000u);
+    } else {
+        return false;
+    }
+
+    if (index >= rom_size) {
+        return false;
+    }
+
+    *out_index = index;
+    return true;
+}
+
+static std::string format_io_offset_address(const ir::Program& program,
+                                            uint8_t offset,
+                                            uint8_t source_bank) {
+    return format_memory_address(program, static_cast<uint16_t>(0xFF00u + offset), source_bank);
 }
 
 static std::string format_block_label_for_address(const ir::Program& program,
@@ -830,8 +910,8 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::MOV_REG_IMM16:
             out << "ctx->" << reg16_names[instr.dst.value.reg16] 
-                << " = 0x" << std::hex << std::setfill('0') << std::setw(4) 
-                << instr.src.value.imm16 << std::dec << ";\n";
+                << " = " << format_memory_address(program, instr.src.value.imm16, instr.source_bank)
+                << ";\n";
             break;
             
         case ir::Opcode::LOAD8: {
@@ -840,7 +920,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
             if (instr.src.type == ir::OperandType::IMM16) {
                 out << "ctx->" << dst_name << " = gb_read8(ctx, "
-                    << format_memory_address(program, instr.src.value.imm16) << ");\n";
+                    << format_memory_address(program, instr.src.value.imm16, instr.source_bank) << ");\n";
             } else if (instr.src.type == ir::OperandType::REG16) {
                 out << "ctx->" << dst_name << " = gb_read8(ctx, ctx->" 
                     << reg16_names[instr.src.value.reg16] << ");\n";
@@ -856,15 +936,15 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::STORE8:
             if (instr.dst.type == ir::OperandType::IMM16) {
                 if (instr.src.type == ir::OperandType::IMM8) {
-                    out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16)
+                    out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
                         << ", 0x" << std::setw(2) << (int)instr.src.value.imm8 << ");\n";
                 } else {
                     const char* src_name = get_reg8_name(instr.src.value.reg8);
                     if (src_name) {
-                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16)
+                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
                             << ", ctx->" << src_name << ");\n";
                     } else {
-                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16)
+                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
                             << ", ctx->a);\n";
                     }
                 }
@@ -1566,7 +1646,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         // === I/O Port Operations ===
         case ir::Opcode::IO_READ:
             // LDH A,(n) - read from 0xFF00 + immediate offset
-            out << "ctx->a = gb_read8(ctx, " << format_io_offset_address(program, instr.src.value.imm8) << ");\n";
+            out << "ctx->a = gb_read8(ctx, " << format_io_offset_address(program, instr.src.value.imm8, instr.source_bank) << ");\n";
             break;
             
         case ir::Opcode::IO_READ_C:
@@ -1576,7 +1656,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::IO_WRITE:
             // LDH (n),A - write to 0xFF00 + immediate offset
-            out << "gb_write8(ctx, " << format_io_offset_address(program, instr.dst.value.imm8) << ", ctx->a);\n";
+            out << "gb_write8(ctx, " << format_io_offset_address(program, instr.dst.value.imm8, instr.source_bank) << ", ctx->a);\n";
             break;
             
         case ir::Opcode::IO_WRITE_C:
@@ -1679,7 +1759,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::STORE16:
             // LD (nn),SP - store 16-bit register to memory
-            out << "gb_write16(ctx, " << format_memory_address(program, instr.dst.value.imm16)
+            out << "gb_write16(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
                 << ", ctx->" << reg16_names[instr.src.value.reg16] << ");\n";
             break;
             
@@ -1824,6 +1904,31 @@ GeneratedOutput generate_output(const ir::Program& program,
                   return lhs->emitted_name < rhs->emitted_name;
               });
 
+    std::vector<const ir::AddressSymbol*> named_rom_data_symbols;
+    named_rom_data_symbols.reserve(program.address_symbols.size());
+    for (const auto& [addr, symbol] : program.address_symbols) {
+        (void)addr;
+        if (!should_emit_named_rom_data_symbol(symbol)) {
+            continue;
+        }
+
+        size_t rom_storage_index = 0;
+        if (!try_get_rom_storage_index(symbol.bank, symbol.address, rom_size, &rom_storage_index)) {
+            continue;
+        }
+        named_rom_data_symbols.push_back(&symbol);
+    }
+    std::sort(named_rom_data_symbols.begin(), named_rom_data_symbols.end(),
+              [](const ir::AddressSymbol* lhs, const ir::AddressSymbol* rhs) {
+                  if (lhs->bank != rhs->bank) {
+                      return lhs->bank < rhs->bank;
+                  }
+                  if (lhs->address != rhs->address) {
+                      return lhs->address < rhs->address;
+                  }
+                  return lhs->emitted_name < rhs->emitted_name;
+              });
+
     if (!named_address_symbols.empty()) {
         internal_header_ss << "enum {\n";
         for (size_t i = 0; i < named_address_symbols.size(); ++i) {
@@ -1833,6 +1938,23 @@ GeneratedOutput generate_output(const ir::Program& program,
             internal_header_ss << (i + 1 < named_address_symbols.size() ? "," : "") << "\n";
         }
         internal_header_ss << "};\n\n";
+    }
+
+    if (!named_rom_data_symbols.empty()) {
+        internal_header_ss << "enum {\n";
+        for (size_t i = 0; i < named_rom_data_symbols.size(); ++i) {
+            const ir::AddressSymbol& symbol = *named_rom_data_symbols[i];
+            internal_header_ss << "    " << make_rom_address_constant_name(symbol)
+                               << " = " << hex_literal(symbol.address, 4);
+            internal_header_ss << (i + 1 < named_rom_data_symbols.size() ? "," : "") << "\n";
+        }
+        internal_header_ss << "};\n\n";
+
+        for (const ir::AddressSymbol* symbol : named_rom_data_symbols) {
+            internal_header_ss << "extern const uint8_t* const "
+                               << make_rom_pointer_name(*symbol) << ";\n";
+        }
+        internal_header_ss << "\n";
     }
 
     for (const auto& [name, func] : program.functions) {
@@ -1965,6 +2087,35 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
         metadata_ss << "\n    }";
         metadata_ss << (i + 1 < named_address_symbols.size() ? ",\n" : "\n");
+    }
+    metadata_ss << "  ],\n";
+    metadata_ss << "  \"rom_data_symbols\": [\n";
+    for (size_t i = 0; i < named_rom_data_symbols.size(); ++i) {
+        const ir::AddressSymbol& symbol = *named_rom_data_symbols[i];
+        size_t rom_storage_index = 0;
+        (void)try_get_rom_storage_index(symbol.bank, symbol.address, rom_size, &rom_storage_index);
+
+        metadata_ss << "    {\n";
+        metadata_ss << "      \"bank\": " << static_cast<unsigned>(symbol.bank) << ",\n";
+        metadata_ss << "      \"address\": \"" << hex_literal(symbol.address, 4) << "\",\n";
+        metadata_ss << "      \"storage_offset\": \"" << hex_literal(static_cast<uint32_t>(rom_storage_index), 6) << "\",\n";
+        metadata_ss << "      \"emitted_address_constant\": \""
+                    << json_escape(make_rom_address_constant_name(symbol)) << "\",\n";
+        metadata_ss << "      \"emitted_pointer\": \""
+                    << json_escape(make_rom_pointer_name(symbol)) << "\",\n";
+        metadata_ss << "      \"emitted_name\": \"" << json_escape(symbol.emitted_name) << "\",\n";
+        metadata_ss << "      \"kind\": \"" << json_escape(symbol.kind) << "\",\n";
+        metadata_ss << "      \"provenance\": \"" << json_escape(symbol.provenance) << "\"";
+        if (!symbol.source_name.empty()) {
+            metadata_ss << ",\n      \"source_symbol\": \""
+                        << json_escape(symbol.source_name) << "\"";
+        }
+        if (!symbol.comment.empty()) {
+            metadata_ss << ",\n      \"comment\": \""
+                        << json_escape(symbol.comment) << "\"";
+        }
+        metadata_ss << "\n    }";
+        metadata_ss << (i + 1 < named_rom_data_symbols.size() ? ",\n" : "\n");
     }
     metadata_ss << "  ],\n";
     metadata_ss << "  \"builtin_address_constants\": [\n";
@@ -2501,6 +2652,17 @@ GeneratedOutput generate_output(const ir::Program& program,
     }
     rom_ss << std::dec << "};\n";
     rom_ss << "const size_t rom_size = " << rom_size << ";\n";
+    if (!named_rom_data_symbols.empty()) {
+        rom_ss << "\n";
+        for (const ir::AddressSymbol* symbol : named_rom_data_symbols) {
+            size_t rom_storage_index = 0;
+            if (!try_get_rom_storage_index(symbol->bank, symbol->address, rom_size, &rom_storage_index)) {
+                continue;
+            }
+            rom_ss << "const uint8_t* const " << make_rom_pointer_name(*symbol)
+                   << " = &rom_data[" << rom_storage_index << "];\n";
+        }
+    }
     output.rom_data_content = rom_ss.str();
     output.rom_data_file = options.output_prefix + "_rom.c";
     

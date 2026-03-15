@@ -79,9 +79,9 @@ Success criteria:
 
 ### 3.1 ROM tables
 
-- [ ] Detect common pointer tables and byte tables
-- [ ] Emit them as named `const` arrays where layout is trustworthy
-- [ ] Replace raw ROM reads with table references when safe
+- [~] Detect common pointer tables and byte tables
+- [~] Emit them as named ROM data entrypoints where layout is trustworthy
+- [~] Replace raw ROM address literals with symbolized ROM data references where safe
 
 ### 3.2 Typed data
 

@@ -114,19 +114,6 @@ SymbolType infer_symbol_type(uint32_t addr, const std::string& source_name) {
     return (source_name.find('.') == std::string::npos) ? SymbolType::FUNCTION : SymbolType::LABEL;
 }
 
-std::string symbol_type_name(SymbolType type) {
-    switch (type) {
-        case SymbolType::FUNCTION:
-            return "function";
-        case SymbolType::LABEL:
-            return "label";
-        case SymbolType::DATA:
-            return "data";
-        default:
-            return "unknown";
-    }
-}
-
 } // namespace
 
 bool SymbolTable::load_sym_file(const std::string& path, std::string* error) {
@@ -244,9 +231,18 @@ void apply_symbols_to_analysis(const SymbolTable& symbols, AnalysisResult& analy
         AddressSymbolMetadata metadata;
         metadata.source_name = symbol.source_name;
         metadata.emitted_name = symbol.c_name;
-        metadata.kind = symbol_type_name(symbol.type);
         metadata.provenance = "imported";
         metadata.comment = symbol.comment;
+
+        if (analysis.functions.find(addr) != analysis.functions.end()) {
+            metadata.kind = "function";
+        } else if (analysis.blocks.find(addr) != analysis.blocks.end() ||
+                   analysis.label_addresses.find(addr) != analysis.label_addresses.end()) {
+            metadata.kind = "label";
+        } else {
+            metadata.kind = "data";
+        }
+
         analysis.symbol_metadata[addr] = metadata;
     }
 

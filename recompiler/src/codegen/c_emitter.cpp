@@ -623,52 +623,64 @@ static std::string json_escape(const std::string& input) {
     return ss.str();
 }
 
+struct BuiltinAddressConstant {
+    uint16_t addr;
+    const char* name;
+    const char* kind;
+};
+
+static constexpr BuiltinAddressConstant kBuiltinAddressConstants[] = {
+    {0xFF00, "GB_IO_JOYP", "io_register"},
+    {0xFF01, "GB_IO_SB", "io_register"},
+    {0xFF02, "GB_IO_SC", "io_register"},
+    {0xFF04, "GB_IO_DIV", "io_register"},
+    {0xFF05, "GB_IO_TIMA", "io_register"},
+    {0xFF06, "GB_IO_TMA", "io_register"},
+    {0xFF07, "GB_IO_TAC", "io_register"},
+    {0xFF0F, "GB_IO_IF", "io_register"},
+    {0xFF10, "GB_IO_NR10", "io_register"},
+    {0xFF11, "GB_IO_NR11", "io_register"},
+    {0xFF12, "GB_IO_NR12", "io_register"},
+    {0xFF13, "GB_IO_NR13", "io_register"},
+    {0xFF14, "GB_IO_NR14", "io_register"},
+    {0xFF16, "GB_IO_NR21", "io_register"},
+    {0xFF17, "GB_IO_NR22", "io_register"},
+    {0xFF18, "GB_IO_NR23", "io_register"},
+    {0xFF19, "GB_IO_NR24", "io_register"},
+    {0xFF1A, "GB_IO_NR30", "io_register"},
+    {0xFF1B, "GB_IO_NR31", "io_register"},
+    {0xFF1C, "GB_IO_NR32", "io_register"},
+    {0xFF1D, "GB_IO_NR33", "io_register"},
+    {0xFF1E, "GB_IO_NR34", "io_register"},
+    {0xFF20, "GB_IO_NR41", "io_register"},
+    {0xFF21, "GB_IO_NR42", "io_register"},
+    {0xFF22, "GB_IO_NR43", "io_register"},
+    {0xFF23, "GB_IO_NR44", "io_register"},
+    {0xFF24, "GB_IO_NR50", "io_register"},
+    {0xFF25, "GB_IO_NR51", "io_register"},
+    {0xFF26, "GB_IO_NR52", "io_register"},
+    {0xFF40, "GB_IO_LCDC", "io_register"},
+    {0xFF41, "GB_IO_STAT", "io_register"},
+    {0xFF42, "GB_IO_SCY", "io_register"},
+    {0xFF43, "GB_IO_SCX", "io_register"},
+    {0xFF44, "GB_IO_LY", "io_register"},
+    {0xFF45, "GB_IO_LYC", "io_register"},
+    {0xFF46, "GB_IO_DMA", "io_register"},
+    {0xFF47, "GB_IO_BGP", "io_register"},
+    {0xFF48, "GB_IO_OBP0", "io_register"},
+    {0xFF49, "GB_IO_OBP1", "io_register"},
+    {0xFF4A, "GB_IO_WY", "io_register"},
+    {0xFF4B, "GB_IO_WX", "io_register"},
+    {0xFFFF, "GB_IO_IE", "interrupt_enable"},
+};
+
 static const char* named_address_constant(uint16_t addr) {
-    switch (addr) {
-        case 0xFF00: return "GB_IO_JOYP";
-        case 0xFF01: return "GB_IO_SB";
-        case 0xFF02: return "GB_IO_SC";
-        case 0xFF04: return "GB_IO_DIV";
-        case 0xFF05: return "GB_IO_TIMA";
-        case 0xFF06: return "GB_IO_TMA";
-        case 0xFF07: return "GB_IO_TAC";
-        case 0xFF0F: return "GB_IO_IF";
-        case 0xFF10: return "GB_IO_NR10";
-        case 0xFF11: return "GB_IO_NR11";
-        case 0xFF12: return "GB_IO_NR12";
-        case 0xFF13: return "GB_IO_NR13";
-        case 0xFF14: return "GB_IO_NR14";
-        case 0xFF16: return "GB_IO_NR21";
-        case 0xFF17: return "GB_IO_NR22";
-        case 0xFF18: return "GB_IO_NR23";
-        case 0xFF19: return "GB_IO_NR24";
-        case 0xFF1A: return "GB_IO_NR30";
-        case 0xFF1B: return "GB_IO_NR31";
-        case 0xFF1C: return "GB_IO_NR32";
-        case 0xFF1D: return "GB_IO_NR33";
-        case 0xFF1E: return "GB_IO_NR34";
-        case 0xFF20: return "GB_IO_NR41";
-        case 0xFF21: return "GB_IO_NR42";
-        case 0xFF22: return "GB_IO_NR43";
-        case 0xFF23: return "GB_IO_NR44";
-        case 0xFF24: return "GB_IO_NR50";
-        case 0xFF25: return "GB_IO_NR51";
-        case 0xFF26: return "GB_IO_NR52";
-        case 0xFF40: return "GB_IO_LCDC";
-        case 0xFF41: return "GB_IO_STAT";
-        case 0xFF42: return "GB_IO_SCY";
-        case 0xFF43: return "GB_IO_SCX";
-        case 0xFF44: return "GB_IO_LY";
-        case 0xFF45: return "GB_IO_LYC";
-        case 0xFF46: return "GB_IO_DMA";
-        case 0xFF47: return "GB_IO_BGP";
-        case 0xFF48: return "GB_IO_OBP0";
-        case 0xFF49: return "GB_IO_OBP1";
-        case 0xFF4A: return "GB_IO_WY";
-        case 0xFF4B: return "GB_IO_WX";
-        case 0xFFFF: return "GB_IO_IE";
-        default: return nullptr;
+    for (const auto& constant : kBuiltinAddressConstants) {
+        if (constant.addr == addr) {
+            return constant.name;
+        }
     }
+    return nullptr;
 }
 
 static bool should_emit_named_address_constant(const ir::AddressSymbol& symbol) {
@@ -1953,6 +1965,19 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
         metadata_ss << "\n    }";
         metadata_ss << (i + 1 < named_address_symbols.size() ? ",\n" : "\n");
+    }
+    metadata_ss << "  ],\n";
+    metadata_ss << "  \"builtin_address_constants\": [\n";
+    for (size_t i = 0; i < std::size(kBuiltinAddressConstants); ++i) {
+        const BuiltinAddressConstant& constant = kBuiltinAddressConstants[i];
+
+        metadata_ss << "    {\n";
+        metadata_ss << "      \"address\": \"" << hex_literal(constant.addr, 4) << "\",\n";
+        metadata_ss << "      \"emitted_constant\": \"" << json_escape(constant.name) << "\",\n";
+        metadata_ss << "      \"kind\": \"" << json_escape(constant.kind) << "\",\n";
+        metadata_ss << "      \"provenance\": \"builtin\"\n";
+        metadata_ss << "    }";
+        metadata_ss << (i + 1 < std::size(kBuiltinAddressConstants) ? ",\n" : "\n");
     }
     metadata_ss << "  ]\n";
     metadata_ss << "}\n";

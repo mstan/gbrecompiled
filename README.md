@@ -88,11 +88,32 @@ cmake -S output/game -B output/game/build -DGBRECOMP_GENERATED_OPT_LEVEL=2
 
 ### Automated Setup (Recommended)
 
-**macOS/Linux:**
+**macOS:**
 ```bash
 # Download and run the setup script
 git clone https://github.com/arcanite24/gb-recompiled.git
 cd gb-recompiled
+chmod +x tools/setup.sh
+./tools/setup.sh
+```
+
+**Linux:**
+
+First install build dependencies:
+- git
+- build-essential
+- cmake
+- ninja-build
+- python3 
+- python3-pip
+- python3-venv
+- libsdl2-dev
+```bash
+# Download the setup script, create a venv for python packages, and run the setup
+git clone https://github.com/arcanite24/gb-recompiled.git
+cd gb-recompiled
+python3 -m venv gb
+source gb/bin/activate
 chmod +x tools/setup.sh
 ./tools/setup.sh
 ```

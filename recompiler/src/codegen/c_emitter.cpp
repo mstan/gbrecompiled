@@ -671,6 +671,26 @@ static const char* named_address_constant(uint16_t addr) {
     }
 }
 
+static bool should_emit_named_address_constant(const ir::AddressSymbol& symbol) {
+    if (symbol.kind == "function" || symbol.kind == "label") {
+        return false;
+    }
+
+    const uint16_t addr = symbol.address;
+    return (addr >= 0x8000 && addr <= 0xBFFF) ||
+           (addr >= 0xC000 && addr <= 0xDFFF) ||
+           (addr >= 0xFE00 && addr <= 0xFE9F) ||
+           (addr >= 0xFF00);
+}
+
+static std::string make_address_constant_name(const ir::AddressSymbol& symbol) {
+    std::string base = symbol.emitted_name;
+    if (base.rfind("sym_", 0) == 0) {
+        base.erase(0, 4);
+    }
+    return "GB_ADDR_" + base;
+}
+
 static std::string format_base_offset(const char* base_name, uint16_t offset) {
     if (offset == 0) {
         return base_name;
@@ -680,7 +700,7 @@ static std::string format_base_offset(const char* base_name, uint16_t offset) {
     return ss.str();
 }
 
-static std::string format_memory_address(uint16_t addr) {
+static std::string format_builtin_memory_address(uint16_t addr) {
     if (const char* named = named_address_constant(addr)) {
         return named;
     }
@@ -710,8 +730,17 @@ static std::string format_memory_address(uint16_t addr) {
     return hex_literal(addr, 4);
 }
 
-static std::string format_io_offset_address(uint8_t offset) {
-    return format_memory_address(static_cast<uint16_t>(0xFF00u + offset));
+static std::string format_memory_address(const ir::Program& program, uint16_t addr) {
+    auto symbol_it = program.address_symbols.find(addr);
+    if (symbol_it != program.address_symbols.end() &&
+        should_emit_named_address_constant(symbol_it->second)) {
+        return make_address_constant_name(symbol_it->second);
+    }
+    return format_builtin_memory_address(addr);
+}
+
+static std::string format_io_offset_address(const ir::Program& program, uint8_t offset) {
+    return format_memory_address(program, static_cast<uint16_t>(0xFF00u + offset));
 }
 
 static std::string format_block_label_for_address(const ir::Program& program,
@@ -799,7 +828,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
             if (instr.src.type == ir::OperandType::IMM16) {
                 out << "ctx->" << dst_name << " = gb_read8(ctx, "
-                    << format_memory_address(instr.src.value.imm16) << ");\n";
+                    << format_memory_address(program, instr.src.value.imm16) << ");\n";
             } else if (instr.src.type == ir::OperandType::REG16) {
                 out << "ctx->" << dst_name << " = gb_read8(ctx, ctx->" 
                     << reg16_names[instr.src.value.reg16] << ");\n";
@@ -815,15 +844,15 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::STORE8:
             if (instr.dst.type == ir::OperandType::IMM16) {
                 if (instr.src.type == ir::OperandType::IMM8) {
-                    out << "gb_write8(ctx, " << format_memory_address(instr.dst.value.imm16)
+                    out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16)
                         << ", 0x" << std::setw(2) << (int)instr.src.value.imm8 << ");\n";
                 } else {
                     const char* src_name = get_reg8_name(instr.src.value.reg8);
                     if (src_name) {
-                        out << "gb_write8(ctx, " << format_memory_address(instr.dst.value.imm16)
+                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16)
                             << ", ctx->" << src_name << ");\n";
                     } else {
-                        out << "gb_write8(ctx, " << format_memory_address(instr.dst.value.imm16)
+                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16)
                             << ", ctx->a);\n";
                     }
                 }
@@ -1525,7 +1554,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         // === I/O Port Operations ===
         case ir::Opcode::IO_READ:
             // LDH A,(n) - read from 0xFF00 + immediate offset
-            out << "ctx->a = gb_read8(ctx, " << format_io_offset_address(instr.src.value.imm8) << ");\n";
+            out << "ctx->a = gb_read8(ctx, " << format_io_offset_address(program, instr.src.value.imm8) << ");\n";
             break;
             
         case ir::Opcode::IO_READ_C:
@@ -1535,7 +1564,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::IO_WRITE:
             // LDH (n),A - write to 0xFF00 + immediate offset
-            out << "gb_write8(ctx, " << format_io_offset_address(instr.dst.value.imm8) << ", ctx->a);\n";
+            out << "gb_write8(ctx, " << format_io_offset_address(program, instr.dst.value.imm8) << ", ctx->a);\n";
             break;
             
         case ir::Opcode::IO_WRITE_C:
@@ -1638,7 +1667,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::STORE16:
             // LD (nn),SP - store 16-bit register to memory
-            out << "gb_write16(ctx, " << format_memory_address(instr.dst.value.imm16)
+            out << "gb_write16(ctx, " << format_memory_address(program, instr.dst.value.imm16)
                 << ", ctx->" << reg16_names[instr.src.value.reg16] << ");\n";
             break;
             
@@ -1763,6 +1792,37 @@ GeneratedOutput generate_output(const ir::Program& program,
     internal_header_ss << "    GB_IO_WX = 0xFF4B,\n";
     internal_header_ss << "    GB_IO_IE = 0xFFFF\n";
     internal_header_ss << "};\n\n";
+
+    std::vector<const ir::AddressSymbol*> named_address_symbols;
+    named_address_symbols.reserve(program.address_symbols.size());
+    for (const auto& [addr, symbol] : program.address_symbols) {
+        (void)addr;
+        if (should_emit_named_address_constant(symbol)) {
+            named_address_symbols.push_back(&symbol);
+        }
+    }
+    std::sort(named_address_symbols.begin(), named_address_symbols.end(),
+              [](const ir::AddressSymbol* lhs, const ir::AddressSymbol* rhs) {
+                  if (lhs->bank != rhs->bank) {
+                      return lhs->bank < rhs->bank;
+                  }
+                  if (lhs->address != rhs->address) {
+                      return lhs->address < rhs->address;
+                  }
+                  return lhs->emitted_name < rhs->emitted_name;
+              });
+
+    if (!named_address_symbols.empty()) {
+        internal_header_ss << "enum {\n";
+        for (size_t i = 0; i < named_address_symbols.size(); ++i) {
+            const ir::AddressSymbol& symbol = *named_address_symbols[i];
+            internal_header_ss << "    " << make_address_constant_name(symbol)
+                               << " = " << format_builtin_memory_address(symbol.address);
+            internal_header_ss << (i + 1 < named_address_symbols.size() ? "," : "") << "\n";
+        }
+        internal_header_ss << "};\n\n";
+    }
+
     for (const auto& [name, func] : program.functions) {
         internal_header_ss << "void " << func.name << "(GBContext* ctx);\n";
     }
@@ -1869,6 +1929,30 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
         metadata_ss << "\n    }";
         metadata_ss << (i + 1 < sorted_blocks.size() ? ",\n" : "\n");
+    }
+    metadata_ss << "  ],\n";
+    metadata_ss << "  \"data_symbols\": [\n";
+    for (size_t i = 0; i < named_address_symbols.size(); ++i) {
+        const ir::AddressSymbol& symbol = *named_address_symbols[i];
+
+        metadata_ss << "    {\n";
+        metadata_ss << "      \"bank\": " << static_cast<unsigned>(symbol.bank) << ",\n";
+        metadata_ss << "      \"address\": \"" << hex_literal(symbol.address, 4) << "\",\n";
+        metadata_ss << "      \"emitted_constant\": \"" 
+                    << json_escape(make_address_constant_name(symbol)) << "\",\n";
+        metadata_ss << "      \"emitted_name\": \"" << json_escape(symbol.emitted_name) << "\",\n";
+        metadata_ss << "      \"kind\": \"" << json_escape(symbol.kind) << "\",\n";
+        metadata_ss << "      \"provenance\": \"" << json_escape(symbol.provenance) << "\"";
+        if (!symbol.source_name.empty()) {
+            metadata_ss << ",\n      \"source_symbol\": \""
+                        << json_escape(symbol.source_name) << "\"";
+        }
+        if (!symbol.comment.empty()) {
+            metadata_ss << ",\n      \"comment\": \""
+                        << json_escape(symbol.comment) << "\"";
+        }
+        metadata_ss << "\n    }";
+        metadata_ss << (i + 1 < named_address_symbols.size() ? ",\n" : "\n");
     }
     metadata_ss << "  ]\n";
     metadata_ss << "}\n";

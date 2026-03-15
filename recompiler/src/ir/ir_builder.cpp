@@ -300,7 +300,9 @@ std::string Program::get_label_name(uint32_t id) const {
 std::string Program::make_address_label(uint8_t bank, uint16_t addr) const {
     const uint32_t full_addr = (static_cast<uint32_t>(bank) << 16) | addr;
     auto symbol_it = address_symbols.find(full_addr);
-    if (symbol_it != address_symbols.end() && !symbol_it->second.emitted_name.empty()) {
+    if (symbol_it != address_symbols.end() &&
+        symbol_it->second.kind != "data" &&
+        !symbol_it->second.emitted_name.empty()) {
         if (symbol_it->second.kind == "function") {
             return symbol_it->second.emitted_name + "__entry";
         }

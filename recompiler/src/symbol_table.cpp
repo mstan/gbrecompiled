@@ -106,7 +106,11 @@ std::string make_unique_symbol_name(const std::string& base_name, uint32_t addr,
     return suffix.str();
 }
 
-SymbolType infer_symbol_type(const std::string& source_name) {
+SymbolType infer_symbol_type(uint32_t addr, const std::string& source_name) {
+    const uint16_t offset = static_cast<uint16_t>(addr & 0xFFFF);
+    if (offset >= 0x8000) {
+        return SymbolType::DATA;
+    }
     return (source_name.find('.') == std::string::npos) ? SymbolType::FUNCTION : SymbolType::LABEL;
 }
 
@@ -172,7 +176,7 @@ bool SymbolTable::load_sym_file(const std::string& path, std::string* error) {
                 AnalysisResult::make_addr(bank, offset),
                 name,
                 comment,
-                infer_symbol_type(name),
+                infer_symbol_type(AnalysisResult::make_addr(bank, offset), name),
             });
         } catch (...) {
             if (error) {

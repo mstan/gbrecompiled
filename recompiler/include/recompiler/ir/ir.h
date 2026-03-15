@@ -281,6 +281,16 @@ struct Function {
     bool crosses_banks = false;
 };
 
+struct AddressSymbol {
+    uint8_t bank = 0;
+    uint16_t address = 0;
+    std::string source_name;
+    std::string emitted_name;
+    std::string kind;
+    std::string provenance;
+    std::string comment;
+};
+
 /* ============================================================================
  * IR Program
  * ========================================================================== */
@@ -294,6 +304,9 @@ struct Program {
     
     // Functions
     std::map<std::string, Function> functions;
+
+    // Address-level symbol metadata carried through to code generation
+    std::map<uint32_t, AddressSymbol> address_symbols;
     
     // Labels (for cross-referencing)
     std::map<uint32_t, std::string> labels;         // id -> name

@@ -583,6 +583,154 @@ static const char* get_reg8_name(int idx) {
     return reg8_names[idx];
 }
 
+static std::string hex_literal(uint32_t value, int width) {
+    std::ostringstream ss;
+    ss << "0x" << std::hex << std::setfill('0') << std::setw(width) << value << std::dec;
+    return ss.str();
+}
+
+static std::string json_escape(const std::string& input) {
+    std::ostringstream ss;
+    for (unsigned char ch : input) {
+        switch (ch) {
+            case '\\':
+                ss << "\\\\";
+                break;
+            case '"':
+                ss << "\\\"";
+                break;
+            case '\n':
+                ss << "\\n";
+                break;
+            case '\r':
+                ss << "\\r";
+                break;
+            case '\t':
+                ss << "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    ss << "\\u"
+                       << std::hex << std::setfill('0') << std::setw(4)
+                       << static_cast<unsigned>(ch)
+                       << std::dec;
+                } else {
+                    ss << static_cast<char>(ch);
+                }
+                break;
+        }
+    }
+    return ss.str();
+}
+
+static const char* named_address_constant(uint16_t addr) {
+    switch (addr) {
+        case 0xFF00: return "GB_IO_JOYP";
+        case 0xFF01: return "GB_IO_SB";
+        case 0xFF02: return "GB_IO_SC";
+        case 0xFF04: return "GB_IO_DIV";
+        case 0xFF05: return "GB_IO_TIMA";
+        case 0xFF06: return "GB_IO_TMA";
+        case 0xFF07: return "GB_IO_TAC";
+        case 0xFF0F: return "GB_IO_IF";
+        case 0xFF10: return "GB_IO_NR10";
+        case 0xFF11: return "GB_IO_NR11";
+        case 0xFF12: return "GB_IO_NR12";
+        case 0xFF13: return "GB_IO_NR13";
+        case 0xFF14: return "GB_IO_NR14";
+        case 0xFF16: return "GB_IO_NR21";
+        case 0xFF17: return "GB_IO_NR22";
+        case 0xFF18: return "GB_IO_NR23";
+        case 0xFF19: return "GB_IO_NR24";
+        case 0xFF1A: return "GB_IO_NR30";
+        case 0xFF1B: return "GB_IO_NR31";
+        case 0xFF1C: return "GB_IO_NR32";
+        case 0xFF1D: return "GB_IO_NR33";
+        case 0xFF1E: return "GB_IO_NR34";
+        case 0xFF20: return "GB_IO_NR41";
+        case 0xFF21: return "GB_IO_NR42";
+        case 0xFF22: return "GB_IO_NR43";
+        case 0xFF23: return "GB_IO_NR44";
+        case 0xFF24: return "GB_IO_NR50";
+        case 0xFF25: return "GB_IO_NR51";
+        case 0xFF26: return "GB_IO_NR52";
+        case 0xFF40: return "GB_IO_LCDC";
+        case 0xFF41: return "GB_IO_STAT";
+        case 0xFF42: return "GB_IO_SCY";
+        case 0xFF43: return "GB_IO_SCX";
+        case 0xFF44: return "GB_IO_LY";
+        case 0xFF45: return "GB_IO_LYC";
+        case 0xFF46: return "GB_IO_DMA";
+        case 0xFF47: return "GB_IO_BGP";
+        case 0xFF48: return "GB_IO_OBP0";
+        case 0xFF49: return "GB_IO_OBP1";
+        case 0xFF4A: return "GB_IO_WY";
+        case 0xFF4B: return "GB_IO_WX";
+        case 0xFFFF: return "GB_IO_IE";
+        default: return nullptr;
+    }
+}
+
+static std::string format_base_offset(const char* base_name, uint16_t offset) {
+    if (offset == 0) {
+        return base_name;
+    }
+    std::ostringstream ss;
+    ss << base_name << " + " << hex_literal(offset, offset <= 0xFF ? 2 : 4);
+    return ss.str();
+}
+
+static std::string format_memory_address(uint16_t addr) {
+    if (const char* named = named_address_constant(addr)) {
+        return named;
+    }
+
+    if (addr >= 0x8000 && addr <= 0x9FFF) {
+        return format_base_offset("GB_VRAM_BASE", static_cast<uint16_t>(addr - 0x8000));
+    }
+    if (addr >= 0xA000 && addr <= 0xBFFF) {
+        return format_base_offset("GB_ERAM_BASE", static_cast<uint16_t>(addr - 0xA000));
+    }
+    if (addr >= 0xC000 && addr <= 0xCFFF) {
+        return format_base_offset("GB_WRAM0_BASE", static_cast<uint16_t>(addr - 0xC000));
+    }
+    if (addr >= 0xD000 && addr <= 0xDFFF) {
+        return format_base_offset("GB_WRAMX_BASE", static_cast<uint16_t>(addr - 0xD000));
+    }
+    if (addr >= 0xFE00 && addr <= 0xFE9F) {
+        return format_base_offset("GB_OAM_BASE", static_cast<uint16_t>(addr - 0xFE00));
+    }
+    if (addr >= 0xFF00 && addr <= 0xFF7F) {
+        return format_base_offset("GB_IO_BASE", static_cast<uint16_t>(addr - 0xFF00));
+    }
+    if (addr >= 0xFF80 && addr <= 0xFFFE) {
+        return format_base_offset("GB_HRAM_BASE", static_cast<uint16_t>(addr - 0xFF80));
+    }
+
+    return hex_literal(addr, 4);
+}
+
+static std::string format_io_offset_address(uint8_t offset) {
+    return format_memory_address(static_cast<uint16_t>(0xFF00u + offset));
+}
+
+static std::string format_block_label_for_address(const ir::Program& program,
+                                                  const std::string& current_func_name,
+                                                  uint16_t addr) {
+    auto func_it = program.functions.find(current_func_name);
+    if (func_it != program.functions.end()) {
+        const ir::Function& func = func_it->second;
+        for (uint32_t block_id : func.block_ids) {
+            auto block_it = program.blocks.find(block_id);
+            if (block_it != program.blocks.end() && block_it->second.start_address == addr) {
+                return block_it->second.label;
+            }
+        }
+        return program.make_address_label(func.bank, addr);
+    }
+    return "loc_" + hex_literal(addr, 4).substr(2);
+}
+
 static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& instr, 
                                 const ir::Program& program, int indent, 
                                 const GeneratorOptions& options,
@@ -650,14 +798,14 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             if (!dst_name) dst_name = "a";
             
             if (instr.src.type == ir::OperandType::IMM16) {
-                out << "ctx->" << dst_name << " = gb_read8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(4) << instr.src.value.imm16 << std::dec << ");\n";
+                out << "ctx->" << dst_name << " = gb_read8(ctx, "
+                    << format_memory_address(instr.src.value.imm16) << ");\n";
             } else if (instr.src.type == ir::OperandType::REG16) {
                 out << "ctx->" << dst_name << " = gb_read8(ctx, ctx->" 
                     << reg16_names[instr.src.value.reg16] << ");\n";
             } else if (instr.src.type == ir::OperandType::REG8) {
                 // LDH A,(C) - 0xFF00 + C
-                out << "ctx->" << dst_name << " = gb_read8(ctx, 0xFF00 + ctx->c);\n";
+                out << "ctx->" << dst_name << " = gb_read8(ctx, GB_IO_BASE + ctx->c);\n";
             } else {
                 out << "ctx->a = gb_read8(ctx, ctx->hl);\n";
             }
@@ -667,18 +815,15 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::STORE8:
             if (instr.dst.type == ir::OperandType::IMM16) {
                 if (instr.src.type == ir::OperandType::IMM8) {
-                    out << "gb_write8(ctx, 0x" << std::hex << std::setfill('0') 
-                        << std::setw(4) << instr.dst.value.imm16 << std::dec 
+                    out << "gb_write8(ctx, " << format_memory_address(instr.dst.value.imm16)
                         << ", 0x" << std::setw(2) << (int)instr.src.value.imm8 << ");\n";
                 } else {
                     const char* src_name = get_reg8_name(instr.src.value.reg8);
                     if (src_name) {
-                        out << "gb_write8(ctx, 0x" << std::hex << std::setfill('0') 
-                            << std::setw(4) << instr.dst.value.imm16 << std::dec 
+                        out << "gb_write8(ctx, " << format_memory_address(instr.dst.value.imm16)
                             << ", ctx->" << src_name << ");\n";
                     } else {
-                        out << "gb_write8(ctx, 0x" << std::hex << std::setfill('0') 
-                            << std::setw(4) << instr.dst.value.imm16 << std::dec 
+                        out << "gb_write8(ctx, " << format_memory_address(instr.dst.value.imm16)
                             << ", ctx->a);\n";
                     }
                 }
@@ -870,8 +1015,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                         emit_indent();
                         out << "if (ctx->single_step_mode) return;\n";
                         emit_indent();
-                        out << "goto loc_" << std::hex << std::setfill('0') 
-                            << std::setw(4) << target << std::dec << ";\n";
+                        out << "goto " << format_block_label_for_address(program, current_func_name, target) << ";\n";
                     } else if (func_exists) {
                         // Different function or cross-bank: call and return
                         if (options.emit_cycle_counting && instr.cycles > 0) {
@@ -976,8 +1120,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                         emit_indent(); out << "    if (ctx->stopped) return;\n";
                     }
                     emit_indent(); out << "    if (ctx->single_step_mode) return;\n";
-                    emit_indent(); out << "    goto loc_" << std::hex << std::setfill('0') 
-                        << std::setw(4) << target << std::dec << ";\n";
+                    emit_indent(); out << "    goto " << format_block_label_for_address(program, current_func_name, target) << ";\n";
                     emit_indent(); out << "} /* " << cond << " */\n";
                 } else if (func_exists) {
                     // Different function: call and return
@@ -1285,7 +1428,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::HALT:
             // HALT bug: If IME=0 and there's a pending interrupt, next PC increment fails
-            out << "if (!ctx->ime && (gb_read8(ctx, 0xFFFF) & gb_read8(ctx, 0xFF0F) & 0x1F)) {\n";
+            out << "if (!ctx->ime && (gb_read8(ctx, GB_IO_IE) & gb_read8(ctx, GB_IO_IF) & 0x1F)) {\n";
             emit_indent(); out << "    ctx->halt_bug = 1;\n";
             if (next_pc_val != 0) {
                  emit_indent(); out << "    ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
@@ -1382,24 +1525,22 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         // === I/O Port Operations ===
         case ir::Opcode::IO_READ:
             // LDH A,(n) - read from 0xFF00 + immediate offset
-            out << "ctx->a = gb_read8(ctx, 0xFF00 + 0x" << std::hex << std::setfill('0') 
-                << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+            out << "ctx->a = gb_read8(ctx, " << format_io_offset_address(instr.src.value.imm8) << ");\n";
             break;
             
         case ir::Opcode::IO_READ_C:
             // LDH A,(C) - read from 0xFF00 + C register
-            out << "ctx->a = gb_read8(ctx, 0xFF00 + ctx->c);\n";
+            out << "ctx->a = gb_read8(ctx, GB_IO_BASE + ctx->c);\n";
             break;
             
         case ir::Opcode::IO_WRITE:
             // LDH (n),A - write to 0xFF00 + immediate offset
-            out << "gb_write8(ctx, 0xFF00 + 0x" << std::hex << std::setfill('0') 
-                << std::setw(2) << (int)instr.dst.value.imm8 << std::dec << ", ctx->a);\n";
+            out << "gb_write8(ctx, " << format_io_offset_address(instr.dst.value.imm8) << ", ctx->a);\n";
             break;
             
         case ir::Opcode::IO_WRITE_C:
             // LDH (C),A - write to 0xFF00 + C register
-            out << "gb_write8(ctx, 0xFF00 + ctx->c, ctx->a);\n";
+            out << "gb_write8(ctx, GB_IO_BASE + ctx->c, ctx->a);\n";
             break;
             
         // === Rotate/Shift Operations ===
@@ -1497,8 +1638,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::STORE16:
             // LD (nn),SP - store 16-bit register to memory
-            out << "gb_write16(ctx, 0x" << std::hex << std::setfill('0') 
-                << std::setw(4) << instr.dst.value.imm16 << std::dec 
+            out << "gb_write16(ctx, " << format_memory_address(instr.dst.value.imm16)
                 << ", ctx->" << reg16_names[instr.src.value.reg16] << ");\n";
             break;
             
@@ -1572,6 +1712,57 @@ GeneratedOutput generate_output(const ir::Program& program,
     internal_header_ss << "#ifndef " << options.output_prefix << "_INTERNAL_H\n";
     internal_header_ss << "#define " << options.output_prefix << "_INTERNAL_H\n\n";
     internal_header_ss << "#include \"" << options.output_prefix << ".h\"\n\n";
+    internal_header_ss << "enum {\n";
+    internal_header_ss << "    GB_VRAM_BASE = 0x8000,\n";
+    internal_header_ss << "    GB_ERAM_BASE = 0xA000,\n";
+    internal_header_ss << "    GB_WRAM0_BASE = 0xC000,\n";
+    internal_header_ss << "    GB_WRAMX_BASE = 0xD000,\n";
+    internal_header_ss << "    GB_OAM_BASE = 0xFE00,\n";
+    internal_header_ss << "    GB_IO_BASE = 0xFF00,\n";
+    internal_header_ss << "    GB_HRAM_BASE = 0xFF80,\n";
+    internal_header_ss << "    GB_IO_JOYP = 0xFF00,\n";
+    internal_header_ss << "    GB_IO_SB = 0xFF01,\n";
+    internal_header_ss << "    GB_IO_SC = 0xFF02,\n";
+    internal_header_ss << "    GB_IO_DIV = 0xFF04,\n";
+    internal_header_ss << "    GB_IO_TIMA = 0xFF05,\n";
+    internal_header_ss << "    GB_IO_TMA = 0xFF06,\n";
+    internal_header_ss << "    GB_IO_TAC = 0xFF07,\n";
+    internal_header_ss << "    GB_IO_IF = 0xFF0F,\n";
+    internal_header_ss << "    GB_IO_NR10 = 0xFF10,\n";
+    internal_header_ss << "    GB_IO_NR11 = 0xFF11,\n";
+    internal_header_ss << "    GB_IO_NR12 = 0xFF12,\n";
+    internal_header_ss << "    GB_IO_NR13 = 0xFF13,\n";
+    internal_header_ss << "    GB_IO_NR14 = 0xFF14,\n";
+    internal_header_ss << "    GB_IO_NR21 = 0xFF16,\n";
+    internal_header_ss << "    GB_IO_NR22 = 0xFF17,\n";
+    internal_header_ss << "    GB_IO_NR23 = 0xFF18,\n";
+    internal_header_ss << "    GB_IO_NR24 = 0xFF19,\n";
+    internal_header_ss << "    GB_IO_NR30 = 0xFF1A,\n";
+    internal_header_ss << "    GB_IO_NR31 = 0xFF1B,\n";
+    internal_header_ss << "    GB_IO_NR32 = 0xFF1C,\n";
+    internal_header_ss << "    GB_IO_NR33 = 0xFF1D,\n";
+    internal_header_ss << "    GB_IO_NR34 = 0xFF1E,\n";
+    internal_header_ss << "    GB_IO_NR41 = 0xFF20,\n";
+    internal_header_ss << "    GB_IO_NR42 = 0xFF21,\n";
+    internal_header_ss << "    GB_IO_NR43 = 0xFF22,\n";
+    internal_header_ss << "    GB_IO_NR44 = 0xFF23,\n";
+    internal_header_ss << "    GB_IO_NR50 = 0xFF24,\n";
+    internal_header_ss << "    GB_IO_NR51 = 0xFF25,\n";
+    internal_header_ss << "    GB_IO_NR52 = 0xFF26,\n";
+    internal_header_ss << "    GB_IO_LCDC = 0xFF40,\n";
+    internal_header_ss << "    GB_IO_STAT = 0xFF41,\n";
+    internal_header_ss << "    GB_IO_SCY = 0xFF42,\n";
+    internal_header_ss << "    GB_IO_SCX = 0xFF43,\n";
+    internal_header_ss << "    GB_IO_LY = 0xFF44,\n";
+    internal_header_ss << "    GB_IO_LYC = 0xFF45,\n";
+    internal_header_ss << "    GB_IO_DMA = 0xFF46,\n";
+    internal_header_ss << "    GB_IO_BGP = 0xFF47,\n";
+    internal_header_ss << "    GB_IO_OBP0 = 0xFF48,\n";
+    internal_header_ss << "    GB_IO_OBP1 = 0xFF49,\n";
+    internal_header_ss << "    GB_IO_WY = 0xFF4A,\n";
+    internal_header_ss << "    GB_IO_WX = 0xFF4B,\n";
+    internal_header_ss << "    GB_IO_IE = 0xFFFF\n";
+    internal_header_ss << "};\n\n";
     for (const auto& [name, func] : program.functions) {
         internal_header_ss << "void " << func.name << "(GBContext* ctx);\n";
     }
@@ -1579,6 +1770,111 @@ GeneratedOutput generate_output(const ir::Program& program,
     output.extra_files.push_back({
         internal_header_file,
         internal_header_ss.str(),
+        false,
+    });
+
+    std::vector<const ir::Function*> sorted_functions;
+    sorted_functions.reserve(program.functions.size());
+    for (const auto& [name, func] : program.functions) {
+        (void)name;
+        sorted_functions.push_back(&func);
+    }
+    std::sort(sorted_functions.begin(), sorted_functions.end(),
+              [](const ir::Function* lhs, const ir::Function* rhs) {
+                  if (lhs->bank != rhs->bank) {
+                      return lhs->bank < rhs->bank;
+                  }
+                  if (lhs->entry_address != rhs->entry_address) {
+                      return lhs->entry_address < rhs->entry_address;
+                  }
+                  return lhs->name < rhs->name;
+              });
+
+    std::vector<const ir::BasicBlock*> sorted_blocks;
+    sorted_blocks.reserve(program.blocks.size());
+    for (const auto& [id, block] : program.blocks) {
+        (void)id;
+        sorted_blocks.push_back(&block);
+    }
+    std::sort(sorted_blocks.begin(), sorted_blocks.end(),
+              [](const ir::BasicBlock* lhs, const ir::BasicBlock* rhs) {
+                  if (lhs->bank != rhs->bank) {
+                      return lhs->bank < rhs->bank;
+                  }
+                  if (lhs->start_address != rhs->start_address) {
+                      return lhs->start_address < rhs->start_address;
+                  }
+                  return lhs->label < rhs->label;
+              });
+
+    std::ostringstream metadata_ss;
+    metadata_ss << "{\n";
+    metadata_ss << "  \"rom_name\": \"" << json_escape(program.rom_name) << "\",\n";
+    metadata_ss << "  \"functions\": [\n";
+    for (size_t i = 0; i < sorted_functions.size(); ++i) {
+        const ir::Function& func = *sorted_functions[i];
+        const uint32_t addr = (static_cast<uint32_t>(func.bank) << 16) | func.entry_address;
+        auto symbol_it = program.address_symbols.find(addr);
+
+        metadata_ss << "    {\n";
+        metadata_ss << "      \"bank\": " << static_cast<unsigned>(func.bank) << ",\n";
+        metadata_ss << "      \"address\": \"" << hex_literal(func.entry_address, 4) << "\",\n";
+        metadata_ss << "      \"emitted_name\": \"" << json_escape(func.name) << "\",\n";
+        metadata_ss << "      \"kind\": \"function\",\n";
+        metadata_ss << "      \"provenance\": \""
+                    << json_escape(symbol_it != program.address_symbols.end()
+                                       ? symbol_it->second.provenance
+                                       : "autogenerated")
+                    << "\"";
+        if (symbol_it != program.address_symbols.end() && !symbol_it->second.source_name.empty()) {
+            metadata_ss << ",\n      \"source_symbol\": \""
+                        << json_escape(symbol_it->second.source_name) << "\"";
+        }
+        if (symbol_it != program.address_symbols.end() && !symbol_it->second.comment.empty()) {
+            metadata_ss << ",\n      \"comment\": \""
+                        << json_escape(symbol_it->second.comment) << "\"";
+        }
+        metadata_ss << "\n    }";
+        metadata_ss << (i + 1 < sorted_functions.size() ? ",\n" : "\n");
+    }
+    metadata_ss << "  ],\n";
+    metadata_ss << "  \"labels\": [\n";
+    for (size_t i = 0; i < sorted_blocks.size(); ++i) {
+        const ir::BasicBlock& block = *sorted_blocks[i];
+        const uint32_t addr = (static_cast<uint32_t>(block.bank) << 16) | block.start_address;
+        auto symbol_it = program.address_symbols.find(addr);
+
+        metadata_ss << "    {\n";
+        metadata_ss << "      \"bank\": " << static_cast<unsigned>(block.bank) << ",\n";
+        metadata_ss << "      \"address\": \"" << hex_literal(block.start_address, 4) << "\",\n";
+        metadata_ss << "      \"emitted_name\": \"" << json_escape(block.label) << "\",\n";
+        metadata_ss << "      \"role\": \"block_label\",\n";
+        metadata_ss << "      \"kind\": \""
+                    << json_escape(symbol_it != program.address_symbols.end()
+                                       ? symbol_it->second.kind
+                                       : "label")
+                    << "\",\n";
+        metadata_ss << "      \"provenance\": \""
+                    << json_escape(symbol_it != program.address_symbols.end()
+                                       ? symbol_it->second.provenance
+                                       : "autogenerated")
+                    << "\"";
+        if (symbol_it != program.address_symbols.end() && !symbol_it->second.source_name.empty()) {
+            metadata_ss << ",\n      \"source_symbol\": \""
+                        << json_escape(symbol_it->second.source_name) << "\"";
+        }
+        if (symbol_it != program.address_symbols.end() && !symbol_it->second.comment.empty()) {
+            metadata_ss << ",\n      \"comment\": \""
+                        << json_escape(symbol_it->second.comment) << "\"";
+        }
+        metadata_ss << "\n    }";
+        metadata_ss << (i + 1 < sorted_blocks.size() ? ",\n" : "\n");
+    }
+    metadata_ss << "  ]\n";
+    metadata_ss << "}\n";
+    output.extra_files.push_back({
+        options.output_prefix + "_metadata.json",
+        metadata_ss.str(),
         false,
     });
     
@@ -1868,9 +2164,11 @@ GeneratedOutput generate_output(const ir::Program& program,
             });
 
         std::set<uint16_t> dispatchable_pcs;
+        std::map<uint16_t, std::string> block_labels_by_addr;
         for (uint32_t block_id : sorted_block_ids) {
             auto it = program.blocks.find(block_id);
             if (it == program.blocks.end()) continue;
+            block_labels_by_addr[it->second.start_address] = it->second.label;
             for (const auto& instr : it->second.instructions) {
                 if (instr.has_source_location) {
                     dispatchable_pcs.insert(instr.source_address);
@@ -1895,8 +2193,7 @@ GeneratedOutput generate_output(const ir::Program& program,
             if (block_it == program.blocks.end()) continue;
             const ir::BasicBlock& block = block_it->second;
 
-            func_ss << "loc_" << std::hex << std::setfill('0') << std::setw(4)
-                    << block.start_address << std::dec << ":\n";
+            func_ss << block.label << ":\n";
 
             for (size_t i = 0; i < block.instructions.size(); ++i) {
                 const auto& ir_instr = block.instructions[i];
@@ -1972,9 +2269,13 @@ GeneratedOutput generate_output(const ir::Program& program,
                 }
 
                 if (fallthrough_exists_in_function) {
-                    func_ss << "    goto loc_" << std::hex << std::setfill('0')
-                            << std::setw(4) << fallthrough_addr << std::dec
-                            << "; /* fallthrough */\n";
+                    auto label_it = block_labels_by_addr.find(fallthrough_addr);
+                    if (label_it != block_labels_by_addr.end()) {
+                        func_ss << "    goto " << label_it->second << "; /* fallthrough */\n";
+                    } else {
+                        func_ss << "    goto " << program.make_address_label(func.bank, fallthrough_addr)
+                                << "; /* fallthrough */\n";
+                    }
                 } else {
                     if (func.name == "func_27eb") {
                         std::cerr << "DEBUG: func_27eb fallthrough not in function. Searching targets...\n";

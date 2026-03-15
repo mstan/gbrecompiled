@@ -298,6 +298,15 @@ std::string Program::get_label_name(uint32_t id) const {
 }
 
 std::string Program::make_address_label(uint8_t bank, uint16_t addr) const {
+    const uint32_t full_addr = (static_cast<uint32_t>(bank) << 16) | addr;
+    auto symbol_it = address_symbols.find(full_addr);
+    if (symbol_it != address_symbols.end() && !symbol_it->second.emitted_name.empty()) {
+        if (symbol_it->second.kind == "function") {
+            return symbol_it->second.emitted_name + "__entry";
+        }
+        return symbol_it->second.emitted_name;
+    }
+
     std::ostringstream ss;
     ss << "loc_";
     if (bank > 0) {
@@ -308,6 +317,14 @@ std::string Program::make_address_label(uint8_t bank, uint16_t addr) const {
 }
 
 std::string Program::make_function_name(uint8_t bank, uint16_t addr) const {
+    const uint32_t full_addr = (static_cast<uint32_t>(bank) << 16) | addr;
+    auto symbol_it = address_symbols.find(full_addr);
+    if (symbol_it != address_symbols.end() &&
+        symbol_it->second.kind == "function" &&
+        !symbol_it->second.emitted_name.empty()) {
+        return symbol_it->second.emitted_name;
+    }
+
     std::ostringstream ss;
     ss << "func_";
     if (bank > 0) {
@@ -328,6 +345,17 @@ Program IRBuilder::build(const AnalysisResult& analysis, const std::string& rom_
     program.rom_name = rom_name;
     program.main_entry = analysis.entry_point;
     program.interrupt_vectors = analysis.interrupt_vectors;
+    for (const auto& [addr, metadata] : analysis.symbol_metadata) {
+        AddressSymbol symbol;
+        symbol.bank = static_cast<uint8_t>(addr >> 16);
+        symbol.address = static_cast<uint16_t>(addr & 0xFFFF);
+        symbol.source_name = metadata.source_name;
+        symbol.emitted_name = metadata.emitted_name;
+        symbol.kind = metadata.kind;
+        symbol.provenance = metadata.provenance;
+        symbol.comment = metadata.comment;
+        program.address_symbols[addr] = symbol;
+    }
     
     // For each function in analysis, create IR function
     for (const auto& [addr, func] : analysis.functions) {

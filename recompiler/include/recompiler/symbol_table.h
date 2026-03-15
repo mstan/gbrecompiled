@@ -32,6 +32,7 @@ public:
 
     const Symbol* get_symbol(uint32_t addr) const;
     const Symbol* get_symbol(uint8_t bank, uint16_t addr) const;
+    const std::unordered_map<uint32_t, Symbol>& symbols() const;
 
     bool has_symbol(uint32_t addr) const;
     size_t size() const;

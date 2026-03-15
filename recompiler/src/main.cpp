@@ -48,7 +48,7 @@ void print_usage(const char* program) {
     std::cout << "  --bank <n>            Only process bank n\n";
     std::cout << "  --add-entry-point b:a Add manual entry point (e.g. 1:4000)\n";
     std::cout << "  --no-scan             Disable aggressive code scanning (enabled by default)\n";
-    std::cout << "  --symbols <file>      Load a .sym symbol file and use names for generated functions\n";
+    std::cout << "  --symbols <file>      Load a .sym symbol file and use names for generated functions and labels\n";
     std::cout << "  --use-trace <file>    Use runtime trace to find entry points\n";
     std::cout << "  -h, --help            Show this help\n";
 }

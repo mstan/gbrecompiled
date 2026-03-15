@@ -69,6 +69,17 @@ struct Function {
     bool is_called_cross_bank = false;  // Called from other banks
 };
 
+/**
+ * @brief Symbol metadata associated with a ROM address
+ */
+struct AddressSymbolMetadata {
+    std::string source_name;
+    std::string emitted_name;
+    std::string kind;
+    std::string provenance;
+    std::string comment;
+};
+
 /* ============================================================================
  * Analysis Result
  * ========================================================================== */
@@ -91,6 +102,9 @@ struct AnalysisResult {
     
     // Functions indexed by (bank << 16 | addr)  
     std::map<uint32_t, Function> functions;
+
+    // Imported symbol metadata indexed by (bank << 16 | addr)
+    std::map<uint32_t, AddressSymbolMetadata> symbol_metadata;
     
     // Labels needed (jump targets)
     std::set<uint32_t> label_addresses;  // (bank << 16 | addr)

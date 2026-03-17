@@ -605,9 +605,11 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
                 ppu->ly = 0;
                 ppu->window_line = 0;
                 ppu->window_triggered = false;
-                ppu->mode = PPU_MODE_HBLANK; /* Mode 0 */
+                ppu->mode = PPU_MODE_HBLANK; /* Mode 0 when LCD is off (Pan Docs) */
                 ppu->mode_cycles = 0;
                 ctx->io[0x44] = 0;
+                /* Update STAT mode bits to reflect mode 0 immediately */
+                update_stat(ppu, ctx);
                 /* Clear frame ready to avoid stale frame rendering */
                 ppu->frame_ready = false;
                 gbrt_note_lcd_transition(ctx, false, old_lcdc, value, ppu->ly, ppu->mode);

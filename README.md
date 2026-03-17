@@ -1,9 +1,6 @@
 # GB Recompiled
 
-A **static recompiler** for original GameBoy ROMs that translates Z80 assembly directly into portable, modern C code. Run your favorite classic games without a traditional emulator—just compile and play.
-
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
+A **static recompiler** for original GameBoy ROMs that translates Z80 assembly directly into portable, modern C code.
 
 <p align="center">
   <img src="dino.png" alt="GB Recompiled Screenshot" width="400">
@@ -23,22 +20,6 @@ Pre-built binaries are available on the [Releases](https://github.com/arcanite24
 | **macOS** | ARM64 (Apple Silicon) | `gb-recompiled-macos-arm64.tar.gz` |
 
 > **Note**: The recompiler (`gbrecomp`) is what you download. After recompiling a ROM, you'll still need CMake, Ninja, SDL2, and a C compiler to build the generated project.
-
----
-
-## Features
-
-- **Validated Against Real Games**: compatibility is tracked with manually tested ROMs, differential checks, and exact ROM hashes instead of bulk recompile-only numbers
-- **Native Performance**: Generated C code compiles to native machine code
-- **Accurate Runtime**:
-  - Cycle-accurate instruction emulation (including HALT bug)
-  - Precise OAM DMA and interrupt timing
-  - Accurate PPU (graphics) emulation with scanline rendering
-  - Audio subsystem (APU) with all 4 channels
-- **Memory Bank Controllers**: Full support for MBC1 (including Mode 1), MBC2, MBC3 (with RTC), and MBC5
-- **SDL2 Platform Layer**: Ready-to-run with keyboard/controller input and window display
-- **Debugging Tools**: Trace logging, instruction limits, and screenshot capture
-- **Cross-Platform**: Works on macOS, Linux, and Windows (via CMake + Ninja)
 
 ---
 
@@ -73,11 +54,7 @@ ninja -C build
 cmake -G Ninja -S output/game -B output/game/build
 ninja -C output/game/build
 
-# Optional: lower or raise optimization for generated ROM sources
-# The generated CMake defaults these large files to -O1 for practical rebuild times.
-cmake -S output/game -B output/game/build -DGBRECOMP_GENERATED_OPT_LEVEL=2
-
-# Run!
+# Run
 ./output/game/build/game
 ```
 
@@ -394,6 +371,7 @@ This is a living list, not a claim that every ROM that recompiles is fully compa
 | The Legend of Zelda: Link's Awakening | `c4360f89e2b09a21307fe864258ecab7` | Playable | Built, launched, and smoke-tested successfully |
 | Castlevania: The Adventure | `0b4410c6b94d6359dba5609ae9a32909` | Playable | Built, launched, and smoke-tested successfully |
 | Super Mario Land | `b48161623f12f86fec88320166a21fce` | Playable | Startup `HALT`/`STOP` differential mismatch was fixed for better timing accuracy |
+| Adventures of Star Saver, The | `91ecec5f8d06f18724bd1462b53c4b3d` | Playable (minor issues) | Two runtime bugs were fixed to reach this state: (1) stale STAT mode bits after LCD disable caused an infinite HBlank polling loop starting frame 6; (2) HRAM was being executed as pre-compiled ROM stubs instead of the game's runtime-written DMA helpers, corrupting OAM transfers and producing wrong graphics. Also fixed a recompiler bug where interrupt vectors (0x0040, 0x0048) were absorbed into the preceding NOP-padded function instead of getting their own entries. Performance may be slightly degraded due to increased HRAM interpreter fallbacks; minor graphical glitches may appear |
 
 If you report a game-specific bug, please include:
 

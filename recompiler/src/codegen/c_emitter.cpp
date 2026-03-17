@@ -2365,6 +2365,13 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
     source_ss << "            continue;\n";
     source_ss << "        }\n";
+    // HRAM (0xFF80-0xFFFE) is writable at runtime; never use pre-compiled stubs there.
+    source_ss << "        if (addr >= 0xFF80 && addr <= 0xFFFE) {\n";
+    source_ss << "            gbrt_note_dispatch_fallback(ctx, bank, addr);\n";
+    source_ss << "            gb_interpret(ctx, addr);\n";
+    source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
+    source_ss << "            continue;\n";
+    source_ss << "        }\n";
     source_ss << "        switch (addr >> 8) {\n";
     for (const auto& [page, unused] : dispatch_page_sources) {
         source_ss << "            case 0x" << std::hex << std::setfill('0') << std::setw(2)

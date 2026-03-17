@@ -1263,11 +1263,21 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             
             // Add this block to function if not already there
             if (block_addr != target) {
+                // Strong call targets (interrupt vectors, explicit entry points) are
+                // always function boundaries — never absorb them into another function.
+                if (result.strong_call_targets.count(block_addr)) {
+                    // Don't include this block or its successors in the current function.
+                    // Leave it unprocessed so it gets its own function entry later.
+                    continue;
+                }
                 func.block_addresses.push_back(get_offset(block_addr));
             }
             
-            // Mark all reachable call targets as processed to avoid creating separate functions
-            if (result.call_targets.count(block_addr) && block_addr != target) {
+            // Mark all reachable (non-strong) call targets as processed to avoid
+            // creating redundant separate functions for inlined helpers.
+            if (result.call_targets.count(block_addr) &&
+                !result.strong_call_targets.count(block_addr) &&
+                block_addr != target) {
                 processed_targets.insert(block_addr);
             }
             

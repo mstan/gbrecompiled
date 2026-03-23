@@ -1116,7 +1116,9 @@ int main(int argc, char* argv[]) {
             std::cout << "  " << module.output_prefix << " -> " << module.display_name << "\n";
         }
         std::cout << "\nBuild instructions:\n";
-        std::cout << "  cd " << out_path << " && mkdir -p build && cd build && cmake -G Ninja .. && ninja && ./" << launcher_name << "\n";
+        std::cout << "  cmake -G Ninja -S " << out_path << " -B " << (out_path / "build") << "\n";
+        std::cout << "  ninja -C " << (out_path / "build") << "\n";
+        std::cout << "  " << ((out_path / "build") / launcher_name) << "\n";
         return 0;
     }
     
@@ -1261,7 +1263,9 @@ int main(int argc, char* argv[]) {
     }
     
     std::cout << "\nBuild instructions:\n";
-    std::cout << "  cd " << out_path << " && mkdir -p build && cd build && cmake -G Ninja .. && cmake --build . && ./" << gen_opts.output_prefix << "\n";
+    std::cout << "  cmake -G Ninja -S " << out_path << " -B " << (out_path / "build") << "\n";
+    std::cout << "  ninja -C " << (out_path / "build") << "\n";
+    std::cout << "  " << ((out_path / "build") / gen_opts.output_prefix) << "\n";
     
     return 0;
 }

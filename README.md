@@ -346,6 +346,29 @@ When you are chasing generated-to-interpreter fallback, these flags are the most
 
 `--log-frame-fallbacks` gives you per-frame `first=` / `last=` fallback addresses, while `--report-interpreter-hotspots` prints the aggregate fallback summary at shutdown or when `--limit` stops the run early.
 
+To condense a large fallback log into something easier to scan, use the helper script:
+
+```bash
+python3 tools/summarize_interpreter_log.py logs/interpreter.log
+```
+
+The script summarizes:
+
+- top fallback sites and repeated `first -> last` frame pairs
+- hotspot functions resolved from generated `*_metadata.json` when it can auto-detect them
+- likely triggering instructions when it can auto-detect the original ROM
+- coverage-gap opcodes reported by the runtime
+
+You can also point it at explicit metadata, symbols, or a ROM if auto-detection is ambiguous:
+
+```bash
+python3 tools/summarize_interpreter_log.py logs/interpreter.log \
+  --metadata output/pokeblue/pokeblue_metadata.json \
+  --sym pokeblue.sym \
+  --rom roms/pokeblue.gb \
+  --top 12
+```
+
 Input script notes:
 
 - Plain `120:S:1` entries are frame-anchored and kept for backwards compatibility.

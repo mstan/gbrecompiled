@@ -22,6 +22,7 @@
 - [ ] Fix save not detected on pokemon blue
 - [ ] Implement savestates
 - [ ] Update AGENTS.md
+- [ ] Python script to summarize interpreter .log files, showing which functions are hotspots for interpreter fallback and which instructions are causing it
  
 # Platforms
 - [ ] Android support

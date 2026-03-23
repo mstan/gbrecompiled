@@ -3011,11 +3011,24 @@ GeneratedOutput generate_output(const ir::Program& program,
     namespace fs = std::filesystem;
     fs::path out_path(options.output_dir);
     std::string runtime_path;
-    
+
+    // Normalise to a path relative to the CWD (= workspace root when gbrecomp
+    // is run per AGENTS.md conventions).  This handles the case where -o was
+    // given as an absolute path: fs::relative strips the leading /host/path
+    // components and leaves only the workspace-relative portion so that the
+    // generated ../../../runtime chain has the right number of segments.
+    fs::path relative_out;
+    try {
+        relative_out = fs::relative(out_path);
+    } catch (...) {
+        relative_out = out_path;
+    }
+
     // Count depth to generate correct number of ../
     int depth = 0;
-    for (const auto& p : out_path) {
-        if (p == ".") continue;
+    for (const auto& p : relative_out) {
+        const std::string s = p.string();
+        if (s == "." || s == "/" || s.empty()) continue;
         depth++;
     }
     // Ensure at least one level up

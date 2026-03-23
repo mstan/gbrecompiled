@@ -33,7 +33,7 @@ void ppu_init(GBPPU* ppu) {
 void ppu_reset(GBPPU* ppu) {
     /* LCD Registers - post-bootrom state */
     ppu->lcdc = 0x91;  /* LCD on, BG on, tiles at 0x8000 */
-    ppu->stat = 0x00;
+    ppu->stat = 0x01;  /* Mode 1 (VBlank) - post-bootrom state */
     ppu->scy = 0;
     ppu->scx = 0;
     ppu->ly = 0;
@@ -53,9 +53,13 @@ void ppu_reset(GBPPU* ppu) {
     ppu->latched_wy = ppu->wy;
     ppu->latched_wx = ppu->wx;
     
-    /* Internal state */
-    ppu->mode = PPU_MODE_OAM;
-    ppu->mode_cycles = 0;
+    /* Internal state - post-bootrom DMG state:
+     * After the DMG boot ROM completes, the PPU is in VBlank at LY=145 (0x91).
+     * div_counter=0xABCC, mode=VBlank, STAT mode bits=1.
+     * mode_cycles starts at ~4 (just transitioned to LY=145). */
+    ppu->ly = 145;
+    ppu->mode = PPU_MODE_VBLANK;
+    ppu->mode_cycles = 4;
     ppu->window_line = 0;
     ppu->window_triggered = false;
     ppu->frame_ready = false;

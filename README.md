@@ -371,7 +371,8 @@ This is a living list, not a claim that every ROM that recompiles is fully compa
 | The Legend of Zelda: Link's Awakening | `c4360f89e2b09a21307fe864258ecab7` | Playable | Built, launched, and smoke-tested successfully |
 | Castlevania: The Adventure | `0b4410c6b94d6359dba5609ae9a32909` | Playable | Built, launched, and smoke-tested successfully |
 | Super Mario Land | `b48161623f12f86fec88320166a21fce` | Playable | Startup `HALT`/`STOP` differential mismatch was fixed for better timing accuracy |
-| Adventures of Star Saver, The | `91ecec5f8d06f18724bd1462b53c4b3d` | Playable (minor issues) | Two runtime bugs were fixed to reach this state: (1) stale STAT mode bits after LCD disable caused an infinite HBlank polling loop starting frame 6; (2) HRAM was being executed as pre-compiled ROM stubs instead of the game's runtime-written DMA helpers, corrupting OAM transfers and producing wrong graphics. Also fixed a recompiler bug where interrupt vectors (0x0040, 0x0048) were absorbed into the preceding NOP-padded function instead of getting their own entries. Performance may be slightly degraded due to increased HRAM interpreter fallbacks; minor graphical glitches may appear |
+| Adventures of Star Saver, The | `91ecec5f8d06f18724bd1462b53c4b3d` | Playable (minor issues) | Fixed runtime issues |
+| Metroid II: Return of Samus | `9639948ad274fa15281f549e5f9c4d87` | Playable |  |
 
 If you report a game-specific bug, please include:
 

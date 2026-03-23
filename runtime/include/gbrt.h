@@ -149,10 +149,12 @@ typedef struct GBContext {
     
     /* OAM DMA state */
     struct {
-        uint8_t active;         /**< DMA is in progress */
+        uint8_t active;         /**< DMA is in progress (bus blocking) */
+        uint8_t pending;        /**< DMA was requested, startup delay in progress */
         uint8_t source_high;    /**< Source address >> 8 */
         uint8_t progress;       /**< Bytes copied (0-159) */
         uint16_t cycles_remaining; /**< Cycles until DMA completes */
+        uint8_t startup_delay;  /**< T-cycles before DMA bus blocking starts (2 M-cycles = 8 T-cycles) */
     } dma;
     
     /* Current bank numbers */
@@ -189,6 +191,7 @@ typedef struct GBContext {
     
     /* Timer internal state */
     uint16_t div_counter;   /**< Internal 16-bit divider counter */
+    uint8_t tima_reload_pending; /**< TIMA overflow delay: > 0 means reload in N T-cycles */
     
     /* Memory pointers */
     uint8_t* rom;         /**< ROM data */

@@ -233,9 +233,11 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
 
     /* Reset DMA state */
     ctx->dma.active = 0;
+    ctx->dma.pending = 0;
     ctx->dma.source_high = 0;
     ctx->dma.progress = 0;
     ctx->dma.cycles_remaining = 0;
+    ctx->dma.startup_delay = 0;
     
     /* Reset HALT bug state */
     ctx->halt_bug = 0;
@@ -300,7 +302,9 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
         gb_unpack_flags(ctx);
         ctx->rom_bank = 1;
         ctx->wram_bank = 1;
+        ctx->div_counter = 0xABCC; /* Post-bootrom DIV internal counter value */
         
+        ctx->io[0x04] = 0xAB; /* DIV - post-bootrom value */
         ctx->io[0x05] = 0x00; /* TIMA */
         ctx->io[0x06] = 0x00; /* TMA */
         ctx->io[0x07] = 0x00; /* TAC */
@@ -323,8 +327,10 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
         ctx->io[0x25] = 0xF3; /* NR51 */
         ctx->io[0x26] = 0xF1; /* NR52 */
         ctx->io[0x40] = 0x91; /* LCDC */
+        ctx->io[0x41] = 0x01; /* STAT - mode 1 (VBlank) */
         ctx->io[0x42] = 0x00; /* SCY */
         ctx->io[0x43] = 0x00; /* SCX */
+        ctx->io[0x44] = 0x91; /* LY = 145 (post-bootrom VBlank) */
         ctx->io[0x45] = 0x00; /* LYC */
         ctx->io[0x47] = 0xFC; /* BGP */
         ctx->io[0x48] = 0xFF; /* OBP0 */
@@ -446,8 +452,9 @@ bool gb_context_save_ram(GBContext* ctx) {
  * ========================================================================== */
 
 uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
-    /* During OAM DMA, only HRAM (0xFF80-0xFFFE) is accessible */
-    if (ctx->dma.active && !(addr >= 0xFF80 && addr < 0xFFFF)) {
+    /* During OAM DMA, CPU can only access HRAM (0xFF80-0xFFFE) and I/O registers
+     * (0xFF00-0xFF7F, 0xFFFF). All other memory returns 0xFF. */
+    if (ctx->dma.active && !(addr >= 0xFF00)) {
         return 0xFF;  /* Bus conflict - return undefined */
     }
     
@@ -550,8 +557,9 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
 }
 
 void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
-    /* During OAM DMA, only HRAM (0xFF80-0xFFFE) is writable */
-    if (ctx->dma.active && !(addr >= 0xFF80 && addr < 0xFFFF)) {
+    /* During OAM DMA, CPU can only write to HRAM (0xFF80-0xFFFE) and I/O registers
+     * (0xFF00-0xFF7F, 0xFFFF). All other memory writes are ignored. */
+    if (ctx->dma.active && !(addr >= 0xFF00)) {
         return;  /* Bus conflict - write ignored */
     }
     
@@ -760,7 +768,9 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             ctx->dma.source_high = value;
             ctx->dma.progress = 0;
             ctx->dma.cycles_remaining = 640;
-            ctx->dma.active = 1;
+            ctx->dma.startup_delay = 8;  /* 2 M-cycles before bus blocking starts */
+            ctx->dma.pending = 1;
+            ctx->dma.active = 0;  /* not yet blocking the bus */
             return;
         }
         if (addr >= 0xFF40 && addr <= 0xFF4B) { ppu_write_register((GBPPU*)ctx->ppu, ctx, addr, value); return; }
@@ -1381,9 +1391,23 @@ static void gb_rtc_tick(GBContext* ctx, uint32_t cycles) {
 
 /**
  * Process OAM DMA transfer
- * DMA takes 160 M-cycles (640 T-cycles), copying 1 byte per M-cycle
+ * DMA takes 160 M-cycles (640 T-cycles), copying 1 byte per M-cycle.
+ * There is a 2 M-cycle (8 T-cycle) startup delay before bus blocking begins.
  */
 static void gb_dma_tick(GBContext* ctx, uint32_t cycles) {
+    /* Handle DMA startup delay: DMA was requested but bus blocking hasn't started yet */
+    if (ctx->dma.pending && ctx->dma.startup_delay > 0) {
+        if (cycles >= ctx->dma.startup_delay) {
+            cycles -= ctx->dma.startup_delay;
+            ctx->dma.startup_delay = 0;
+            ctx->dma.active = 1;  /* Bus blocking now active */
+            ctx->dma.pending = 0;
+        } else {
+            ctx->dma.startup_delay -= (uint8_t)cycles;
+            return;
+        }
+    }
+
     if (!ctx->dma.active) return;
     
     /* Process DMA cycles */
@@ -1493,15 +1517,14 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
             
             /* Check if we reach the fall */
             if (cycles_left >= dist) {
-                /* Validate it is a falling edge for the selected bit?
-                   next_fall is the transition 11...1 -> 00...0 for bits < bit+1.
-                   Bit 'mask' definitely transitions. 
-                   Wait, next multiple of 2*mask means mask bit becomes 0.
-                   So yes, next_fall is a falling edge point.
-                */
-                if (ctx->io[0x05] == 0xFF) { 
-                    ctx->io[0x05] = ctx->io[0x06]; /* Reload TMA */
-                    ctx->io[0x0F] |= 0x04;         /* Request Timer Interrupt */
+                /* Hardware behavior: increment TIMA.
+                 * If TIMA was 0xFF, it wraps to 0x00. After 4 T-cycles,
+                 * TIMA gets reloaded from TMA and timer interrupt fires.
+                 * During those 4 cycles, TIMA reads as 0x00.
+                 */
+                if (ctx->io[0x05] == 0xFF) {
+                    ctx->io[0x05] = 0x00;         /* Overflow: TIMA=0 for 4 cycles */
+                    ctx->tima_reload_pending = 4;  /* Schedule TMA reload after 4 T-cycles */
                 } else {
                     ctx->io[0x05]++;
                 }
@@ -1510,6 +1533,17 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
             } else {
                 break;
             }
+        }
+    }
+    
+    /* Handle pending TIMA reload (4-cycle delay after overflow) */
+    if (ctx->tima_reload_pending > 0) {
+        if (ctx->tima_reload_pending <= cycles) {
+            ctx->tima_reload_pending = 0;
+            ctx->io[0x05] = ctx->io[0x06]; /* Reload TMA */
+            ctx->io[0x0F] |= 0x04;         /* Request Timer Interrupt */
+        } else {
+            ctx->tima_reload_pending -= (uint8_t)cycles;
         }
     }
     

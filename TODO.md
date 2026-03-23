@@ -1,3 +1,21 @@
+# General
+- [ ] Rendering modes for runtime (how we scale the viewport, how do we handle aspect ratio and window resizing?)
+- [ ] Input handling (how do we map keyboard/controller input)
+- [ ] Audio output (how do we handle audio timing and buffering?)
+- [ ] Save data handling (how do we read/write save data, and how do we handle save states?)
+- [ ] Script callbacks (how do we allow custom code to hook into gameplay events without modifying generated code directly?)
+- [ ] Performance optimizations (what are the hotspots in the generated code, and how can we optimize them without sacrificing readability or modifiability?)
+- [ ] Consider if Imgui still the best scenario for UI
+- [x] Multi-rom support, they share the same runtime but have different generated code and metadata, we add a launcher to select which one to run
+- [ ] Graphical launcher for multi-rom support
+- [ ] Per game configurations on multi-rom mode
+- [ ] Benchmark performance and memory usage against emulators
+- [ ] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used
+
+# Platforms
+- [ ] Android support
+- [ ] WebAssembly support
+
 # Modding / Porting Output Plan
 
 ## Goal

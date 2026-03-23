@@ -27,6 +27,8 @@ struct GeneratorOptions {
     bool emit_address_comments = true;   // Include address comments
     bool single_function_mode = false;   // All code in one function
     bool use_prefixed_symbols = false;   // Prefix all symbols (for multi-ROM)
+    bool emit_main_entry_point = true;   // Emit a global main() wrapper
+    bool emit_cmake = true;              // Emit a standalone CMakeLists.txt
     bool embed_rom_data = true;          // Embed ROM data in output
     bool debug_mode = false;             // Extra debug output
     

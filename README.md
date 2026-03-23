@@ -58,6 +58,21 @@ ninja -C output/game/build
 ./output/game/build/game
 ```
 
+### Recompiling Multiple ROMs Into One Launcher
+
+```bash
+# Generate one shared project from a folder of ROMs
+./build/bin/gbrecomp path/to/roms -o output/multi_rom
+
+# Build the generated launcher project
+cmake -G Ninja -S output/multi_rom -B output/multi_rom/build
+ninja -C output/multi_rom/build
+
+# Inspect and launch one of the generated games
+./output/multi_rom/build/multi_rom --list-games
+./output/multi_rom/build/multi_rom --game tetris
+```
+
 ---
 
 ## Quick Setup
@@ -135,6 +150,39 @@ The recompiler will:
 2. Analyze control flow across all memory banks
 3. Decode instructions and track bank switches
 4. Generate C source files with the runtime library
+
+### Multi-ROM Recompilation
+
+You can also point `gbrecomp` at a directory instead of a single ROM:
+
+```bash
+./build/bin/gbrecomp <rom_directory> -o <output_dir>
+```
+
+In directory mode the recompiler will:
+
+1. Recursively find every `.gb`, `.gbc`, and `.sgb` file
+2. Recompile each ROM into its own generated code module and metadata file
+3. Share one runtime library across all generated ROMs
+4. Emit a small launcher executable so you can choose which game to run
+
+The generated launcher project includes:
+
+- `launcher_main.c`: a simple ROM selector and forwarder
+- `launcher_manifest.json`: the generated game list, ids, and source ROM paths
+- one generated module per ROM, each with isolated symbol names so they can all link into the same executable
+
+Launcher usage:
+
+```bash
+# List generated games
+./output/multi_rom/build/multi_rom --list-games
+
+# Launch a specific game by id
+./output/multi_rom/build/multi_rom --game tetris
+```
+
+If you run the launcher without `--game` and more than one ROM was generated, it will prompt you to choose one interactively.
 
 ### Debugging Options
 
@@ -260,6 +308,12 @@ Example:
 
 ```bash
 ./output/game/build/game --differential 500000 --differential-log 100000
+```
+
+For multi-ROM output, pass launcher options first and then the normal runtime options for the selected game:
+
+```bash
+./output/multi_rom/build/multi_rom --game tetris --log-file logs/tetris.log --limit-frames 300
 ```
 
 Capture a sharable log and record a manual repro session:

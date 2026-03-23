@@ -623,6 +623,38 @@ static std::string json_escape(const std::string& input) {
     return ss.str();
 }
 
+static std::string module_link_name(const GeneratorOptions& options, const std::string& symbol) {
+    if (!options.use_prefixed_symbols) {
+        return symbol;
+    }
+    return options.output_prefix + "__" + symbol;
+}
+
+static std::string emitted_function_name(const GeneratorOptions& options,
+                                         const std::string& symbol) {
+    return module_link_name(options, symbol);
+}
+
+static std::string dispatch_function_name(const GeneratorOptions& options) {
+    return module_link_name(options, "gb_dispatch");
+}
+
+static std::string dispatch_call_function_name(const GeneratorOptions& options) {
+    return module_link_name(options, "gb_dispatch_call");
+}
+
+static std::string rom_data_symbol_name(const GeneratorOptions& options) {
+    return module_link_name(options, "rom_data");
+}
+
+static std::string rom_size_symbol_name(const GeneratorOptions& options) {
+    return module_link_name(options, "rom_size");
+}
+
+static std::string module_main_name(const GeneratorOptions& options) {
+    return options.output_prefix + "_main";
+}
+
 struct BuiltinAddressConstant {
     uint16_t addr;
     const char* name;
@@ -718,6 +750,11 @@ static std::string make_rom_address_constant_name(const ir::AddressSymbol& symbo
 
 static std::string make_rom_pointer_name(const ir::AddressSymbol& symbol) {
     return "GB_ROM_PTR_" + strip_symbol_prefix(symbol.emitted_name);
+}
+
+static std::string emitted_rom_pointer_name(const GeneratorOptions& options,
+                                            const ir::AddressSymbol& symbol) {
+    return module_link_name(options, make_rom_pointer_name(symbol));
 }
 
 static std::string format_base_offset(const char* base_name, uint16_t offset) {
@@ -1175,7 +1212,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                             
                             emit_indent(); out << "} /* End Inline */\n";
                         } else {
-                            out << target_func << "(ctx);\n";
+                            out << emitted_function_name(options, target_func) << "(ctx);\n";
                         }
                         emit_indent();
                         out << "return;\n";
@@ -1279,7 +1316,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
 
                         emit_indent(); out << "} /* End Inline */\n";
                     } else {
-                        emit_indent(); out << "    " << target_func << "(ctx);\n";
+                        emit_indent(); out << "    " << emitted_function_name(options, target_func) << "(ctx);\n";
                     }
                     
                     emit_indent(); out << "    return;\n";
@@ -1381,7 +1418,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                     emit_indent(); out << "if (ctx->single_step_mode) return;\n";
                     emit_indent();
                     if (func_exists) {
-                        out << func_name << "(ctx);\n";
+                        out << emitted_function_name(options, func_name) << "(ctx);\n";
                     } else {
                         // Fallback to dispatcher (implicit by return)
                     }
@@ -1463,7 +1500,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                     }
                     emit_indent(); out << "    if (ctx->single_step_mode) return;\n";
                     if (func_exists) {
-                        emit_indent(); out << "    " << func_name << "(ctx);\n";
+                        emit_indent(); out << "    " << emitted_function_name(options, func_name) << "(ctx);\n";
                     }
                 }
                 emit_indent(); out << "    return;\n";
@@ -1822,7 +1859,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     header_ss << "#define " << options.output_prefix << "_H\n\n";
     header_ss << "#include \"gbrt.h\"\n\n";
     header_ss << "void " << options.output_prefix << "_run(GBContext* ctx);\n";
-    header_ss << "void " << options.output_prefix << "_init(GBContext* ctx);\n\n";
+    header_ss << "void " << options.output_prefix << "_init(GBContext* ctx);\n";
+    header_ss << "int " << module_main_name(options) << "(int argc, char* argv[]);\n\n";
     header_ss << "#endif\n";
     output.header_content = header_ss.str();
     output.header_file = options.output_prefix + ".h";
@@ -1952,13 +1990,14 @@ GeneratedOutput generate_output(const ir::Program& program,
 
         for (const ir::AddressSymbol* symbol : named_rom_data_symbols) {
             internal_header_ss << "extern const uint8_t* const "
-                               << make_rom_pointer_name(*symbol) << ";\n";
+                               << emitted_rom_pointer_name(options, *symbol) << ";\n";
         }
         internal_header_ss << "\n";
     }
 
     for (const auto& [name, func] : program.functions) {
-        internal_header_ss << "void " << func.name << "(GBContext* ctx);\n";
+        internal_header_ss << "void " << emitted_function_name(options, func.name)
+                           << "(GBContext* ctx);\n";
     }
     internal_header_ss << "\n#endif\n";
     output.extra_files.push_back({
@@ -2013,7 +2052,8 @@ GeneratedOutput generate_output(const ir::Program& program,
         metadata_ss << "    {\n";
         metadata_ss << "      \"bank\": " << static_cast<unsigned>(func.bank) << ",\n";
         metadata_ss << "      \"address\": \"" << hex_literal(func.entry_address, 4) << "\",\n";
-        metadata_ss << "      \"emitted_name\": \"" << json_escape(func.name) << "\",\n";
+        metadata_ss << "      \"emitted_name\": \""
+                    << json_escape(emitted_function_name(options, func.name)) << "\",\n";
         metadata_ss << "      \"kind\": \"function\",\n";
         metadata_ss << "      \"provenance\": \""
                     << json_escape(symbol_it != program.address_symbols.end()
@@ -2102,7 +2142,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         metadata_ss << "      \"emitted_address_constant\": \""
                     << json_escape(make_rom_address_constant_name(symbol)) << "\",\n";
         metadata_ss << "      \"emitted_pointer\": \""
-                    << json_escape(make_rom_pointer_name(symbol)) << "\",\n";
+                    << json_escape(emitted_rom_pointer_name(options, symbol)) << "\",\n";
         metadata_ss << "      \"emitted_name\": \"" << json_escape(symbol.emitted_name) << "\",\n";
         metadata_ss << "      \"kind\": \"" << json_escape(symbol.kind) << "\",\n";
         metadata_ss << "      \"provenance\": \"" << json_escape(symbol.provenance) << "\"";
@@ -2268,7 +2308,8 @@ GeneratedOutput generate_output(const ir::Program& program,
                 }
                 page_ss << "            } break;\n";
             } else {
-                page_ss << "            " << entry.name << "(ctx); break;\n";
+                page_ss << "            " << emitted_function_name(options, entry.name)
+                        << "(ctx); break;\n";
             }
         } else {
             page_ss << "            switch (bank) {\n";
@@ -2298,7 +2339,9 @@ GeneratedOutput generate_output(const ir::Program& program,
                     }
                     page_ss << "                } break;\n";
                 } else {
-                    page_ss << "                case " << (int)entry.bank << ": " << entry.name << "(ctx); break;\n";
+                    page_ss << "                case " << (int)entry.bank << ": "
+                            << emitted_function_name(options, entry.name)
+                            << "(ctx); break;\n";
                 }
             }
             page_ss << "                default: gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr); break;\n";
@@ -2342,7 +2385,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     }
     flush_dispatch_chunk();
 
-    source_ss << "void gb_dispatch(GBContext* ctx, uint16_t addr) {\n";
+    source_ss << "void " << dispatch_function_name(options) << "(GBContext* ctx, uint16_t addr) {\n";
     source_ss << "    ctx->pc = addr;\n";
     source_ss << "    while (!ctx->stopped && !ctx->halted) {\n";
     source_ss << "        addr = ctx->pc;\n";
@@ -2384,8 +2427,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "    }\n";
     source_ss << "}\n\n";
 
-    source_ss << "void gb_dispatch_call(GBContext* ctx, uint16_t addr) {\n";
-    source_ss << "    gb_dispatch(ctx, addr);\n";
+    source_ss << "void " << dispatch_call_function_name(options) << "(GBContext* ctx, uint16_t addr) {\n";
+    source_ss << "    " << dispatch_function_name(options) << "(ctx, addr);\n";
     source_ss << "}\n\n";
     
     const size_t chunk_target_bytes = 4 * 1024 * 1024;
@@ -2418,7 +2461,7 @@ GeneratedOutput generate_output(const ir::Program& program,
             func_ss << std::hex << std::setfill('0') << std::setw(2) << (int)func.bank << ":";
         }
         func_ss << std::hex << std::setfill('0') << std::setw(4) << func.entry_address << std::dec << " */\n";
-        func_ss << "void " << func.name << "(GBContext* ctx) {\n";
+        func_ss << "void " << emitted_function_name(options, func.name) << "(GBContext* ctx) {\n";
 
         std::vector<uint32_t> sorted_block_ids = func.block_ids;
         std::sort(sorted_block_ids.begin(), sorted_block_ids.end(),
@@ -2590,7 +2633,8 @@ GeneratedOutput generate_output(const ir::Program& program,
                                 }
                                 func_ss << "    } /* End Inline */\n";
                             } else {
-                                func_ss << "    " << target_func.name << "(ctx);\n";
+                                func_ss << "    " << emitted_function_name(options, target_func.name)
+                                        << "(ctx);\n";
                             }
                             func_ss << "    return;\n";
                             found_target_func = true;
@@ -2625,19 +2669,21 @@ GeneratedOutput generate_output(const ir::Program& program,
     
     // Extern reference to ROM data
     source_ss << "/* Extern reference to ROM data */\n";
-    source_ss << "extern const uint8_t rom_data[];\n\n";
+    source_ss << "extern const uint8_t " << rom_data_symbol_name(options) << "[];\n";
+    source_ss << "extern const size_t " << rom_size_symbol_name(options) << ";\n\n";
     
     // Emit init and run functions
     source_ss << "void " << options.output_prefix << "_init(GBContext* ctx) {\n";
     source_ss << "    /* Load ROM data into context */\n";
-    source_ss << "    gb_context_load_rom(ctx, rom_data, " << rom_size << ");\n";
+    source_ss << "    gb_context_load_rom(ctx, " << rom_data_symbol_name(options)
+              << ", " << rom_size_symbol_name(options) << ");\n";
     source_ss << "    /* Set MBC type from header */\n";
-    source_ss << "    ctx->mbc_type = rom_data[0x147];\n";
+    source_ss << "    ctx->mbc_type = " << rom_data_symbol_name(options) << "[0x147];\n";
     source_ss << "}\n\n";
     
     source_ss << "void " << options.output_prefix << "_run(GBContext* ctx) {\n";
     source_ss << "    // Start the trampoline loop - execution will stay here until stopped\n";
-    source_ss << "    gb_dispatch(ctx, ctx->pc);\n";
+    source_ss << "    " << dispatch_function_name(options) << "(ctx, ctx->pc);\n";
     source_ss << "}\n";
     
     output.source_content = source_ss.str();
@@ -2648,7 +2694,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     rom_ss << "/* ROM data */\n";
     rom_ss << "#include <stdint.h>\n";
     rom_ss << "#include <stddef.h>\n\n";
-    rom_ss << "const uint8_t rom_data[" << rom_size << "] = {\n";
+    rom_ss << "const uint8_t " << rom_data_symbol_name(options) << "[" << rom_size << "] = {\n";
     for (size_t i = 0; i < rom_size; i++) {
         if (i % 16 == 0) rom_ss << "    ";
         rom_ss << "0x" << std::hex << std::setfill('0') << std::setw(2) 
@@ -2658,7 +2704,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         else rom_ss << " ";
     }
     rom_ss << std::dec << "};\n";
-    rom_ss << "const size_t rom_size = " << rom_size << ";\n";
+    rom_ss << "const size_t " << rom_size_symbol_name(options) << " = " << rom_size << ";\n";
     if (!named_rom_data_symbols.empty()) {
         rom_ss << "\n";
         for (const ir::AddressSymbol* symbol : named_rom_data_symbols) {
@@ -2666,8 +2712,9 @@ GeneratedOutput generate_output(const ir::Program& program,
             if (!try_get_rom_storage_index(symbol->bank, symbol->address, rom_size, &rom_storage_index)) {
                 continue;
             }
-            rom_ss << "const uint8_t* const " << make_rom_pointer_name(*symbol)
-                   << " = &rom_data[" << rom_storage_index << "];\n";
+            rom_ss << "const uint8_t* const " << emitted_rom_pointer_name(options, *symbol)
+                   << " = &" << rom_data_symbol_name(options)
+                   << "[" << rom_storage_index << "];\n";
         }
     }
     output.rom_data_content = rom_ss.str();
@@ -2721,7 +2768,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    return freq ? ((double)ticks * 1000.0) / (double)freq : 0.0;\n";
     main_ss << "}\n";
     main_ss << "#endif\n\n";
-    main_ss << "int main(int argc, char* argv[]) {\n";
+    main_ss << "int " << module_main_name(options) << "(int argc, char* argv[]) {\n";
     main_ss << "    bool debug_audio = false;\n";
     main_ss << "    bool debug_audio_trace = false;\n";
     main_ss << "    bool audio_stats_console = false;\n";
@@ -2990,115 +3037,122 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    gb_context_destroy(ctx);\n";
     main_ss << "    return 0;\n";
     main_ss << "}\n";
+    if (options.emit_main_entry_point) {
+        main_ss << "\nint main(int argc, char* argv[]) {\n";
+        main_ss << "    return " << module_main_name(options) << "(argc, argv);\n";
+        main_ss << "}\n";
+    }
     output.main_content = main_ss.str();
     output.main_file = options.output_prefix + "_main.c";
     
-    // Generate CMakeLists.txt
-    std::ostringstream cmake_ss;
-    cmake_ss << "cmake_minimum_required(VERSION 3.16)\n";
-    cmake_ss << "project(" << options.output_prefix << " C CXX)\n\n";
-    cmake_ss << "# Set C standard\n";
-    cmake_ss << "set(CMAKE_C_STANDARD 11)\n";
-    cmake_ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n\n";
-    cmake_ss << "# Aggressive optimization flags\n";
-    cmake_ss << "if(NOT CMAKE_BUILD_TYPE)\n";
-    cmake_ss << "    set(CMAKE_BUILD_TYPE Release)\n";
-    cmake_ss << "endif()\n";
-    cmake_ss << "if(CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang\")\n";
-    cmake_ss << "    add_compile_options(-O3)\n";
-    cmake_ss << "endif()\n\n";
-    // Calculate relative path to runtime
-    namespace fs = std::filesystem;
-    fs::path out_path(options.output_dir);
-    std::string runtime_path;
+    if (options.emit_cmake) {
+        // Generate CMakeLists.txt
+        std::ostringstream cmake_ss;
+        cmake_ss << "cmake_minimum_required(VERSION 3.16)\n";
+        cmake_ss << "project(" << options.output_prefix << " C CXX)\n\n";
+        cmake_ss << "# Set C standard\n";
+        cmake_ss << "set(CMAKE_C_STANDARD 11)\n";
+        cmake_ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n\n";
+        cmake_ss << "# Aggressive optimization flags\n";
+        cmake_ss << "if(NOT CMAKE_BUILD_TYPE)\n";
+        cmake_ss << "    set(CMAKE_BUILD_TYPE Release)\n";
+        cmake_ss << "endif()\n";
+        cmake_ss << "if(CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang\")\n";
+        cmake_ss << "    add_compile_options(-O3)\n";
+        cmake_ss << "endif()\n\n";
+        // Calculate relative path to runtime
+        namespace fs = std::filesystem;
+        fs::path out_path(options.output_dir);
+        std::string runtime_path;
 
-    // Normalise to a path relative to the CWD (= workspace root when gbrecomp
-    // is run per AGENTS.md conventions).  This handles the case where -o was
-    // given as an absolute path: fs::relative strips the leading /host/path
-    // components and leaves only the workspace-relative portion so that the
-    // generated ../../../runtime chain has the right number of segments.
-    fs::path relative_out;
-    try {
-        relative_out = fs::relative(out_path);
-    } catch (...) {
-        relative_out = out_path;
-    }
-
-    // Count depth to generate correct number of ../
-    int depth = 0;
-    for (const auto& p : relative_out) {
-        const std::string s = p.string();
-        if (s == "." || s == "/" || s.empty()) continue;
-        depth++;
-    }
-    // Ensure at least one level up
-    if (depth == 0) depth = 1;
-
-    std::stringstream rt_ss;
-    for(int i=0; i<depth; i++) rt_ss << "../";
-    rt_ss << "runtime";
-    runtime_path = rt_ss.str();
-
-    cmake_ss << "# Runtime library path (relative to this output directory)\n";
-    cmake_ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
-    cmake_ss << "# Find SDL2\n";
-    cmake_ss << "find_package(SDL2 REQUIRED)\n\n";
-    cmake_ss << "# Create runtime library with PPU and platform support\n";
-    cmake_ss << "add_library(gbrt STATIC\n";
-    cmake_ss << "    ${GBRT_DIR}/src/gbrt.c\n";
-    cmake_ss << "    ${GBRT_DIR}/src/differential.c\n";
-    cmake_ss << "    ${GBRT_DIR}/src/ppu.c\n";
-    cmake_ss << "    ${GBRT_DIR}/src/audio.c\n";
-    cmake_ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
-    cmake_ss << "    ${GBRT_DIR}/src/interpreter.c\n";
-    cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
-    cmake_ss << ")\n\n";
-
-    cmake_ss << "# ImGui sources\n";
-    cmake_ss << "target_sources(gbrt PRIVATE\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui.cpp\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_draw.cpp\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_tables.cpp\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_widgets.cpp\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_demo.cpp\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdl2.cpp\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
-    cmake_ss << ")\n";
-
-    cmake_ss << "target_include_directories(gbrt PUBLIC \n";
-    cmake_ss << "    ${GBRT_DIR}/include\n";
-    cmake_ss << "    ${GBRT_DIR}/third_party/imgui\n";
-    cmake_ss << ")\n";
-    cmake_ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
-    cmake_ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
-    cmake_ss << "# Main executable\n";
-    std::vector<std::string> generated_source_files = {options.output_prefix + ".c"};
-    for (const auto& extra_file : output.extra_files) {
-        if (extra_file.is_source) {
-            generated_source_files.push_back(extra_file.filename);
+        // Normalise to a path relative to the CWD (= workspace root when gbrecomp
+        // is run per AGENTS.md conventions).  This handles the case where -o was
+        // given as an absolute path: fs::relative strips the leading /host/path
+        // components and leaves only the workspace-relative portion so that the
+        // generated ../../../runtime chain has the right number of segments.
+        fs::path relative_out;
+        try {
+            relative_out = fs::relative(out_path);
+        } catch (...) {
+            relative_out = out_path;
         }
-    }
-    cmake_ss << "add_executable(" << options.output_prefix << "\n";
-    cmake_ss << "    " << options.output_prefix << "_main.c\n";
-    cmake_ss << "    " << options.output_prefix << ".c\n";
-    for (const auto& extra_file : output.extra_files) {
-        if (extra_file.is_source) {
-            cmake_ss << "    " << extra_file.filename << "\n";
+
+        // Count depth to generate correct number of ../
+        int depth = 0;
+        for (const auto& p : relative_out) {
+            const std::string s = p.string();
+            if (s == "." || s == "/" || s.empty()) continue;
+            depth++;
         }
+        // Ensure at least one level up
+        if (depth == 0) depth = 1;
+
+        std::stringstream rt_ss;
+        for (int i = 0; i < depth; i++) rt_ss << "../";
+        rt_ss << "runtime";
+        runtime_path = rt_ss.str();
+
+        cmake_ss << "# Runtime library path (relative to this output directory)\n";
+        cmake_ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
+        cmake_ss << "# Find SDL2\n";
+        cmake_ss << "find_package(SDL2 REQUIRED)\n\n";
+        cmake_ss << "# Create runtime library with PPU and platform support\n";
+        cmake_ss << "add_library(gbrt STATIC\n";
+        cmake_ss << "    ${GBRT_DIR}/src/gbrt.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/differential.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/ppu.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/audio.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/interpreter.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
+        cmake_ss << ")\n\n";
+
+        cmake_ss << "# ImGui sources\n";
+        cmake_ss << "target_sources(gbrt PRIVATE\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_draw.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_tables.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_widgets.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_demo.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdl2.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
+        cmake_ss << ")\n";
+
+        cmake_ss << "target_include_directories(gbrt PUBLIC \n";
+        cmake_ss << "    ${GBRT_DIR}/include\n";
+        cmake_ss << "    ${GBRT_DIR}/third_party/imgui\n";
+        cmake_ss << ")\n";
+        cmake_ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
+        cmake_ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
+        cmake_ss << "# Main executable\n";
+        std::vector<std::string> generated_source_files = {options.output_prefix + ".c"};
+        for (const auto& extra_file : output.extra_files) {
+            if (extra_file.is_source) {
+                generated_source_files.push_back(extra_file.filename);
+            }
+        }
+        cmake_ss << "add_executable(" << options.output_prefix << "\n";
+        cmake_ss << "    " << options.output_prefix << "_main.c\n";
+        cmake_ss << "    " << options.output_prefix << ".c\n";
+        for (const auto& extra_file : output.extra_files) {
+            if (extra_file.is_source) {
+                cmake_ss << "    " << extra_file.filename << "\n";
+            }
+        }
+        cmake_ss << "    " << options.output_prefix << "_rom.c\n";
+        cmake_ss << ")\n\n";
+        cmake_ss << "# The generated ROM translation unit is very large; keep it below -O3 so rebuilds stay practical.\n";
+        cmake_ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"1\" CACHE STRING \"Optimization level for the generated ROM source file\")\n";
+        cmake_ss << "set(GBRECOMP_GENERATED_SOURCES\n";
+        for (const auto& filename : generated_source_files) {
+            cmake_ss << "    " << filename << "\n";
+        }
+        cmake_ss << ")\n";
+        cmake_ss << "set_source_files_properties(${GBRECOMP_GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS \"-O${GBRECOMP_GENERATED_OPT_LEVEL}\")\n\n";
+        cmake_ss << "target_link_libraries(" << options.output_prefix << " gbrt)\n";
+        output.cmake_content = cmake_ss.str();
+        output.cmake_file = "CMakeLists.txt";
     }
-    cmake_ss << "    " << options.output_prefix << "_rom.c\n";
-    cmake_ss << ")\n\n";
-    cmake_ss << "# The generated ROM translation unit is very large; keep it below -O3 so rebuilds stay practical.\n";
-    cmake_ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"1\" CACHE STRING \"Optimization level for the generated ROM source file\")\n";
-    cmake_ss << "set(GBRECOMP_GENERATED_SOURCES\n";
-    for (const auto& filename : generated_source_files) {
-        cmake_ss << "    " << filename << "\n";
-    }
-    cmake_ss << ")\n";
-    cmake_ss << "set_source_files_properties(${GBRECOMP_GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS \"-O${GBRECOMP_GENERATED_OPT_LEVEL}\")\n\n";
-    cmake_ss << "target_link_libraries(" << options.output_prefix << " gbrt)\n";
-    output.cmake_content = cmake_ss.str();
-    output.cmake_file = "CMakeLists.txt";
     
     return output;
 }
@@ -3114,28 +3168,36 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         }
         
         // Write header file
-        std::ofstream header_file(out_path / output.header_file);
-        if (!header_file) return false;
-        header_file << output.header_content;
-        header_file.close();
+        if (!output.header_file.empty()) {
+            std::ofstream header_file(out_path / output.header_file);
+            if (!header_file) return false;
+            header_file << output.header_content;
+            header_file.close();
+        }
         
         // Write source file
-        std::ofstream source_file(out_path / output.source_file);
-        if (!source_file) return false;
-        source_file << output.source_content;
-        source_file.close();
+        if (!output.source_file.empty()) {
+            std::ofstream source_file(out_path / output.source_file);
+            if (!source_file) return false;
+            source_file << output.source_content;
+            source_file.close();
+        }
         
         // Write ROM data file
-        std::ofstream rom_file(out_path / output.rom_data_file);
-        if (!rom_file) return false;
-        rom_file << output.rom_data_content;
-        rom_file.close();
+        if (!output.rom_data_file.empty()) {
+            std::ofstream rom_file(out_path / output.rom_data_file);
+            if (!rom_file) return false;
+            rom_file << output.rom_data_content;
+            rom_file.close();
+        }
         
         // Write main file
-        std::ofstream main_file(out_path / output.main_file);
-        if (!main_file) return false;
-        main_file << output.main_content;
-        main_file.close();
+        if (!output.main_file.empty()) {
+            std::ofstream main_file(out_path / output.main_file);
+            if (!main_file) return false;
+            main_file << output.main_content;
+            main_file.close();
+        }
 
         for (const auto& extra_file : output.extra_files) {
             std::ofstream out_file(out_path / extra_file.filename);
@@ -3145,10 +3207,12 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         }
         
         // Write CMakeLists.txt
-        std::ofstream cmake_file(out_path / output.cmake_file);
-        if (!cmake_file) return false;
-        cmake_file << output.cmake_content;
-        cmake_file.close();
+        if (!output.cmake_file.empty()) {
+            std::ofstream cmake_file(out_path / output.cmake_file);
+            if (!cmake_file) return false;
+            cmake_file << output.cmake_content;
+            cmake_file.close();
+        }
         
         return true;
     } catch (...) {

@@ -86,9 +86,27 @@ static void set_reg8(GBContext* ctx, uint8_t idx, uint8_t val) {
     }
 }
 
+static void gbrt_finish_interpreter_session(GBContext* ctx,
+                                            uint8_t entry_bank,
+                                            uint16_t entry_addr,
+                                            uint32_t instructions_executed,
+                                            uint32_t entry_cycles) {
+    if (!ctx) {
+        return;
+    }
+
+    gbrt_note_interpreter_session(ctx,
+                                  entry_bank,
+                                  entry_addr,
+                                  instructions_executed,
+                                  ctx->cycles - entry_cycles);
+}
+
 void gb_interpret(GBContext* ctx, uint16_t addr) {
     /* Set PC to the address we want to execute */
     ctx->pc = addr;
+    uint8_t entry_bank = (addr < 0x4000) ? 0 : (uint8_t)ctx->rom_bank;
+    uint32_t entry_cycles = ctx->cycles;
     
     /* Interpreter entry logging */
 #ifdef GB_DEBUG_REGS
@@ -111,6 +129,9 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
         /* Check instruction limit */
         if (gbrt_instruction_limit > 0 && gbrt_instruction_count >= gbrt_instruction_limit) {
             fprintf(stderr, "[LIMIT] Reached instruction limit %llu\n", (unsigned long long)gbrt_instruction_limit);
+            if (gbrt_instruction_limit_callback != NULL) {
+                gbrt_instruction_limit_callback();
+            }
             exit(0);
         }
         gbrt_instruction_count++;
@@ -146,6 +167,16 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
          * callback tables), so we MUST interpret ROM code too when called.
          * The interpreter is now a universal fallback for ANY uncompiled code.
          */
+
+        if ((ctx->pc >= 0xFF00 && ctx->pc < 0xFF80 && gbrt_try_execute_highmem_stub(ctx, ctx->pc)) ||
+            (ctx->pc >= 0xFF80 && ctx->pc <= 0xFFFE && gbrt_try_execute_hram_stub(ctx, ctx->pc)) ||
+            (ctx->pc >= 0xC000 && ctx->pc < 0xFFFF && gbrt_try_execute_ram_stub(ctx, ctx->pc))) {
+            if (ctx->single_step_mode) {
+                gbrt_finish_interpreter_session(ctx, entry_bank, addr, instructions_executed, entry_cycles);
+                return;
+            }
+            continue;
+        }
 
         uint8_t opcode;
         if (ctx->halt_bug) {
@@ -691,17 +722,25 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             }
             
             default:
+                gbrt_note_unimplemented_interpreter_opcode(ctx,
+                                                           (uint8_t)(((ctx->pc - 1) < 0x4000) ? 0 : ctx->rom_bank),
+                                                           (uint16_t)(ctx->pc - 1),
+                                                           opcode);
                 DBG_GENERAL("Interpreter (0x%04X): Unimplemented opcode 0x%02X", ctx->pc - 1, opcode);
                 /* If we return, we might re-execute garbage or loop. Better to stop/break hard? */
                 /* For now, return to dispatch (which might call us again if PC didn't advance?)
                    Actually we advanced PC at READ8. */
+                gbrt_finish_interpreter_session(ctx, entry_bank, addr, instructions_executed, entry_cycles);
                 return;
         }
         
         /* Per-instruction cycle counting - uses table lookup + extra for branches taken */
         gb_tick(ctx, cycles + extra_cycles);
         if (ctx->single_step_mode) {
+            gbrt_finish_interpreter_session(ctx, entry_bank, addr, instructions_executed, entry_cycles);
             return;
         }
     }
+
+    gbrt_finish_interpreter_session(ctx, entry_bank, addr, instructions_executed, entry_cycles);
 }

@@ -26,6 +26,7 @@ bool gbrt_trace_enabled = false;
 bool gbrt_log_lcd_transitions = false;
 uint64_t gbrt_instruction_count = 0;
 uint64_t gbrt_instruction_limit = 0;
+void (*gbrt_instruction_limit_callback)(void) = NULL;
 
 static char* gbrt_trace_filename = NULL;
 static bool gbrt_ppu_trace_config_loaded = false;
@@ -34,6 +35,81 @@ static uint64_t gbrt_ppu_trace_start_frame = 0;
 static uint64_t gbrt_ppu_trace_end_frame = 0;
 
 static inline void gb_sync(GBContext* ctx);
+
+static int gbrt_compare_hotspots_desc(const GBInterpreterHotspot* lhs,
+                                      const GBInterpreterHotspot* rhs) {
+    if (lhs->valid != rhs->valid) {
+        return lhs->valid ? -1 : 1;
+    }
+    if (!lhs->valid && !rhs->valid) {
+        return 0;
+    }
+    if (lhs->cycles != rhs->cycles) {
+        return (lhs->cycles > rhs->cycles) ? -1 : 1;
+    }
+    if (lhs->entries != rhs->entries) {
+        return (lhs->entries > rhs->entries) ? -1 : 1;
+    }
+    if (lhs->instructions != rhs->instructions) {
+        return (lhs->instructions > rhs->instructions) ? -1 : 1;
+    }
+    if (lhs->bank != rhs->bank) {
+        return (lhs->bank < rhs->bank) ? -1 : 1;
+    }
+    if (lhs->addr != rhs->addr) {
+        return (lhs->addr < rhs->addr) ? -1 : 1;
+    }
+    return 0;
+}
+
+static void gbrt_sort_interpreter_hotspots(GBContext* ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    for (size_t i = 1; i < GBRT_INTERPRETER_HOTSPOT_CAPACITY; i++) {
+        GBInterpreterHotspot candidate = ctx->interpreter_hotspots[i];
+        size_t j = i;
+        while (j > 0 &&
+               gbrt_compare_hotspots_desc(&candidate, &ctx->interpreter_hotspots[j - 1]) < 0) {
+            ctx->interpreter_hotspots[j] = ctx->interpreter_hotspots[j - 1];
+            j--;
+        }
+        ctx->interpreter_hotspots[j] = candidate;
+    }
+}
+
+static size_t gbrt_find_or_allocate_interpreter_hotspot(GBContext* ctx,
+                                                        uint8_t bank,
+                                                        uint16_t addr) {
+    size_t replacement = 0;
+
+    for (size_t i = 0; i < GBRT_INTERPRETER_HOTSPOT_CAPACITY; i++) {
+        GBInterpreterHotspot* hotspot = &ctx->interpreter_hotspots[i];
+        if (hotspot->valid && hotspot->bank == bank && hotspot->addr == addr) {
+            return i;
+        }
+        if (!hotspot->valid) {
+            hotspot->valid = 1;
+            hotspot->bank = bank;
+            hotspot->addr = addr;
+            hotspot->entries = 0;
+            hotspot->instructions = 0;
+            hotspot->cycles = 0;
+            hotspot->last_frame = 0;
+            return i;
+        }
+        if (gbrt_compare_hotspots_desc(hotspot, &ctx->interpreter_hotspots[replacement]) > 0) {
+            replacement = i;
+        }
+    }
+
+    memset(&ctx->interpreter_hotspots[replacement], 0, sizeof(ctx->interpreter_hotspots[replacement]));
+    ctx->interpreter_hotspots[replacement].valid = 1;
+    ctx->interpreter_hotspots[replacement].bank = bank;
+    ctx->interpreter_hotspots[replacement].addr = addr;
+    return replacement;
+}
 
 static void gbrt_load_ppu_trace_config(void) {
     if (gbrt_ppu_trace_config_loaded) {
@@ -259,6 +335,16 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->frame_first_fallback_addr = 0;
     ctx->frame_last_fallback_bank = 0;
     ctx->frame_last_fallback_addr = 0;
+    ctx->total_interpreter_entries = 0;
+    ctx->total_interpreter_instructions = 0;
+    ctx->total_interpreter_cycles = 0;
+    ctx->frame_interpreter_instructions = 0;
+    ctx->frame_interpreter_cycles = 0;
+    ctx->has_unimplemented_interpreter_opcode = 0;
+    ctx->last_unimplemented_opcode = 0;
+    ctx->last_unimplemented_bank = 0;
+    ctx->last_unimplemented_addr = 0;
+    memset(ctx->interpreter_hotspots, 0, sizeof(ctx->interpreter_hotspots));
     ctx->lcd_off_active = 0;
     ctx->lcd_off_start_cycles = 0;
     ctx->lcd_off_start_frame_cycles = 0;
@@ -967,6 +1053,176 @@ void gb_ret(GBContext* ctx) { ctx->pc = gb_pop16(ctx); }
 void gbrt_jump_hl(GBContext* ctx) { ctx->pc = ctx->hl; }
 void gb_rst(GBContext* ctx, uint8_t vec) { gb_push16(ctx, ctx->pc); ctx->pc = vec; }
 
+static bool gbrt_condition_true(const GBContext* ctx, uint8_t condition) {
+    switch (condition) {
+        case 0: return !ctx->f_z;      /* NZ */
+        case 1: return ctx->f_z != 0;  /* Z */
+        case 2: return !ctx->f_c;      /* NC */
+        case 3: return ctx->f_c != 0;  /* C */
+        default: return false;
+    }
+}
+
+uint8_t gbrt_try_execute_highmem_stub(GBContext* ctx, uint16_t addr) {
+    if (!ctx) {
+        return 0;
+    }
+
+    if (ctx->dma.active) {
+        return 0;
+    }
+
+    if (addr < 0xFF00 || addr >= 0xFF80) {
+        return 0;
+    }
+
+    uint8_t opcode = gb_read8(ctx, addr);
+    switch (opcode) {
+        case 0x00: /* NOP */
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 4);
+            return 1;
+
+        case 0x18: { /* JR e */
+            int8_t offset = (int8_t)gb_read8(ctx, (uint16_t)(addr + 1));
+            ctx->pc = (uint16_t)(addr + 2 + offset);
+            gb_tick(ctx, 12);
+            return 1;
+        }
+
+        case 0x20: /* JR NZ,e */
+        case 0x28: /* JR Z,e */
+        case 0x30: /* JR NC,e */
+        case 0x38: { /* JR C,e */
+            static const uint8_t conditions[] = {0, 1, 2, 3};
+            uint8_t condition = conditions[(opcode - 0x20) >> 3];
+            int8_t offset = (int8_t)gb_read8(ctx, (uint16_t)(addr + 1));
+            if (gbrt_condition_true(ctx, condition)) {
+                ctx->pc = (uint16_t)(addr + 2 + offset);
+                gb_tick(ctx, 12);
+            } else {
+                ctx->pc = (uint16_t)(addr + 2);
+                gb_tick(ctx, 8);
+            }
+            return 1;
+        }
+
+        case 0xC0: /* RET NZ */
+        case 0xC8: /* RET Z */
+        case 0xD0: /* RET NC */
+        case 0xD8: { /* RET C */
+            static const uint8_t conditions[] = {0, 1, 2, 3};
+            uint8_t condition = conditions[(opcode - 0xC0) >> 3];
+            if (gbrt_condition_true(ctx, condition)) {
+                gb_ret(ctx);
+                gb_tick(ctx, 20);
+            } else {
+                ctx->pc = (uint16_t)(addr + 1);
+                gb_tick(ctx, 8);
+            }
+            return 1;
+        }
+
+        case 0xC2: /* JP NZ,nn */
+        case 0xCA: /* JP Z,nn */
+        case 0xD2: /* JP NC,nn */
+        case 0xDA: { /* JP C,nn */
+            static const uint8_t conditions[] = {0, 1, 2, 3};
+            uint8_t condition = conditions[(opcode - 0xC2) >> 3];
+            uint16_t target = (uint16_t)(gb_read8(ctx, (uint16_t)(addr + 1)) |
+                                         (gb_read8(ctx, (uint16_t)(addr + 2)) << 8));
+            if (gbrt_condition_true(ctx, condition)) {
+                ctx->pc = target;
+                gb_tick(ctx, 16);
+            } else {
+                ctx->pc = (uint16_t)(addr + 3);
+                gb_tick(ctx, 12);
+            }
+            return 1;
+        }
+
+        case 0xC3: { /* JP nn */
+            uint16_t target = (uint16_t)(gb_read8(ctx, (uint16_t)(addr + 1)) |
+                                         (gb_read8(ctx, (uint16_t)(addr + 2)) << 8));
+            ctx->pc = target;
+            gb_tick(ctx, 16);
+            return 1;
+        }
+
+        case 0xC4: /* CALL NZ,nn */
+        case 0xCC: /* CALL Z,nn */
+        case 0xD4: /* CALL NC,nn */
+        case 0xDC: { /* CALL C,nn */
+            static const uint8_t conditions[] = {0, 1, 2, 3};
+            uint8_t condition = conditions[(opcode - 0xC4) >> 3];
+            uint16_t target = (uint16_t)(gb_read8(ctx, (uint16_t)(addr + 1)) |
+                                         (gb_read8(ctx, (uint16_t)(addr + 2)) << 8));
+            if (gbrt_condition_true(ctx, condition)) {
+                gb_push16(ctx, (uint16_t)(addr + 3));
+                ctx->pc = target;
+                gb_tick(ctx, 24);
+            } else {
+                ctx->pc = (uint16_t)(addr + 3);
+                gb_tick(ctx, 12);
+            }
+            return 1;
+        }
+
+        case 0xC7: /* RST 00 */
+        case 0xCF: /* RST 08 */
+        case 0xD7: /* RST 10 */
+        case 0xDF: /* RST 18 */
+        case 0xE7: /* RST 20 */
+        case 0xEF: /* RST 28 */
+        case 0xF7: /* RST 30 */
+        case 0xFF: /* RST 38 */
+            gb_push16(ctx, (uint16_t)(addr + 1));
+            ctx->pc = (uint16_t)(opcode & 0x38);
+            gb_tick(ctx, 16);
+            return 1;
+
+        case 0xC9: /* RET */
+            gb_ret(ctx);
+            gb_tick(ctx, 16);
+            return 1;
+
+        case 0xCD: { /* CALL nn */
+            uint16_t target = (uint16_t)(gb_read8(ctx, (uint16_t)(addr + 1)) |
+                                         (gb_read8(ctx, (uint16_t)(addr + 2)) << 8));
+            gb_push16(ctx, (uint16_t)(addr + 3));
+            ctx->pc = target;
+            gb_tick(ctx, 24);
+            return 1;
+        }
+
+        case 0xD9: /* RETI */
+            ctx->ime = 1;
+            gb_ret(ctx);
+            gb_tick(ctx, 16);
+            return 1;
+
+        case 0xE9: /* JP HL */
+            gbrt_jump_hl(ctx);
+            gb_tick(ctx, 4);
+            return 1;
+
+        case 0xF3: /* DI */
+            ctx->ime = 0;
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 4);
+            return 1;
+
+        case 0xFB: /* EI */
+            ctx->ime = 1;
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 4);
+            return 1;
+
+        default:
+            return 0;
+    }
+}
+
 uint8_t gbrt_try_execute_hram_stub(GBContext* ctx, uint16_t addr) {
     (void)ctx;
     (void)addr;
@@ -1007,6 +1263,99 @@ uint8_t gbrt_try_execute_ram_stub(GBContext* ctx, uint16_t addr) {
             gb_tick(ctx, 4);
             return 1;
 
+        case 0x04: ctx->b = gb_inc8(ctx, ctx->b); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x05: ctx->b = gb_dec8(ctx, ctx->b); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x0C: ctx->c = gb_inc8(ctx, ctx->c); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x0D: ctx->c = gb_dec8(ctx, ctx->c); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x14: ctx->d = gb_inc8(ctx, ctx->d); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x15: ctx->d = gb_dec8(ctx, ctx->d); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x1C: ctx->e = gb_inc8(ctx, ctx->e); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x1D: ctx->e = gb_dec8(ctx, ctx->e); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x24: ctx->h = gb_inc8(ctx, ctx->h); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x25: ctx->h = gb_dec8(ctx, ctx->h); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x2C: ctx->l = gb_inc8(ctx, ctx->l); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x2D: ctx->l = gb_dec8(ctx, ctx->l); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x3C: ctx->a = gb_inc8(ctx, ctx->a); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+        case 0x3D: ctx->a = gb_dec8(ctx, ctx->a); ctx->pc = (uint16_t)(addr + 1); gb_tick(ctx, 4); return 1;
+
+        case 0x06: if (addr == 0xFFFF) return 0; ctx->b = gb_read8(ctx, (uint16_t)(addr + 1)); ctx->pc = (uint16_t)(addr + 2); gb_tick(ctx, 8); return 1;
+        case 0x0E: if (addr == 0xFFFF) return 0; ctx->c = gb_read8(ctx, (uint16_t)(addr + 1)); ctx->pc = (uint16_t)(addr + 2); gb_tick(ctx, 8); return 1;
+        case 0x16: if (addr == 0xFFFF) return 0; ctx->d = gb_read8(ctx, (uint16_t)(addr + 1)); ctx->pc = (uint16_t)(addr + 2); gb_tick(ctx, 8); return 1;
+        case 0x1E: if (addr == 0xFFFF) return 0; ctx->e = gb_read8(ctx, (uint16_t)(addr + 1)); ctx->pc = (uint16_t)(addr + 2); gb_tick(ctx, 8); return 1;
+        case 0x26: if (addr == 0xFFFF) return 0; ctx->h = gb_read8(ctx, (uint16_t)(addr + 1)); ctx->pc = (uint16_t)(addr + 2); gb_tick(ctx, 8); return 1;
+        case 0x2E: if (addr == 0xFFFF) return 0; ctx->l = gb_read8(ctx, (uint16_t)(addr + 1)); ctx->pc = (uint16_t)(addr + 2); gb_tick(ctx, 8); return 1;
+        case 0x3E: if (addr == 0xFFFF) return 0; ctx->a = gb_read8(ctx, (uint16_t)(addr + 1)); ctx->pc = (uint16_t)(addr + 2); gb_tick(ctx, 8); return 1;
+
+        case 0x18: { /* JR e */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            int8_t offset = (int8_t)gb_read8(ctx, (uint16_t)(addr + 1));
+            ctx->pc = (uint16_t)(addr + 2 + offset);
+            gb_tick(ctx, 12);
+            return 1;
+        }
+
+        case 0x20: /* JR NZ,e */
+        case 0x28: /* JR Z,e */
+        case 0x30: /* JR NC,e */
+        case 0x38: { /* JR C,e */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            int8_t offset = (int8_t)gb_read8(ctx, (uint16_t)(addr + 1));
+            bool taken = gbrt_condition_true(ctx, (uint8_t)((opcode >> 3) & 0x03));
+            ctx->pc = taken ? (uint16_t)(addr + 2 + offset) : (uint16_t)(addr + 2);
+            gb_tick(ctx, taken ? 12 : 8);
+            return 1;
+        }
+
+        case 0x22: /* LD (HL+),A */
+            gb_write8(ctx, ctx->hl, ctx->a);
+            ctx->hl++;
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0x2A: /* LD A,(HL+) */
+            ctx->a = gb_read8(ctx, ctx->hl);
+            ctx->hl++;
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0x32: /* LD (HL-),A */
+            gb_write8(ctx, ctx->hl, ctx->a);
+            ctx->hl--;
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0x3A: /* LD A,(HL-) */
+            ctx->a = gb_read8(ctx, ctx->hl);
+            ctx->hl--;
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0x77: /* LD (HL),A */
+            gb_write8(ctx, ctx->hl, ctx->a);
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0x7E: /* LD A,(HL) */
+            ctx->a = gb_read8(ctx, ctx->hl);
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0xAF: /* XOR A */
+            gb_xor8(ctx, ctx->a);
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 4);
+            return 1;
+
         case 0xC3: { /* JP nn */
             if (addr == 0xFFFF) {
                 return 0;
@@ -1022,6 +1371,35 @@ uint8_t gbrt_try_execute_ram_stub(GBContext* ctx, uint16_t addr) {
             gb_tick(ctx, 16);
             return 1;
 
+        case 0xC0: /* RET NZ */
+        case 0xC8: /* RET Z */
+        case 0xD0: /* RET NC */
+        case 0xD8: { /* RET C */
+            bool taken = gbrt_condition_true(ctx, (uint8_t)((opcode >> 3) & 0x03));
+            if (taken) {
+                gb_ret(ctx);
+                gb_tick(ctx, 20);
+            } else {
+                ctx->pc = (uint16_t)(addr + 1);
+                gb_tick(ctx, 8);
+            }
+            return 1;
+        }
+
+        case 0xC2: /* JP NZ,nn */
+        case 0xCA: /* JP Z,nn */
+        case 0xD2: /* JP NC,nn */
+        case 0xDA: { /* JP C,nn */
+            if (addr >= 0xFFFE) {
+                return 0;
+            }
+            uint16_t target = gb_read16(ctx, (uint16_t)(addr + 1));
+            bool taken = gbrt_condition_true(ctx, (uint8_t)((opcode >> 3) & 0x03));
+            ctx->pc = taken ? target : (uint16_t)(addr + 3);
+            gb_tick(ctx, taken ? 16 : 12);
+            return 1;
+        }
+
         case 0xCD: { /* CALL nn */
             if (addr >= 0xFFFD) {
                 return 0;
@@ -1033,6 +1411,26 @@ uint8_t gbrt_try_execute_ram_stub(GBContext* ctx, uint16_t addr) {
             return 1;
         }
 
+        case 0xC4: /* CALL NZ,nn */
+        case 0xCC: /* CALL Z,nn */
+        case 0xD4: /* CALL NC,nn */
+        case 0xDC: { /* CALL C,nn */
+            if (addr >= 0xFFFD) {
+                return 0;
+            }
+            uint16_t target = gb_read16(ctx, (uint16_t)(addr + 1));
+            bool taken = gbrt_condition_true(ctx, (uint8_t)((opcode >> 3) & 0x03));
+            if (taken) {
+                gb_push16(ctx, (uint16_t)(addr + 3));
+                ctx->pc = target;
+                gb_tick(ctx, 24);
+            } else {
+                ctx->pc = (uint16_t)(addr + 3);
+                gb_tick(ctx, 12);
+            }
+            return 1;
+        }
+
         case 0xD9: /* RETI */
             gb_ret(ctx);
             ctx->ime = 1;
@@ -1040,9 +1438,101 @@ uint8_t gbrt_try_execute_ram_stub(GBContext* ctx, uint16_t addr) {
             gb_tick(ctx, 16);
             return 1;
 
+        case 0xE0: { /* LDH (n),A */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            uint8_t offset = gb_read8(ctx, (uint16_t)(addr + 1));
+            gb_write8(ctx, (uint16_t)(0xFF00u + offset), ctx->a);
+            ctx->pc = (uint16_t)(addr + 2);
+            gb_tick(ctx, 12);
+            return 1;
+        }
+
+        case 0xE2: /* LD (C),A */
+            gb_write8(ctx, (uint16_t)(0xFF00u + ctx->c), ctx->a);
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0xE6: /* AND n */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            gb_and8(ctx, gb_read8(ctx, (uint16_t)(addr + 1)));
+            ctx->pc = (uint16_t)(addr + 2);
+            gb_tick(ctx, 8);
+            return 1;
+
         case 0xE9: /* JP HL */
             ctx->pc = ctx->hl;
             gb_tick(ctx, 4);
+            return 1;
+
+        case 0xEA: { /* LD (nn),A */
+            if (addr >= 0xFFFE) {
+                return 0;
+            }
+            uint16_t target = gb_read16(ctx, (uint16_t)(addr + 1));
+            gb_write8(ctx, target, ctx->a);
+            ctx->pc = (uint16_t)(addr + 3);
+            gb_tick(ctx, 16);
+            return 1;
+        }
+
+        case 0xEE: /* XOR n */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            gb_xor8(ctx, gb_read8(ctx, (uint16_t)(addr + 1)));
+            ctx->pc = (uint16_t)(addr + 2);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0xF0: { /* LDH A,(n) */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            uint8_t offset = gb_read8(ctx, (uint16_t)(addr + 1));
+            ctx->a = gb_read8(ctx, (uint16_t)(0xFF00u + offset));
+            ctx->pc = (uint16_t)(addr + 2);
+            gb_tick(ctx, 12);
+            return 1;
+        }
+
+        case 0xF2: /* LD A,(C) */
+            ctx->a = gb_read8(ctx, (uint16_t)(0xFF00u + ctx->c));
+            ctx->pc = (uint16_t)(addr + 1);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0xF6: /* OR n */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            gb_or8(ctx, gb_read8(ctx, (uint16_t)(addr + 1)));
+            ctx->pc = (uint16_t)(addr + 2);
+            gb_tick(ctx, 8);
+            return 1;
+
+        case 0xFA: { /* LD A,(nn) */
+            if (addr >= 0xFFFE) {
+                return 0;
+            }
+            uint16_t target = gb_read16(ctx, (uint16_t)(addr + 1));
+            ctx->a = gb_read8(ctx, target);
+            ctx->pc = (uint16_t)(addr + 3);
+            gb_tick(ctx, 16);
+            return 1;
+        }
+
+        case 0xFE: /* CP n */
+            if (addr == 0xFFFF) {
+                return 0;
+            }
+            gb_cp8(ctx, gb_read8(ctx, (uint16_t)(addr + 1)));
+            ctx->pc = (uint16_t)(addr + 2);
+            gb_tick(ctx, 8);
             return 1;
 
         default:
@@ -1268,6 +1758,45 @@ void gbrt_note_dispatch_fallback(GBContext* ctx, uint8_t bank, uint16_t addr) {
     ctx->total_dispatch_fallbacks++;
 }
 
+void gbrt_note_interpreter_session(GBContext* ctx,
+                                   uint8_t bank,
+                                   uint16_t addr,
+                                   uint32_t instructions,
+                                   uint32_t cycles) {
+    if (!ctx) {
+        return;
+    }
+
+    ctx->total_interpreter_entries++;
+    ctx->total_interpreter_instructions += instructions;
+    ctx->total_interpreter_cycles += cycles;
+    ctx->frame_interpreter_instructions += instructions;
+    ctx->frame_interpreter_cycles += cycles;
+
+    size_t slot = gbrt_find_or_allocate_interpreter_hotspot(ctx, bank, addr);
+    GBInterpreterHotspot* hotspot = &ctx->interpreter_hotspots[slot];
+    hotspot->entries++;
+    hotspot->instructions += instructions;
+    hotspot->cycles += cycles;
+    hotspot->last_frame = ctx->completed_frames + 1;
+
+    gbrt_sort_interpreter_hotspots(ctx);
+}
+
+void gbrt_note_unimplemented_interpreter_opcode(GBContext* ctx,
+                                                uint8_t bank,
+                                                uint16_t addr,
+                                                uint8_t opcode) {
+    if (!ctx) {
+        return;
+    }
+
+    ctx->has_unimplemented_interpreter_opcode = 1;
+    ctx->last_unimplemented_opcode = opcode;
+    ctx->last_unimplemented_bank = bank;
+    ctx->last_unimplemented_addr = addr;
+}
+
 void gbrt_note_lcd_transition(GBContext* ctx, bool lcd_enabled, uint8_t old_lcdc, uint8_t new_lcdc, uint8_t ly, uint8_t mode) {
     if (!ctx) return;
 
@@ -1464,6 +1993,9 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
         gbrt_instruction_count++;
         if (gbrt_instruction_count >= gbrt_instruction_limit) {
             printf("Instruction limit reached (%llu)\n", (unsigned long long)gbrt_instruction_limit);
+            if (gbrt_instruction_limit_callback != NULL) {
+                gbrt_instruction_limit_callback();
+            }
             exit(0);
         }
     }
@@ -1647,6 +2179,9 @@ uint32_t gb_run_cycles(GBContext* ctx, uint32_t max_cycles) {
 uint32_t gb_step(GBContext* ctx) {
     if (gbrt_instruction_limit > 0 && ++gbrt_instruction_count >= gbrt_instruction_limit) {
         printf("Instruction limit reached (%llu)\n", (unsigned long long)gbrt_instruction_limit);
+        if (gbrt_instruction_limit_callback != NULL) {
+            gbrt_instruction_limit_callback();
+        }
         exit(0);
     }
     
@@ -1703,6 +2238,8 @@ void gb_reset_frame(GBContext* ctx) {
     ctx->frame_first_fallback_addr = 0;
     ctx->frame_last_fallback_bank = 0;
     ctx->frame_last_fallback_addr = 0;
+    ctx->frame_interpreter_instructions = 0;
+    ctx->frame_interpreter_cycles = 0;
     ctx->frame_lcd_off_cycles = 0;
     ctx->frame_lcd_transition_count = 0;
     ctx->frame_lcd_off_span_count = 0;

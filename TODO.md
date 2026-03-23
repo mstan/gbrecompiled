@@ -7,15 +7,21 @@
 - [ ] Performance optimizations (what are the hotspots in the generated code, and how can we optimize them without sacrificing readability or modifiability?)
 - [ ] Consider if Imgui still the best scenario for UI
 - [x] Multi-rom support, they share the same runtime but have different generated code and metadata, we add a launcher to select which one to run
-- [ ] Graphical launcher for multi-rom support
+- [x] Graphical launcher for multi-rom support
 - [ ] Per game configurations on multi-rom mode
 - [ ] Benchmark performance and memory usage against emulators
-- [ ] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used
+- [ ] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used. Gather feedback from interpreter hotspots to guide recompiler improvements.
 - [ ] Add support for parallel recompilation
 - [ ] Remove mgbdis from repo
 - [ ] Improve handling of imgui dependency
 - [ ] Benchmark performance on low-end hardware compared to emulators, and optimize for that use case
 - [ ] Fix double-click to launch game on multi-rom launcher
+- [ ] Guide the recompilation with .json files, entrypoints, function names, data labels, etc. to improve the generated code quality and stability
+- [ ] Fix "ghosting" on screen shake on pokemon blue when receiving damage, likely a timing issue with the current rendering approach
+- [ ] Improve asset handling, currently they're hardcoded as raw data blobs in the code
+- [ ] Fix save not detected on pokemon blue
+- [ ] Implement savestates
+- [ ] Update AGENTS.md
  
 # Platforms
 - [ ] Android support

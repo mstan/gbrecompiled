@@ -1564,23 +1564,83 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             {
                 // Push return address (instruction size 1)
                 uint16_t next_pc = instr.source_address + 1;
-                out << "gb_push16(ctx, 0x" << std::hex << next_pc << std::dec << ");\n";
-                emit_indent();
-                
                 uint8_t vector = instr.dst.value.rst_vec;
-                out << "ctx->pc = 0x" << std::hex << std::setfill('0') << std::setw(2) 
-                    << (int)vector << std::dec << ";\n";
-                
-                if (options.emit_cycle_counting && group_cycles > 0) {
-                    emit_indent(); out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
-                    emit_indent(); out << "if (ctx->stopped) return;\n";
+                std::string func_name = program.make_function_name(0, vector);
+                bool func_exists = false;
+                for (const auto& [candidate_name, candidate_func] : program.functions) {
+                    if (candidate_func.bank == 0 && candidate_func.entry_address == vector) {
+                        func_name = candidate_name;
+                        func_exists = true;
+                        break;
+                    }
                 }
-                
-                emit_indent(); out << "/* Fallback to dispatcher */\n";
+                bool did_inline = false;
+
+                if (func_exists && inlineable_functions.count(func_name)) {
+                    if (options.emit_cycle_counting && group_cycles > 0) {
+                        emit_indent(); out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
+                        emit_indent(); out << "if (ctx->stopped) return;\n";
+                    }
+                    emit_indent(); out << "if (ctx->single_step_mode) return;\n";
+                    out << "/* Inline: " << func_name << " */ {\n";
+
+                    const auto& func = program.functions.at(func_name);
+                    const auto& block = program.blocks.at(func.block_ids[0]);
+
+                    size_t limit = block.instructions.size();
+                    if (limit > 0 && block.instructions.back().opcode == ir::Opcode::RET) {
+                        limit--;
+                    }
+
+                    uint32_t inline_cycles = 0;
+                    for (size_t k = 0; k < limit; k++) {
+                        inline_cycles += block.instructions[k].cycles;
+                        emit_ir_instruction(out,
+                                            block.instructions[k],
+                                            program,
+                                            indent + 1,
+                                            options,
+                                            0,
+                                            0,
+                                            false,
+                                            "",
+                                            inlineable_functions);
+                    }
+                    if (block.instructions.size() > limit) {
+                        inline_cycles += block.instructions.back().cycles;
+                    }
+
+                    if (options.emit_cycle_counting) {
+                        emit_indent(); out << "    gb_tick(ctx, " << (int)inline_cycles << ");\n";
+                        emit_indent(); out << "    if (ctx->stopped) return;\n";
+                    }
+
+                    emit_indent(); out << "    ctx->pc = 0x" << std::hex << next_pc << std::dec << ";\n";
+                    emit_indent(); out << "} /* End Inline */\n";
+                    did_inline = true;
+                }
+
+                if (!did_inline) {
+                    out << "gb_push16(ctx, 0x" << std::hex << next_pc << std::dec << ");\n";
+                    emit_indent();
+                    out << "ctx->pc = 0x" << std::hex << std::setfill('0') << std::setw(2)
+                        << (int)vector << std::dec << ";\n";
+
+                    if (options.emit_cycle_counting && group_cycles > 0) {
+                        emit_indent(); out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
+                        emit_indent(); out << "if (ctx->stopped) return;\n";
+                    }
+
+                    emit_indent(); out << "if (ctx->single_step_mode) return;\n";
+                    emit_indent();
+                    if (func_exists) {
+                        out << emitted_function_name(options, func_name) << "(ctx);\n";
+                    } else {
+                        out << "/* Fallback to dispatcher */\n";
+                    }
+                }
+
                 emit_indent(); out << "return;\n";
-                
-                emit_indent();
-                out << "return;\n";
             }
             break;
             
@@ -2239,6 +2299,43 @@ GeneratedOutput generate_output(const ir::Program& program,
             });
         }
     }
+
+    struct CompiledRamOverlay {
+        uint16_t ram_addr = 0;
+        std::vector<uint8_t> bytes;
+        std::vector<uint16_t> dispatch_addrs;
+    };
+
+    std::vector<CompiledRamOverlay> compiled_ram_overlays;
+    compiled_ram_overlays.reserve(options.ram_overlays.size());
+    for (const auto& overlay : options.ram_overlays) {
+        if (overlay.bytes.empty()) {
+            continue;
+        }
+
+        CompiledRamOverlay compiled_overlay;
+        compiled_overlay.ram_addr = overlay.ram_addr;
+        compiled_overlay.bytes = overlay.bytes;
+
+        uint32_t overlay_end = static_cast<uint32_t>(overlay.ram_addr) +
+                               static_cast<uint32_t>(overlay.bytes.size());
+        for (const auto& [addr, funcs] : addr_to_funcs) {
+            (void)funcs;
+            if (addr >= overlay.ram_addr && static_cast<uint32_t>(addr) < overlay_end) {
+                compiled_overlay.dispatch_addrs.push_back(addr);
+            }
+        }
+
+        if (compiled_overlay.dispatch_addrs.empty()) {
+            continue;
+        }
+
+        std::sort(compiled_overlay.dispatch_addrs.begin(), compiled_overlay.dispatch_addrs.end());
+        compiled_overlay.dispatch_addrs.erase(
+            std::unique(compiled_overlay.dispatch_addrs.begin(), compiled_overlay.dispatch_addrs.end()),
+            compiled_overlay.dispatch_addrs.end());
+        compiled_ram_overlays.push_back(std::move(compiled_overlay));
+    }
     
     auto dispatch_page_name = [&](uint8_t page) {
         std::ostringstream name_ss;
@@ -2373,6 +2470,55 @@ GeneratedOutput generate_output(const ir::Program& program,
     }
     source_ss << "\n";
 
+    if (!compiled_ram_overlays.empty()) {
+        for (size_t overlay_index = 0; overlay_index < compiled_ram_overlays.size(); ++overlay_index) {
+            const auto& overlay = compiled_ram_overlays[overlay_index];
+            const std::string match_name = module_link_name(
+                options, "ram_overlay_" + std::to_string(overlay_index) + "_matches");
+
+            source_ss << "static uint8_t " << match_name << "(GBContext* ctx) {\n";
+            for (size_t byte_index = 0; byte_index < overlay.bytes.size(); ++byte_index) {
+                source_ss << "    if (gb_read8(ctx, "
+                          << hex_literal(static_cast<uint32_t>(overlay.ram_addr + byte_index), 4)
+                          << ") != "
+                          << hex_literal(overlay.bytes[byte_index], 2)
+                          << ") return 0;\n";
+            }
+            source_ss << "    return 1;\n";
+            source_ss << "}\n\n";
+        }
+
+        source_ss << "static uint8_t "
+                  << module_link_name(options, "try_dispatch_compiled_ram_overlay")
+                  << "(GBContext* ctx, uint16_t addr, uint8_t bank) {\n";
+        for (size_t overlay_index = 0; overlay_index < compiled_ram_overlays.size(); ++overlay_index) {
+            const auto& overlay = compiled_ram_overlays[overlay_index];
+            const std::string match_name = module_link_name(
+                options, "ram_overlay_" + std::to_string(overlay_index) + "_matches");
+            const uint32_t overlay_end = static_cast<uint32_t>(overlay.ram_addr) +
+                                         static_cast<uint32_t>(overlay.bytes.size());
+
+            source_ss << "    if (addr >= " << hex_literal(overlay.ram_addr, 4)
+                      << " && addr < " << hex_literal(overlay_end, 4) << ") {\n";
+            source_ss << "        if (!" << match_name << "(ctx)) {\n";
+            source_ss << "            return 0;\n";
+            source_ss << "        }\n";
+            source_ss << "        switch (addr) {\n";
+            for (uint16_t dispatch_addr : overlay.dispatch_addrs) {
+                source_ss << "            case " << hex_literal(dispatch_addr, 4) << ":\n";
+                source_ss << "                " << dispatch_page_name(static_cast<uint8_t>(dispatch_addr >> 8))
+                          << "(ctx, addr, bank);\n";
+                source_ss << "                return 1;\n";
+            }
+            source_ss << "            default:\n";
+            source_ss << "                return 0;\n";
+            source_ss << "        }\n";
+            source_ss << "    }\n";
+        }
+        source_ss << "    return 0;\n";
+        source_ss << "}\n\n";
+    }
+
     for (auto& [page, page_ss] : dispatch_page_sources) {
         page_ss << "        default: gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr); break;\n";
         page_ss << "    }\n";
@@ -2404,11 +2550,23 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "            if (ctx->single_step_mode) break;\n";
     source_ss << "            continue;\n";
     source_ss << "        }\n";
+    source_ss << "        if (gbrt_try_execute_highmem_stub(ctx, addr)) {\n";
+    source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
+    source_ss << "            continue;\n";
+    source_ss << "        }\n";
     source_ss << "        if (gbrt_try_execute_ram_stub(ctx, addr)) {\n";
     source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
     source_ss << "            continue;\n";
     source_ss << "        }\n";
-    // HRAM (0xFF80-0xFFFE) is writable at runtime; never use pre-compiled stubs there.
+    if (!compiled_ram_overlays.empty()) {
+        source_ss << "        if (" << module_link_name(options, "try_dispatch_compiled_ram_overlay")
+                  << "(ctx, addr, bank)) {\n";
+        source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
+        source_ss << "            continue;\n";
+        source_ss << "        }\n";
+    }
+    // HRAM is writable at runtime; only known overlays matched above may use
+    // compiled code from this region.
     source_ss << "        if (addr >= 0xFF80 && addr <= 0xFFFE) {\n";
     source_ss << "            gbrt_note_dispatch_fallback(ctx, bank, addr);\n";
     source_ss << "            gb_interpret(ctx, addr);\n";
@@ -2768,6 +2926,79 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    return freq ? ((double)ticks * 1000.0) / (double)freq : 0.0;\n";
     main_ss << "}\n";
     main_ss << "#endif\n\n";
+    main_ss << "static void gbrt_print_interpreter_summary(const GBContext* ctx, unsigned max_hotspots) {\n";
+    main_ss << "    if (!ctx) {\n";
+    main_ss << "        return;\n";
+    main_ss << "    }\n";
+    main_ss << "    if (ctx->total_dispatch_fallbacks == 0 &&\n";
+    main_ss << "        ctx->total_interpreter_entries == 0 &&\n";
+    main_ss << "        !ctx->has_unimplemented_interpreter_opcode) {\n";
+    main_ss << "        fprintf(stderr, \"[INTERP] No interpreter fallback recorded.\\n\");\n";
+    main_ss << "        return;\n";
+    main_ss << "    }\n";
+    main_ss << "    fprintf(stderr,\n";
+    main_ss << "            \"[INTERP] Summary: fallbacks=%llu interpreter_entries=%llu interpreter_instructions=%llu interpreter_cycles=%llu\\n\",\n";
+    main_ss << "            (unsigned long long)ctx->total_dispatch_fallbacks,\n";
+    main_ss << "            (unsigned long long)ctx->total_interpreter_entries,\n";
+    main_ss << "            (unsigned long long)ctx->total_interpreter_instructions,\n";
+    main_ss << "            (unsigned long long)ctx->total_interpreter_cycles);\n";
+    main_ss << "    unsigned printed = 0;\n";
+    main_ss << "    for (size_t i = 0; i < GBRT_INTERPRETER_HOTSPOT_CAPACITY && printed < max_hotspots; i++) {\n";
+    main_ss << "        const GBInterpreterHotspot* hotspot = &ctx->interpreter_hotspots[i];\n";
+    main_ss << "        if (!hotspot->valid || hotspot->entries == 0) {\n";
+    main_ss << "            continue;\n";
+    main_ss << "        }\n";
+    main_ss << "        fprintf(stderr,\n";
+    main_ss << "                \"[INTERP] Hotspot #%u %03X:%04X entries=%llu instructions=%llu cycles=%llu last_frame=%llu\\n\",\n";
+    main_ss << "                printed + 1,\n";
+    main_ss << "                hotspot->bank,\n";
+    main_ss << "                hotspot->addr,\n";
+    main_ss << "                (unsigned long long)hotspot->entries,\n";
+    main_ss << "                (unsigned long long)hotspot->instructions,\n";
+    main_ss << "                (unsigned long long)hotspot->cycles,\n";
+    main_ss << "                (unsigned long long)hotspot->last_frame);\n";
+    main_ss << "        printed++;\n";
+    main_ss << "    }\n";
+    main_ss << "    if (ctx->has_unimplemented_interpreter_opcode) {\n";
+    main_ss << "        fprintf(stderr,\n";
+    main_ss << "                \"[INTERP] Coverage gap: opcode=%02X at %03X:%04X\\n\",\n";
+    main_ss << "                ctx->last_unimplemented_opcode,\n";
+    main_ss << "                ctx->last_unimplemented_bank,\n";
+    main_ss << "                ctx->last_unimplemented_addr);\n";
+    main_ss << "    }\n";
+    main_ss << "}\n\n";
+    main_ss << "static const GBContext* gbrt_interpreter_summary_ctx = NULL;\n";
+    main_ss << "static unsigned gbrt_interpreter_summary_limit = 8;\n";
+    main_ss << "static int gbrt_interpreter_summary_enabled = 0;\n";
+    main_ss << "static int gbrt_interpreter_summary_atexit_registered = 0;\n\n";
+    main_ss << "static void gbrt_flush_interpreter_summary(void) {\n";
+    main_ss << "    if (!gbrt_interpreter_summary_enabled || !gbrt_interpreter_summary_ctx) {\n";
+    main_ss << "        return;\n";
+    main_ss << "    }\n";
+    main_ss << "    gbrt_print_interpreter_summary(gbrt_interpreter_summary_ctx, gbrt_interpreter_summary_limit);\n";
+    main_ss << "    gbrt_interpreter_summary_ctx = NULL;\n";
+    main_ss << "    gbrt_interpreter_summary_enabled = 0;\n";
+    main_ss << "    if (gbrt_instruction_limit_callback == gbrt_flush_interpreter_summary) {\n";
+    main_ss << "        gbrt_instruction_limit_callback = NULL;\n";
+    main_ss << "    }\n";
+    main_ss << "}\n\n";
+    main_ss << "static void gbrt_enable_interpreter_summary(const GBContext* ctx, unsigned max_hotspots) {\n";
+    main_ss << "    gbrt_interpreter_summary_ctx = ctx;\n";
+    main_ss << "    gbrt_interpreter_summary_limit = max_hotspots;\n";
+    main_ss << "    gbrt_interpreter_summary_enabled = 1;\n";
+    main_ss << "    gbrt_instruction_limit_callback = gbrt_flush_interpreter_summary;\n";
+    main_ss << "    if (!gbrt_interpreter_summary_atexit_registered) {\n";
+    main_ss << "        atexit(gbrt_flush_interpreter_summary);\n";
+    main_ss << "        gbrt_interpreter_summary_atexit_registered = 1;\n";
+    main_ss << "    }\n";
+    main_ss << "}\n\n";
+    main_ss << "static void gbrt_disable_interpreter_summary(void) {\n";
+    main_ss << "    gbrt_interpreter_summary_ctx = NULL;\n";
+    main_ss << "    gbrt_interpreter_summary_enabled = 0;\n";
+    main_ss << "    if (gbrt_instruction_limit_callback == gbrt_flush_interpreter_summary) {\n";
+    main_ss << "        gbrt_instruction_limit_callback = NULL;\n";
+    main_ss << "    }\n";
+    main_ss << "}\n\n";
     main_ss << "int " << module_main_name(options) << "(int argc, char* argv[]) {\n";
     main_ss << "    bool debug_audio = false;\n";
     main_ss << "    bool debug_audio_trace = false;\n";
@@ -2789,6 +3020,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    double slow_vsync_ms = 0.0;\n";
     main_ss << "    bool log_frame_fallbacks = false;\n";
     main_ss << "    bool log_lcd_transitions = false;\n";
+    main_ss << "    bool report_interpreter_hotspots = false;\n";
+    main_ss << "    unsigned long interpreter_hotspot_limit = 8;\n";
     main_ss << "    int smooth_lcd_transitions_override = -1;\n";
     main_ss << "    for (int i = 1; i < argc; i++) {\n";
     main_ss << "        if (strcmp(argv[i], \"--log-file\") == 0 && i + 1 < argc) {\n";
@@ -2842,6 +3075,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            log_frame_fallbacks = true;\n";
     main_ss << "        } else if (strcmp(argv[i], \"--log-lcd-transitions\") == 0) {\n";
     main_ss << "            log_lcd_transitions = true;\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--report-interpreter-hotspots\") == 0) {\n";
+    main_ss << "            report_interpreter_hotspots = true;\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--interpreter-hotspot-limit\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            interpreter_hotspot_limit = strtoul(argv[++i], NULL, 10);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--smooth-lcd-transitions\") == 0) {\n";
     main_ss << "            smooth_lcd_transitions_override = 1;\n";
     main_ss << "        } else if (strcmp(argv[i], \"--no-smooth-lcd-transitions\") == 0) {\n";
@@ -2868,6 +3105,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        audio_stats_console = true;\n";
     main_ss << "        log_frame_fallbacks = true;\n";
     main_ss << "        log_lcd_transitions = true;\n";
+    main_ss << "        report_interpreter_hotspots = true;\n";
     main_ss << "        if (slow_frame_ms <= 0.0) slow_frame_ms = 1.0;\n";
     main_ss << "        if (slow_vsync_ms <= 0.0) slow_vsync_ms = 0.1;\n";
     main_ss << "        fprintf(stderr,\n";
@@ -2929,6 +3167,9 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    if (smooth_lcd_transitions_override >= 0) {\n";
     main_ss << "        gb_platform_set_smooth_lcd_transitions(smooth_lcd_transitions_override != 0);\n";
     main_ss << "    }\n";
+    main_ss << "    if (report_interpreter_hotspots) {\n";
+    main_ss << "        gbrt_enable_interpreter_summary(ctx, (unsigned)interpreter_hotspot_limit);\n";
+    main_ss << "    }\n";
     main_ss << "\n";
     main_ss << "    // Run the game loop\n";
     main_ss << "    unsigned long long frame_index = 0;\n";
@@ -2988,7 +3229,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            if ((slow_frame_ms > 0.0 && (emu_ms + render_ms) >= slow_frame_ms) ||\n";
     main_ss << "                (log_frame_fallbacks && ctx->frame_dispatch_fallbacks > 0)) {\n";
     main_ss << "                fprintf(stderr,\n";
-    main_ss << "                        \"[FRAME] #%llu emu=%.3fms render=%.3fms upload=%.3fms compose=%.3fms present=%.3fms cycles=%u fallbacks=%u first=%03X:%04X last=%03X:%04X total_fallbacks=%llu lcd_off_cycles=%u lcd_transitions=%u lcd_spans=%u last_lcd_off_span=%u\\n\",\n";
+    main_ss << "                        \"[FRAME] #%llu emu=%.3fms render=%.3fms upload=%.3fms compose=%.3fms present=%.3fms cycles=%u fallbacks=%u interp_instr=%llu interp_cycles=%llu first=%03X:%04X last=%03X:%04X total_fallbacks=%llu lcd_off_cycles=%u lcd_transitions=%u lcd_spans=%u last_lcd_off_span=%u\\n\",\n";
     main_ss << "                        frame_index,\n";
     main_ss << "                        emu_ms,\n";
     main_ss << "                        render_ms,\n";
@@ -2997,6 +3238,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "                        present_ms,\n";
     main_ss << "                        completed_frame_cycles,\n";
     main_ss << "                        ctx->frame_dispatch_fallbacks,\n";
+    main_ss << "                        (unsigned long long)ctx->frame_interpreter_instructions,\n";
+    main_ss << "                        (unsigned long long)ctx->frame_interpreter_cycles,\n";
     main_ss << "                        (unsigned)ctx->frame_first_fallback_bank,\n";
     main_ss << "                        ctx->frame_first_fallback_addr,\n";
     main_ss << "                        (unsigned)ctx->frame_last_fallback_bank,\n";
@@ -3033,11 +3276,18 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    gb_platform_shutdown();\n";
     main_ss << "#else\n";
     main_ss << "    // No SDL2 - just run for testing\n";
+    main_ss << "    if (report_interpreter_hotspots) {\n";
+    main_ss << "        gbrt_enable_interpreter_summary(ctx, (unsigned)interpreter_hotspot_limit);\n";
+    main_ss << "    }\n";
     main_ss << "    " << options.output_prefix << "_run(ctx);\n";
     main_ss << "    printf(\"Recompiled code executed successfully!\\n\");\n";
     main_ss << "    printf(\"Registers: A=%02X B=%02X C=%02X\\n\", ctx->a, ctx->b, ctx->c);\n";
     main_ss << "#endif\n";
     main_ss << "\n";
+    main_ss << "    if (report_interpreter_hotspots) {\n";
+    main_ss << "        gbrt_flush_interpreter_summary();\n";
+    main_ss << "    }\n";
+    main_ss << "    gbrt_disable_interpreter_summary();\n";
     main_ss << "    gb_context_destroy(ctx);\n";
     main_ss << "    return exit_code;\n";
     main_ss << "}\n";

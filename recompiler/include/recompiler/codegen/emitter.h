@@ -10,8 +10,10 @@
 #define RECOMPILER_CODEGEN_EMITTER_H
 
 #include "../ir/ir.h"
-#include <string>
+#include <cstdint>
 #include <ostream>
+#include <string>
+#include <vector>
 
 namespace gbrecomp {
 namespace codegen {
@@ -20,6 +22,11 @@ namespace codegen {
  * @brief Generator options
  */
 struct GeneratorOptions {
+    struct RamOverlay {
+        uint16_t ram_addr = 0;
+        std::vector<uint8_t> bytes;
+    };
+
     std::string output_prefix = "rom";
     std::string output_dir = ".";
     
@@ -37,6 +44,10 @@ struct GeneratorOptions {
     
     // Bank handling
     bool generate_bank_dispatch = true;  // Generate runtime bank dispatch
+
+    // Known writable-memory overlays copied from ROM and safe to dispatch
+    // when the live bytes still match the generated image.
+    std::vector<RamOverlay> ram_overlays;
 };
 
 /**

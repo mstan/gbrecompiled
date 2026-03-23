@@ -56,6 +56,14 @@ static uint32_t g_last_guest_framebuffer[GB_FRAMEBUFFER_SIZE];
 static bool g_lcd_off_framebuffer_initialized = false;
 static bool g_last_guest_framebuffer_valid = false;
 static uint64_t g_present_count = 0;
+static GBContext* g_registered_ctx = NULL;
+
+static bool has_interpreter_activity(const GBContext* ctx) {
+    return ctx != NULL &&
+           (ctx->total_dispatch_fallbacks > 0 ||
+            ctx->total_interpreter_entries > 0 ||
+            ctx->has_unimplemented_interpreter_opcode);
+}
 
 static void update_audio_stats_from_ring(void);
 static uint32_t current_audio_underruns(void);
@@ -553,6 +561,36 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (ImGui::Button("Reset Speed")) g_speed_percent = 100;
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
 
+        if (has_interpreter_activity(g_registered_ctx)) {
+            const GBInterpreterHotspot* hotspot = &g_registered_ctx->interpreter_hotspots[0];
+            ImGui::Separator();
+            ImGui::TextDisabled("Interpreter Fallback");
+            ImGui::Text("Frame Fallbacks: %u", g_registered_ctx->frame_dispatch_fallbacks);
+            ImGui::Text("Interp Entries: %llu",
+                        (unsigned long long)g_registered_ctx->total_interpreter_entries);
+            ImGui::Text("Total Fallbacks: %llu",
+                        (unsigned long long)g_registered_ctx->total_dispatch_fallbacks);
+            ImGui::Text("Interp Instr: frame %llu total %llu",
+                        (unsigned long long)g_registered_ctx->frame_interpreter_instructions,
+                        (unsigned long long)g_registered_ctx->total_interpreter_instructions);
+            ImGui::Text("Interp Cycles: frame %llu total %llu",
+                        (unsigned long long)g_registered_ctx->frame_interpreter_cycles,
+                        (unsigned long long)g_registered_ctx->total_interpreter_cycles);
+            if (hotspot->valid && hotspot->entries > 0) {
+                ImGui::Text("Top Hotspot: %03X:%04X", hotspot->bank, hotspot->addr);
+                ImGui::Text("Hits %llu Instr %llu Cycles %llu",
+                            (unsigned long long)hotspot->entries,
+                            (unsigned long long)hotspot->instructions,
+                            (unsigned long long)hotspot->cycles);
+            }
+            if (g_registered_ctx->has_unimplemented_interpreter_opcode) {
+                ImGui::Text("Coverage Gap: %02X at %03X:%04X",
+                            g_registered_ctx->last_unimplemented_opcode,
+                            g_registered_ctx->last_unimplemented_bank,
+                            g_registered_ctx->last_unimplemented_addr);
+            }
+        }
+
         if (ImGui::Button("Reset to Defaults")) {
             g_scale = 3;
             g_speed_percent = 100;
@@ -600,6 +638,20 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                             current_audio_underruns());
                 ImGui::Text("Smooth Slow Frames: %s", g_smooth_lcd_transitions ? "On" : "Off");
                 ImGui::TextUnformatted(audio_stats_get_summary());
+                if (has_interpreter_activity(g_registered_ctx)) {
+                    const GBInterpreterHotspot* hotspot = &g_registered_ctx->interpreter_hotspots[0];
+                    ImGui::Separator();
+                    ImGui::Text("Interp: frame %u total %llu entries %llu",
+                                g_registered_ctx->frame_dispatch_fallbacks,
+                                (unsigned long long)g_registered_ctx->total_dispatch_fallbacks,
+                                (unsigned long long)g_registered_ctx->total_interpreter_entries);
+                    if (hotspot->valid && hotspot->entries > 0) {
+                        ImGui::Text("Hotspot: %03X:%04X (%llu hits)",
+                                    hotspot->bank,
+                                    hotspot->addr,
+                                    (unsigned long long)hotspot->entries);
+                    }
+                }
             }
             ImGui::End();
         }
@@ -651,6 +703,7 @@ void gb_platform_shutdown(void) {
         SDL_DestroyWindow(g_window);
         g_window = NULL;
     }
+    g_registered_ctx = NULL;
     SDL_Quit();
 }
 
@@ -1268,6 +1321,7 @@ static bool sdl_save_battery_ram(GBContext* ctx, const char* rom_name, const voi
 }
 
 void gb_platform_register_context(GBContext* ctx) {
+    g_registered_ctx = ctx;
     GBPlatformCallbacks callbacks = {
         .on_audio_sample = on_audio_sample,
         .load_battery_ram = sdl_load_battery_ram,

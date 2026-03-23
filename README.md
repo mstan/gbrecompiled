@@ -288,12 +288,15 @@ When running a recompiled game:
 | `--dump-present-frames <list>` | Dump every host present that occurs while the selected guest frame(s) are current |
 | `--screenshot-prefix <path>` | Set screenshot output path |
 | `--log-file <file>` | Redirect stdout and stderr to a text log file for later inspection |
+| `--limit <n>` | Stop the run after `n` guest instructions. If interpreter hotspot reporting is enabled, the summary is flushed before exit |
 | `--debug-performance` | Enable the full slowdown-debug preset: frame logs, vsync logs, fallback logs, and periodic audio stats |
 | `--trace-entries <file>` | Log all executed (Bank, PC) points to file |
 | `--log-slow-frames <ms>` | Log frames whose emulation plus render time exceeds the threshold |
 | `--log-slow-vsync <ms>` | Log pacing waits whose `gb_platform_vsync()` time exceeds the threshold |
 | `--log-frame-fallbacks` | Log any rendered frame that hit generated->interpreter fallback |
 | `--log-lcd-transitions` | Log exact LCDC on/off transitions and LCD-off span lengths in guest cycles |
+| `--report-interpreter-hotspots` | Print an end-of-run interpreter summary with total fallback entries, interpreted instructions/cycles, top hotspots, and the last uncovered opcode site |
+| `--interpreter-hotspot-limit <n>` | Limit how many hotspot rows are printed by `--report-interpreter-hotspots` |
 | `--limit-frames <n>` | Stop the run after `n` completed guest frames |
 | `--smooth-lcd-transitions` | Force the SDL host smoother on for long guest frames, including LCD-off stretches (default) |
 | `--no-smooth-lcd-transitions` | Disable the SDL host smoother for long guest frames |
@@ -329,6 +332,19 @@ Capture a useful slowdown log without manually enabling each individual perf fla
 ```
 
 `--debug-performance` now also includes exact `[LCD]` transition lines plus `lcd_off_cycles`, `lcd_transitions`, and `lcd_spans` in the `[FRAME]` logs, which makes LCD-off slowdown analysis much easier.
+
+When you are chasing generated-to-interpreter fallback, these flags are the most useful starting point:
+
+```bash
+./output/game/build/game \
+  --log-file logs/interpreter.log \
+  --limit 500000 \
+  --log-frame-fallbacks \
+  --report-interpreter-hotspots \
+  --interpreter-hotspot-limit 12
+```
+
+`--log-frame-fallbacks` gives you per-frame `first=` / `last=` fallback addresses, while `--report-interpreter-hotspots` prints the aggregate fallback summary at shutdown or when `--limit` stops the run early.
 
 Input script notes:
 

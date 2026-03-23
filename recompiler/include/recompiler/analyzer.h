@@ -115,6 +115,12 @@ struct AnalysisResult {
     // Entry points that must remain standalone callable functions.
     // This excludes some synthetic targets used only for control-flow recovery.
     std::set<uint32_t> strong_call_targets;
+
+    // Synthetic entry points recovered from thunk patterns (for example
+    // pushed return addresses before JP HL). These must remain dispatchable
+    // function entries, but are tracked separately from user-visible entry
+    // points so later passes can distinguish them.
+    std::set<uint32_t> synthetic_entry_targets;
     
     // Computed jump targets (JP HL, etc.)
     std::set<uint32_t> computed_jump_targets;

@@ -50,6 +50,8 @@ extern bool gbrt_log_lcd_transitions;
 extern uint64_t gbrt_instruction_count;
 extern uint64_t gbrt_instruction_limit;
 
+extern void (*gbrt_instruction_limit_callback)(void);
+
 typedef struct {
     uint8_t dpad;     /**< Active-low Right, Left, Up, Down bits */
     uint8_t buttons;  /**< Active-low A, B, Select, Start bits */
@@ -79,6 +81,18 @@ typedef struct {
     uint16_t bank;           /**< Active ROM bank at the start of the mismatching step */
     char message[256];       /**< Short mismatch description */
 } GBDifferentialResult;
+
+#define GBRT_INTERPRETER_HOTSPOT_CAPACITY 16
+
+typedef struct {
+    uint8_t valid;           /**< Slot contains a tracked hotspot */
+    uint8_t bank;            /**< Bank of the fallback entry point */
+    uint16_t addr;           /**< Address of the fallback entry point */
+    uint64_t entries;        /**< Number of interpreter entries at this site */
+    uint64_t instructions;   /**< Interpreted instructions attributed to this site */
+    uint64_t cycles;         /**< Interpreted cycles attributed to this site */
+    uint64_t last_frame;     /**< Most recent guest frame that hit this site */
+} GBInterpreterHotspot;
 
 
 /* ============================================================================
@@ -229,6 +243,16 @@ typedef struct GBContext {
     uint16_t frame_first_fallback_addr; /**< First fallback PC in the current frame */
     uint8_t frame_last_fallback_bank; /**< Last fallback bank in the current frame */
     uint16_t frame_last_fallback_addr; /**< Last fallback PC in the current frame */
+    uint64_t total_interpreter_entries; /**< Total interpreter sessions entered */
+    uint64_t total_interpreter_instructions; /**< Total instructions executed in interpreter sessions */
+    uint64_t total_interpreter_cycles; /**< Total cycles executed in interpreter sessions */
+    uint64_t frame_interpreter_instructions; /**< Interpreter instructions in the current frame */
+    uint64_t frame_interpreter_cycles; /**< Interpreter cycles in the current frame */
+    uint8_t has_unimplemented_interpreter_opcode; /**< Interpreter hit an unsupported opcode */
+    uint8_t last_unimplemented_opcode; /**< Most recent unsupported opcode seen by the interpreter */
+    uint8_t last_unimplemented_bank; /**< Bank of the most recent unsupported opcode */
+    uint16_t last_unimplemented_addr; /**< Address of the most recent unsupported opcode */
+    GBInterpreterHotspot interpreter_hotspots[GBRT_INTERPRETER_HOTSPOT_CAPACITY]; /**< Top interpreter entry hotspots */
     uint64_t completed_frames; /**< Number of completed guest frames */
     
     /* Platform interface */
@@ -426,6 +450,12 @@ void gb_interpret(GBContext* ctx, uint16_t addr);
 uint8_t gbrt_try_execute_hram_stub(GBContext* ctx, uint16_t addr);
 
 /**
+ * @brief Execute simple copied helper stubs in the FF00-FF7F high-memory range
+ * @return 1 if a known helper instruction was executed, 0 otherwise
+ */
+uint8_t gbrt_try_execute_highmem_stub(GBContext* ctx, uint16_t addr);
+
+/**
  * @brief Execute simple copied RAM helper stubs in-place when possible
  * @return 1 if a known RAM stub instruction was executed, 0 otherwise
  */
@@ -557,6 +587,23 @@ bool gb_run_differential(GBContext* generated_ctx,
  * @brief Record a generated-dispatch fallback into the interpreter
  */
 void gbrt_note_dispatch_fallback(GBContext* ctx, uint8_t bank, uint16_t addr);
+
+/**
+ * @brief Record one completed interpreter session for hotspot tracking
+ */
+void gbrt_note_interpreter_session(GBContext* ctx,
+                                   uint8_t bank,
+                                   uint16_t addr,
+                                   uint32_t instructions,
+                                   uint32_t cycles);
+
+/**
+ * @brief Record an unsupported opcode observed by the interpreter
+ */
+void gbrt_note_unimplemented_interpreter_opcode(GBContext* ctx,
+                                                uint8_t bank,
+                                                uint16_t addr,
+                                                uint8_t opcode);
 
 /**
  * @brief Helper to invoke audio callback

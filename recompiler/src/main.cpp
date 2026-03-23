@@ -91,6 +91,33 @@ static bool detect_oam_dma_overlay(const gbrecomp::ROM& rom,
     return true;
 }
 
+static void append_codegen_ram_overlays(
+    const gbrecomp::ROM& rom,
+    const std::vector<gbrecomp::AnalyzerOptions::RamOverlay>& overlays,
+    gbrecomp::codegen::GeneratorOptions& gen_opts) {
+    const uint8_t* rom_bytes = rom.data();
+    for (const auto& overlay : overlays) {
+        uint8_t bank = static_cast<uint8_t>(overlay.rom_addr >> 16);
+        uint16_t offset = static_cast<uint16_t>(overlay.rom_addr & 0xFFFF);
+        size_t rom_idx = (offset < 0x4000)
+            ? offset
+            : static_cast<size_t>(bank) * 0x4000 + (offset - 0x4000);
+        if (rom_idx >= rom.size()) {
+            continue;
+        }
+
+        size_t available = std::min<size_t>(overlay.size, rom.size() - rom_idx);
+        if (available == 0) {
+            continue;
+        }
+
+        gbrecomp::codegen::GeneratorOptions::RamOverlay codegen_overlay;
+        codegen_overlay.ram_addr = overlay.ram_addr;
+        codegen_overlay.bytes.assign(rom_bytes + rom_idx, rom_bytes + rom_idx + available);
+        gen_opts.ram_overlays.push_back(std::move(codegen_overlay));
+    }
+}
+
 std::string sanitize_prefix(const std::string& name) {
     std::string result = name;
     for (char& c : result) {
@@ -885,6 +912,7 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     gen_opts.use_prefixed_symbols = true;
     gen_opts.emit_main_entry_point = false;
     gen_opts.emit_cmake = false;
+    append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
     auto output = gbrecomp::codegen::generate_output(
         ir_program, rom.data(), rom.size(), gen_opts);
@@ -1205,6 +1233,7 @@ int main(int argc, char* argv[]) {
     gen_opts.output_dir = output_dir;
     gen_opts.emit_comments = emit_comments;
     gen_opts.single_function_mode = single_function;
+    append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
     
     auto output = gbrecomp::codegen::generate_output(
         ir_program, rom.data(), rom.size(), gen_opts);

@@ -1007,6 +1007,61 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 result.label_addresses.insert(make_address(bank, target));
                 work_queue.push({make_address(bank, target), known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, current_switchable_bank});
             } else if (instr.type == InstructionType::JP_HL) {
+                int synthetic_return_target = -1;
+                if (!overlay && offset > 0) {
+                    uint8_t prev_opcode = rom.read_banked(bank, static_cast<uint16_t>(offset - 1));
+                    switch (prev_opcode) {
+                        case 0xC5: synthetic_return_target = get_known_bc(); break; /* PUSH BC */
+                        case 0xD5: synthetic_return_target = get_known_de(); break; /* PUSH DE */
+                        case 0xE5: synthetic_return_target = get_known_hl(); break; /* PUSH HL */
+                        default: break;
+                    }
+                } else if (overlay && offset > overlay->ram_addr) {
+                    uint8_t src_bank = get_bank(overlay->rom_addr);
+                    uint16_t prev_src_addr = static_cast<uint16_t>(
+                        get_offset(overlay->rom_addr) + (offset - overlay->ram_addr) - 1);
+                    uint8_t prev_opcode = rom.read_banked(src_bank, prev_src_addr);
+                    switch (prev_opcode) {
+                        case 0xC5: synthetic_return_target = get_known_bc(); break; /* PUSH BC */
+                        case 0xD5: synthetic_return_target = get_known_de(); break; /* PUSH DE */
+                        case 0xE5: synthetic_return_target = get_known_hl(); break; /* PUSH HL */
+                        default: break;
+                    }
+                }
+
+                if (synthetic_return_target != -1) {
+                    uint16_t return_target = static_cast<uint16_t>(synthetic_return_target);
+                    uint8_t return_bank = target_bank(return_target);
+                    bool target_valid = false;
+
+                    if (return_target < 0x8000) {
+                        target_valid = is_likely_direct_branch_target(rom, return_bank, return_target);
+                    } else {
+                        for (const auto& ov : options.ram_overlays) {
+                            if (return_target >= ov.ram_addr &&
+                                return_target < ov.ram_addr + ov.size) {
+                                return_bank = 0;
+                                target_valid = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (target_valid) {
+                        uint32_t full_return = make_address(return_bank, return_target);
+                        result.call_targets.insert(full_return);
+                        result.synthetic_entry_targets.insert(full_return);
+                        result.label_addresses.insert(full_return);
+                        result.computed_jump_targets.insert(full_return);
+                        work_queue.push({full_return, -1, -1, -1, -1, -1, -1, -1, -1, return_bank});
+                        if (options.verbose) {
+                            std::cout << "[ANALYSIS] Recovered synthetic JP HL return target "
+                                      << std::hex << (int)return_bank << ":" << return_target
+                                      << " from " << (int)bank << ":" << offset << std::dec << "\n";
+                        }
+                    }
+                }
+
                 int combined_hl = get_known_hl();
                 if (combined_hl != -1) {
                     uint16_t target = (uint16_t)combined_hl;
@@ -1265,7 +1320,8 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             if (block_addr != target) {
                 // Strong call targets (interrupt vectors, explicit entry points) are
                 // always function boundaries — never absorb them into another function.
-                if (result.strong_call_targets.count(block_addr)) {
+                if (result.strong_call_targets.count(block_addr) ||
+                    result.synthetic_entry_targets.count(block_addr)) {
                     // Don't include this block or its successors in the current function.
                     // Leave it unprocessed so it gets its own function entry later.
                     continue;
@@ -1277,6 +1333,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             // creating redundant separate functions for inlined helpers.
             if (result.call_targets.count(block_addr) &&
                 !result.strong_call_targets.count(block_addr) &&
+                !result.synthetic_entry_targets.count(block_addr) &&
                 block_addr != target) {
                 processed_targets.insert(block_addr);
             }
@@ -1324,7 +1381,8 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         
         if (total_instrs < MIN_FUNCTION_SIZE &&
             !is_special_entry &&
-            !result.strong_call_targets.count(func_addr)) {
+            !result.strong_call_targets.count(func_addr) &&
+            !result.synthetic_entry_targets.count(func_addr)) {
             functions_to_remove.insert(func_addr);
         }
     }

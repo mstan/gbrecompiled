@@ -2916,6 +2916,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    if (debug_audio_trace) gb_audio_set_debug_trace(true);\n";
     main_ss << "    audio_stats_set_log_to_console(audio_stats_console);\n";
     main_ss << "    " << options.output_prefix << "_init(ctx);\n";
+    main_ss << "    int exit_code = 0;\n";
     main_ss << "\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
     main_ss << "    // Initialize SDL2 platform with 3x scaling\n";
@@ -3026,6 +3027,9 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            }\n";
     main_ss << "        }\n";
     main_ss << "    }\n";
+    main_ss << "    if (gb_platform_get_exit_action() == GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER) {\n";
+    main_ss << "        exit_code = GB_PLATFORM_RETURN_TO_LAUNCHER_EXIT_CODE;\n";
+    main_ss << "    }\n";
     main_ss << "    gb_platform_shutdown();\n";
     main_ss << "#else\n";
     main_ss << "    // No SDL2 - just run for testing\n";
@@ -3035,7 +3039,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "#endif\n";
     main_ss << "\n";
     main_ss << "    gb_context_destroy(ctx);\n";
-    main_ss << "    return 0;\n";
+    main_ss << "    return exit_code;\n";
     main_ss << "}\n";
     if (options.emit_main_entry_point) {
         main_ss << "\nint main(int argc, char* argv[]) {\n";

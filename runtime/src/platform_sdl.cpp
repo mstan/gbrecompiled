@@ -42,6 +42,8 @@ static bool g_show_menu = false;
 static int g_speed_percent = 100;
 static int g_palette_idx = 0;
 static bool g_smooth_lcd_transitions = true;
+static bool g_launcher_return_enabled = false;
+static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
 static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
 static const uint32_t g_palettes[][4] = {
@@ -560,7 +562,18 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         }
 
+        if (g_launcher_return_enabled) {
+            if (ImGui::Button("Return to Launcher")) {
+                g_exit_action = GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER;
+                SDL_Event quit_event;
+                quit_event.type = SDL_QUIT;
+                SDL_PushEvent(&quit_event);
+            }
+            ImGui::SameLine();
+        }
+
         if (ImGui::Button("Quit")) {
+            g_exit_action = GB_PLATFORM_EXIT_QUIT;
             SDL_Event quit_event;
             quit_event.type = SDL_QUIT;
             SDL_PushEvent(&quit_event);
@@ -639,6 +652,14 @@ void gb_platform_shutdown(void) {
         g_window = NULL;
     }
     SDL_Quit();
+}
+
+void gb_platform_set_launcher_return_enabled(bool enabled) {
+    g_launcher_return_enabled = enabled;
+}
+
+GBPlatformExitAction gb_platform_get_exit_action(void) {
+    return g_exit_action;
 }
 
 /* ============================================================================
@@ -741,6 +762,7 @@ bool gb_platform_init(int scale) {
     g_scale = scale;
     if (g_scale < 1) g_scale = 1;
     if (g_scale > 8) g_scale = 8;
+    g_exit_action = GB_PLATFORM_EXIT_QUIT;
     g_frame_count = 0;
     g_manual_joypad_buttons = 0xFF;
     g_manual_joypad_dpad = 0xFF;
@@ -1264,6 +1286,14 @@ bool gb_platform_init(int scale) {
 }
 
 void gb_platform_shutdown(void) {}
+
+void gb_platform_set_launcher_return_enabled(bool enabled) {
+    (void)enabled;
+}
+
+GBPlatformExitAction gb_platform_get_exit_action(void) {
+    return GB_PLATFORM_EXIT_QUIT;
+}
 
 bool gb_platform_poll_events(GBContext* ctx) {
     (void)ctx;

@@ -11,7 +11,12 @@
 - [ ] Per game configurations on multi-rom mode
 - [ ] Benchmark performance and memory usage against emulators
 - [ ] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used
-
+- [ ] Add support for parallel recompilation
+- [ ] Remove mgbdis from repo
+- [ ] Improve handling of imgui dependency
+- [ ] Benchmark performance on low-end hardware compared to emulators, and optimize for that use case
+- [ ] Fix double-click to launch game on multi-rom launcher
+ 
 # Platforms
 - [ ] Android support
 - [ ] WebAssembly support

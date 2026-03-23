@@ -28,6 +28,15 @@ typedef struct GBPlatformTimingInfo {
     uint32_t pacing_cycles;
 } GBPlatformTimingInfo;
 
+typedef enum GBPlatformExitAction {
+    GB_PLATFORM_EXIT_QUIT = 0,
+    GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER = 1,
+} GBPlatformExitAction;
+
+enum {
+    GB_PLATFORM_RETURN_TO_LAUNCHER_EXIT_CODE = 64,
+};
+
 /**
  * @brief Initialize SDL2 platform (window, renderer)
  * @param scale Window scale factor (1-4)
@@ -39,6 +48,16 @@ bool gb_platform_init(int scale);
  * @brief Register context with platform (sets up callbacks)
  */
 void gb_platform_register_context(GBContext* ctx);
+
+/**
+ * @brief Enable or disable the launcher return action in the runtime menu.
+ */
+void gb_platform_set_launcher_return_enabled(bool enabled);
+
+/**
+ * @brief Report how the SDL runtime requested to exit the current game.
+ */
+GBPlatformExitAction gb_platform_get_exit_action(void);
 
 /**
  * @brief Shutdown SDL2 platform

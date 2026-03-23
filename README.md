@@ -168,7 +168,7 @@ In directory mode the recompiler will:
 
 The generated launcher project includes:
 
-- `launcher_main.c`: a simple ROM selector and forwarder
+- `launcher_main.cpp`: an SDL + ImGui launcher that lets you pick a generated ROM graphically
 - `launcher_manifest.json`: the generated game list, ids, and source ROM paths
 - one generated module per ROM, each with isolated symbol names so they can all link into the same executable
 
@@ -182,7 +182,7 @@ Launcher usage:
 ./output/multi_rom/build/multi_rom --game tetris
 ```
 
-If you run the launcher without `--game` and more than one ROM was generated, it will prompt you to choose one interactively.
+If you run the launcher without `--game`, it opens the graphical launcher. The CLI options still work for direct launches, scripts, and CI.
 
 ### Debugging Options
 

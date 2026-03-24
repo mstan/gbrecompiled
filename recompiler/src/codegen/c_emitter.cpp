@@ -3157,11 +3157,11 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    if (debug_audio_trace) gb_audio_set_debug_trace(true);\n";
     main_ss << "    audio_stats_set_log_to_console(audio_stats_console);\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
-    main_ss << "    // Initialize SDL2 platform with 3x scaling\n";
+    main_ss << "    // Initialize SDL2 platform with 5x scaling\n";
     main_ss << "    if (benchmark_mode) {\n";
     main_ss << "        gb_platform_set_benchmark_mode(true);\n";
     main_ss << "    }\n";
-    main_ss << "    if (!gb_platform_init(3)) {\n";
+    main_ss << "    if (!gb_platform_init(5)) {\n";
     main_ss << "        fprintf(stderr, \"Failed to initialize platform\\n\");\n";
     main_ss << "        gb_context_destroy(ctx);\n";
     main_ss << "        return 1;\n";

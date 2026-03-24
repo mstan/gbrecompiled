@@ -39,7 +39,7 @@ enum {
 
 /**
  * @brief Initialize SDL2 platform (window, renderer)
- * @param scale Window scale factor (1-4)
+ * @param scale Initial window scale preset (1-8)
  * @return true on success
  */
 bool gb_platform_init(int scale);

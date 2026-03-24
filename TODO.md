@@ -1,6 +1,5 @@
 # General
-- [ ] Rendering modes for runtime (how we scale the viewport, how do we handle aspect ratio and window resizing?)
-- [ ] Input handling (how do we map keyboard/controller input)
+- [x] Rendering modes for runtime (how we scale the viewport, how do we handle aspect ratio and window resizing?)
 - [ ] Audio output (how do we handle audio timing and buffering?)
 - [ ] Save data handling (how do we read/write save data, and how do we handle save states?)
 - [ ] Script callbacks (how do we allow custom code to hook into gameplay events without modifying generated code directly?)
@@ -23,8 +22,11 @@
 - [ ] Implement savestates
 - [x] Update AGENTS.md
 - [x] Python script to summarize interpreter .log files, showing which functions are hotspots for interpreter fallback and which instructions are causing it
-- [ ] Revisit more aggressive compiler optimizations
- 
+- [x] Revisit more aggressive compiler optimizations
+- [ ] Support shaders
+- [ ] Input remapping for controllers
+- [ ] Clean README and add a cool logo, more screenshots
+  
 # Platforms
 - [ ] Android support
 - [ ] WebAssembly support

@@ -23,7 +23,10 @@
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
 static SDL_Texture* g_texture = NULL;
-static int g_scale = 3;
+static int g_scale = 5;
+static int g_windowed_width = GB_SCREEN_WIDTH * 5;
+static int g_windowed_height = GB_SCREEN_HEIGHT * 5;
+static SDL_Rect g_game_viewport = {0, 0, GB_SCREEN_WIDTH * 5, GB_SCREEN_HEIGHT * 5};
 static uint32_t g_last_frame_time = 0;
 static SDL_AudioDeviceID g_audio_device = 0;
 static SDL_GameController* g_controller = NULL;
@@ -39,14 +42,38 @@ static GBPlatformTimingInfo g_last_timing = {};
 
 /* Menu State */
 static bool g_show_menu = false;
+static bool g_show_overlay = false;
 static int g_speed_percent = 100;
 static int g_palette_idx = 0;
 static bool g_smooth_lcd_transitions = true;
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
+static bool g_fullscreen = false;
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
 static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
+typedef enum GBRenderScalingMode {
+    GB_RENDER_SCALING_PIXEL_PERFECT = 0,
+    GB_RENDER_SCALING_ASPECT_FIT = 1,
+    GB_RENDER_SCALING_ASPECT_FILL = 2,
+    GB_RENDER_SCALING_STRETCH = 3,
+} GBRenderScalingMode;
+typedef enum GBRenderFilterMode {
+    GB_RENDER_FILTER_NEAREST = 0,
+    GB_RENDER_FILTER_LINEAR = 1,
+} GBRenderFilterMode;
+static GBRenderScalingMode g_render_scaling_mode = GB_RENDER_SCALING_PIXEL_PERFECT;
+static GBRenderFilterMode g_render_filter_mode = GB_RENDER_FILTER_NEAREST;
+static const char* g_render_scaling_mode_names[] = {
+    "Pixel Perfect",
+    "Aspect Fit",
+    "Aspect Fill",
+    "Stretch",
+};
+static const char* g_render_filter_names[] = {
+    "Nearest",
+    "Linear",
+};
 static const uint32_t g_palettes[][4] = {
     { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 }, // Original
     { 0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000 }, // B&W
@@ -438,6 +465,151 @@ static double sdl_now_ms(void) {
     return freq ? ((double)ticks * 1000.0) / (double)freq : 0.0;
 }
 
+static int round_to_int(double value) {
+    return (int)(value + 0.5);
+}
+
+static void update_render_filter(void) {
+    if (!g_renderer) {
+        return;
+    }
+
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    if (g_texture) {
+        SDL_SetTextureScaleMode(g_texture,
+                                g_render_filter_mode == GB_RENDER_FILTER_LINEAR
+                                    ? SDL_ScaleModeLinear
+                                    : SDL_ScaleModeNearest);
+    }
+#else
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
+                g_render_filter_mode == GB_RENDER_FILTER_LINEAR ? "linear" : "nearest");
+#endif
+}
+
+static void update_game_viewport(void) {
+    if (!g_window) {
+        g_game_viewport.x = 0;
+        g_game_viewport.y = 0;
+        g_game_viewport.w = GB_SCREEN_WIDTH * g_scale;
+        g_game_viewport.h = GB_SCREEN_HEIGHT * g_scale;
+        return;
+    }
+
+    int window_w = 0;
+    int window_h = 0;
+    SDL_GetWindowSize(g_window, &window_w, &window_h);
+    if (window_w <= 0) window_w = GB_SCREEN_WIDTH;
+    if (window_h <= 0) window_h = GB_SCREEN_HEIGHT;
+
+    int viewport_w = window_w;
+    int viewport_h = window_h;
+
+    switch (g_render_scaling_mode) {
+        case GB_RENDER_SCALING_PIXEL_PERFECT: {
+            int scale_x = window_w / GB_SCREEN_WIDTH;
+            int scale_y = window_h / GB_SCREEN_HEIGHT;
+            int integer_scale = (scale_x < scale_y) ? scale_x : scale_y;
+            if (integer_scale < 1) {
+                integer_scale = 1;
+            }
+            viewport_w = GB_SCREEN_WIDTH * integer_scale;
+            viewport_h = GB_SCREEN_HEIGHT * integer_scale;
+            break;
+        }
+        case GB_RENDER_SCALING_ASPECT_FIT: {
+            double scale_x = (double)window_w / (double)GB_SCREEN_WIDTH;
+            double scale_y = (double)window_h / (double)GB_SCREEN_HEIGHT;
+            double scale = (scale_x < scale_y) ? scale_x : scale_y;
+            if (scale <= 0.0) {
+                scale = 1.0;
+            }
+            viewport_w = round_to_int((double)GB_SCREEN_WIDTH * scale);
+            viewport_h = round_to_int((double)GB_SCREEN_HEIGHT * scale);
+            break;
+        }
+        case GB_RENDER_SCALING_ASPECT_FILL: {
+            double scale_x = (double)window_w / (double)GB_SCREEN_WIDTH;
+            double scale_y = (double)window_h / (double)GB_SCREEN_HEIGHT;
+            double scale = (scale_x > scale_y) ? scale_x : scale_y;
+            if (scale <= 0.0) {
+                scale = 1.0;
+            }
+            viewport_w = round_to_int((double)GB_SCREEN_WIDTH * scale);
+            viewport_h = round_to_int((double)GB_SCREEN_HEIGHT * scale);
+            break;
+        }
+        case GB_RENDER_SCALING_STRETCH:
+        default:
+            viewport_w = window_w;
+            viewport_h = window_h;
+            break;
+    }
+
+    if (viewport_w < 1) viewport_w = 1;
+    if (viewport_h < 1) viewport_h = 1;
+
+    g_game_viewport.w = viewport_w;
+    g_game_viewport.h = viewport_h;
+    g_game_viewport.x = (window_w - viewport_w) / 2;
+    g_game_viewport.y = (window_h - viewport_h) / 2;
+}
+
+static void apply_window_scale_preset(void) {
+    g_windowed_width = GB_SCREEN_WIDTH * g_scale;
+    g_windowed_height = GB_SCREEN_HEIGHT * g_scale;
+
+    if (g_window && !g_fullscreen) {
+        SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
+        SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
+    update_game_viewport();
+}
+
+static void set_fullscreen_enabled(bool enabled) {
+    if (!g_window || g_fullscreen == enabled) {
+        return;
+    }
+
+    if (enabled) {
+        SDL_GetWindowSize(g_window, &g_windowed_width, &g_windowed_height);
+        if (SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) {
+            g_fullscreen = true;
+        }
+    } else {
+        if (SDL_SetWindowFullscreen(g_window, 0) == 0) {
+            g_fullscreen = false;
+            SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
+            SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        }
+    }
+
+    update_game_viewport();
+}
+
+static void reset_runtime_display_defaults(void) {
+    g_scale = 5;
+    g_speed_percent = 100;
+    g_palette_idx = 0;
+    g_smooth_lcd_transitions = true;
+    g_vsync = false;
+    g_show_overlay = false;
+    g_render_scaling_mode = GB_RENDER_SCALING_PIXEL_PERFECT;
+    g_render_filter_mode = GB_RENDER_FILTER_NEAREST;
+    update_render_filter();
+
+    if (g_renderer) {
+        SDL_RenderSetVSync(g_renderer, 0);
+    }
+
+    if (g_window) {
+        if (g_fullscreen) {
+            set_fullscreen_enabled(false);
+        }
+        apply_window_scale_preset();
+    }
+}
+
 static void ensure_lcd_off_framebuffer(void) {
     if (g_lcd_off_framebuffer_initialized) {
         return;
@@ -562,8 +734,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
     /* Clear and render */
     double compose_start_ms = sdl_now_ms();
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
-    SDL_RenderCopy(g_renderer, g_texture, NULL, NULL);
+    SDL_RenderCopy(g_renderer, g_texture, NULL, &g_game_viewport);
 
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
@@ -572,17 +745,62 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     if (g_show_menu) {
         ImGui::Begin("GameBoy Recompiled", &g_show_menu);
         ImGui::Text("Performance: %.1f FPS", ImGui::GetIO().Framerate);
-        int scale_idx = g_scale - 1;
-        if (ImGui::Combo("Resolution", &scale_idx, g_scale_names, IM_ARRAYSIZE(g_scale_names))) {
-            g_scale = scale_idx + 1;
-            SDL_SetWindowSize(g_window, GB_SCREEN_WIDTH * g_scale, GB_SCREEN_HEIGHT * g_scale);
-            SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+
+        int window_w = 0;
+        int window_h = 0;
+        SDL_GetWindowSize(g_window, &window_w, &window_h);
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Graphics");
+        ImGui::Text("Window: %d x %d", window_w, window_h);
+        ImGui::Text("Viewport: %d x %d (%.2fx)",
+                    g_game_viewport.w,
+                    g_game_viewport.h,
+                    (double)g_game_viewport.w / (double)GB_SCREEN_WIDTH);
+
+        bool fullscreen = g_fullscreen;
+        if (ImGui::Checkbox("Fullscreen", &fullscreen)) {
+            set_fullscreen_enabled(fullscreen);
         }
 
+        int scaling_mode = (int)g_render_scaling_mode;
+        if (ImGui::Combo("Scaling Mode",
+                         &scaling_mode,
+                         g_render_scaling_mode_names,
+                         IM_ARRAYSIZE(g_render_scaling_mode_names))) {
+            g_render_scaling_mode = (GBRenderScalingMode)scaling_mode;
+            update_game_viewport();
+        }
+
+        int filter_mode = (int)g_render_filter_mode;
+        if (ImGui::Combo("Scale Filter",
+                         &filter_mode,
+                         g_render_filter_names,
+                         IM_ARRAYSIZE(g_render_filter_names))) {
+            g_render_filter_mode = (GBRenderFilterMode)filter_mode;
+            update_render_filter();
+        }
+
+        if (!g_fullscreen) {
+            int scale_idx = g_scale - 1;
+            if (ImGui::Combo("Window Size",
+                             &scale_idx,
+                             g_scale_names,
+                             IM_ARRAYSIZE(g_scale_names))) {
+                g_scale = scale_idx + 1;
+                apply_window_scale_preset();
+            }
+        } else {
+            ImGui::TextDisabled("Window Size is disabled while fullscreen is active.");
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Runtime");
         if (ImGui::Checkbox("V-Sync", &g_vsync)) {
             SDL_RenderSetVSync(g_renderer, g_vsync ? 1 : 0);
         }
 
+        ImGui::Checkbox("Show Overlay (F1)", &g_show_overlay);
         ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
         ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500);
         if (ImGui::Button("Reset Speed")) g_speed_percent = 100;
@@ -619,12 +837,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         }
 
         if (ImGui::Button("Reset to Defaults")) {
-            g_scale = 3;
-            g_speed_percent = 100;
-            g_palette_idx = 0;
-            g_smooth_lcd_transitions = true;
-            SDL_SetWindowSize(g_window, GB_SCREEN_WIDTH * g_scale, GB_SCREEN_HEIGHT * g_scale);
-            SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+            reset_runtime_display_defaults();
         }
 
         if (g_launcher_return_enabled) {
@@ -644,13 +857,18 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             SDL_PushEvent(&quit_event);
         }
         ImGui::End();
-    } else {
+    } else if (g_show_overlay) {
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.35f);
         if (ImGui::Begin("Overlay", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
             update_audio_stats_from_ring();
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
             ImGui::Text("Press ESC for Menu");
+            ImGui::Text("Press F1 for Overlay");
+            ImGui::Text("Viewport: %d x %d (%s)",
+                        g_game_viewport.w,
+                        g_game_viewport.h,
+                        g_render_scaling_mode_names[(int)g_render_scaling_mode]);
             if (g_timing_frame_count > 0) {
                 float avg_render = (float)(g_timing_render_total / g_timing_frame_count);
                 float avg_vsync = (float)(g_timing_vsync_total / g_timing_frame_count);
@@ -849,12 +1067,17 @@ bool gb_platform_init(int scale) {
     g_scale = scale;
     if (g_scale < 1) g_scale = 1;
     if (g_scale > 8) g_scale = 8;
+    g_windowed_width = GB_SCREEN_WIDTH * g_scale;
+    g_windowed_height = GB_SCREEN_HEIGHT * g_scale;
+    g_game_viewport = {0, 0, g_windowed_width, g_windowed_height};
     g_exit_action = GB_PLATFORM_EXIT_QUIT;
     g_frame_count = 0;
     g_manual_joypad_buttons = 0xFF;
     g_manual_joypad_dpad = 0xFF;
     g_script_joypad_buttons = 0xFF;
     g_script_joypad_dpad = 0xFF;
+    g_fullscreen = false;
+    g_show_overlay = false;
     update_effective_joypad_state();
     g_last_guest_framebuffer_valid = false;
     g_present_count = 0;
@@ -925,8 +1148,8 @@ bool gb_platform_init(int scale) {
         "GameBoy Recompiled",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
-        GB_SCREEN_WIDTH * g_scale,
-        GB_SCREEN_HEIGHT * g_scale,
+        g_windowed_width,
+        g_windowed_height,
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
     );
     
@@ -936,6 +1159,7 @@ bool gb_platform_init(int scale) {
         return false;
     }
     fprintf(stderr, "[SDL] Window created.\n");
+    SDL_SetWindowMinimumSize(g_window, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
     
     fprintf(stderr, "[SDL] Creating renderer...\n");
     /* 
@@ -956,7 +1180,7 @@ bool gb_platform_init(int scale) {
         return false;
     }
     
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+    update_render_filter();
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
@@ -986,6 +1210,8 @@ bool gb_platform_init(int scale) {
         SDL_Quit();
         return false;
     }
+    update_render_filter();
+    update_game_viewport();
     
     g_last_frame_time = SDL_GetTicks();
     
@@ -1140,6 +1366,12 @@ bool gb_platform_poll_events(GBContext* ctx) {
                                 g_show_menu = !g_show_menu;
                             }
                             return true; // Don't block
+
+                        case SDL_SCANCODE_F1:
+                            if (pressed && event.key.repeat == 0) {
+                                g_show_overlay = !g_show_overlay;
+                            }
+                            return true; // Don't block
                             
                         default:
                             break;
@@ -1152,8 +1384,13 @@ bool gb_platform_poll_events(GBContext* ctx) {
                 }
                 
                 case SDL_WINDOWEVENT:
-                    if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                        /* Handle resize if needed or just let SDL/ImGui handle it */
+                    if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+                        event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                        if (!g_fullscreen) {
+                            g_windowed_width = event.window.data1;
+                            g_windowed_height = event.window.data2;
+                        }
+                        update_game_viewport();
                     }
                     break;
             }

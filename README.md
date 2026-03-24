@@ -60,11 +60,13 @@ ninja -C output/game/build
 
 Generated projects default to `Release`, compile the generated ROM sources at `-O3`, and enable IPO/LTO automatically when the local toolchain supports it. For faster iteration while debugging, configure with something like `-DCMAKE_BUILD_TYPE=Debug -DGBRECOMP_GENERATED_OPT_LEVEL=1 -DGBRECOMP_ENABLE_IPO=OFF`.
 
+`gbrecomp` also uses parallel code generation by default on multi-core machines. Pass `--jobs <n>` if you want to cap it manually, or `--jobs 1` for single-threaded debugging.
+
 ### Recompiling Multiple ROMs Into One Launcher
 
 ```bash
 # Generate one shared project from a folder of ROMs
-./build/bin/gbrecomp path/to/roms -o output/multi_rom
+./build/bin/gbrecomp path/to/roms -o output/multi_rom --jobs 8
 
 # Build the generated launcher project
 cmake -G Ninja -S output/multi_rom -B output/multi_rom/build
@@ -146,6 +148,8 @@ ninja -C build
 ./build/bin/gbrecomp <rom.gb> -o <output_dir>
 ```
 
+Use `--jobs <n>` to control parallel code generation. `--jobs 0` or omitting the flag lets `gbrecomp` pick a worker count automatically from the current machine.
+
 The recompiler will:
 
 1. Load and parse the ROM header
@@ -167,6 +171,8 @@ In directory mode the recompiler will:
 2. Recompile each ROM into its own generated code module and metadata file
 3. Share one runtime library across all generated ROMs
 4. Emit a small launcher executable so you can choose which game to run
+
+Directory mode parallelizes the per-ROM analyze/generate/write work by default. If you want to tune it, pass `--jobs <n>`. `--verbose` and `--trace` still force a single batch worker so the logs stay readable.
 
 The generated launcher project includes:
 
@@ -192,6 +198,7 @@ If you run the launcher without `--game`, it opens the graphical launcher. The C
 |------|-------------|
 | `--trace` | Print every instruction during analysis |
 | `--limit <N>` | Stop analysis after N instructions |
+| `--jobs <N>` | Override the auto-selected parallel worker count for codegen and directory-mode batch generation |
 | `--add-entry-point b:addr` | Manually specified entry point (e.g. `1:4000`) |
 | `--no-scan` | Disable aggressive code scanning (enabled by default) |
 | `--symbols <file>` | Load a `.sym` symbol file and use those names for generated functions and internal labels |
@@ -450,6 +457,20 @@ python3 tools/benchmark_emulators.py roms/game.gb \
 
 Template placeholders available to `--emulator-cmd` are `{rom}`, `{frames}`, `{input}`, `{input_script}`, `{input_file}`, and `{recompiled_binary}`.
 
+### Dependency Layout
+
+The runtime now vendors a small Dear ImGui snapshot in `runtime/vendor/imgui` instead of using a git submodule. We only need the core Dear ImGui sources plus the SDL2 and SDLRenderer2 backends, so vendoring that fixed subset keeps fresh clones simpler, avoids recursive-submodule setup, and makes generated launcher builds more predictable.
+
+If you need to update ImGui, keep the vendored copy minimal:
+
+- `imgui.cpp`, `imgui_draw.cpp`, `imgui_tables.cpp`, `imgui_widgets.cpp`
+- the core headers and bundled stb headers
+- `backends/imgui_impl_sdl2.*`
+- `backends/imgui_impl_sdlrenderer2.*`
+- `LICENSE.txt`
+
+`mgbdis` is no longer bundled in this repo. The coverage tools work without it when you already have a trace, and the ROM-disassembly path now expects an external install passed with `--mgbdis` or available on `PATH`.
+
 ### Controls
 
 | GameBoy | Keyboard (Primary) | Keyboard (Alt) |
@@ -563,6 +584,12 @@ Audit your recompiled code against a dynamic trace to see exactly what instructi
 python3 tools/compare_ground_truth.py --trace game.trace output/game
 ```
 
+If you want the script to disassemble a ROM directly instead of consuming a trace, install `mgbdis` separately and point the script at it:
+
+```bash
+python3 tools/compare_ground_truth.py roms/game.gb output/game --mgbdis /path/to/mgbdis.py
+```
+
 ---
 
 ## Development
@@ -598,6 +625,5 @@ This project is licensed under the MIT License.
 ## Acknowledgments
 
 - [Pan Docs](https://gbdev.io/pandocs/) - The definitive GameBoy technical reference
-- [mgbdis](https://github.com/mattcurrie/mgbdis) - GameBoy disassembler (included in tools/)
 - The gbdev community for extensive documentation and test ROMs
 - [N64Recomp](https://github.com/Mr-Wiseguy/N64Recomp) - The original recompiler that inspired this project

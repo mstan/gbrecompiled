@@ -13,6 +13,9 @@
 
 #include <iostream>
 #include <string>
+#include <thread>
+#include <atomic>
+#include <mutex>
 #include <cctype>
 #include <fstream>
 #include <sstream>
@@ -47,6 +50,7 @@ void print_usage(const char* program) {
     std::cout << "  -v, --verbose         Verbose output\n";
     std::cout << "  --trace               Trace execution analysis (very verbose)\n";
     std::cout << "  --limit <n>           Limit analysis to n instructions\n";
+    std::cout << "  -j, --jobs <n>        Parallel workers for codegen and batch generation (0=auto)\n";
     std::cout << "  --single-function     Generate all code in a single function\n";
     std::cout << "  --no-comments         Don't include disassembly comments\n";
     std::cout << "  --bank <n>            Only process bank n\n";
@@ -181,6 +185,7 @@ struct GenerationOptions {
     bool verbose = false;
     bool trace_log = false;
     size_t limit_instructions = 0;
+    size_t codegen_jobs = 0;
     bool single_function = false;
     bool emit_comments = true;
     bool aggressive_scan = true;
@@ -195,6 +200,32 @@ struct MultiRomModule {
     std::string source_rom;
     gbrecomp::codegen::GeneratedOutput output;
 };
+
+static size_t resolve_parallel_job_count(size_t requested_jobs, size_t work_items) {
+    if (work_items <= 1) {
+        return 1;
+    }
+    if (requested_jobs == 1) {
+        return 1;
+    }
+
+    size_t jobs = requested_jobs;
+    if (jobs == 0) {
+        jobs = std::thread::hardware_concurrency();
+        if (jobs == 0) {
+            jobs = 1;
+        }
+    }
+
+    return std::min(jobs, work_items);
+}
+
+static std::mutex g_multi_rom_log_mutex;
+
+static void log_multi_rom_line(const std::string& line) {
+    std::lock_guard<std::mutex> lock(g_multi_rom_log_mutex);
+    std::cout << line << "\n";
+}
 
 static std::string escape_c_string(const std::string& input) {
     std::ostringstream ss;
@@ -853,17 +884,16 @@ static std::string make_multi_rom_cmake(const std::string& project_name,
     ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
     ss << ")\n\n";
     ss << "target_sources(gbrt PRIVATE\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui/imgui.cpp\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui/imgui_draw.cpp\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui/imgui_tables.cpp\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui/imgui_widgets.cpp\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui/imgui_demo.cpp\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdl2.cpp\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_draw.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_tables.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_widgets.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdl2.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
     ss << ")\n";
     ss << "target_include_directories(gbrt PUBLIC\n";
     ss << "    ${GBRT_DIR}/include\n";
-    ss << "    ${GBRT_DIR}/third_party/imgui\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui\n";
     ss << ")\n";
     ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
     ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
@@ -899,7 +929,11 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
                                       const fs::path& output_dir,
                                       const std::string& output_prefix,
                                       MultiRomModule& module) {
-    std::cout << "\n[" << output_prefix << "] Loading ROM: " << rom_path << "\n";
+    {
+        std::ostringstream ss;
+        ss << "\n[" << output_prefix << "] Loading ROM: " << rom_path;
+        log_multi_rom_line(ss.str());
+    }
 
     auto rom_opt = gbrecomp::ROM::load(rom_path);
     if (!rom_opt) {
@@ -914,7 +948,11 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     }
 
     const std::string display_name = !rom.header().title.empty() ? rom.header().title : rom.name();
-    std::cout << "[" << output_prefix << "] Title: " << display_name << "\n";
+    {
+        std::ostringstream ss;
+        ss << "[" << output_prefix << "] Title: " << display_name;
+        log_multi_rom_line(ss.str());
+    }
     if (options.verbose) {
         gbrecomp::print_rom_info(rom);
     }
@@ -945,12 +983,14 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
             ? offset
             : static_cast<size_t>(bank) * 0x4000 + (offset - 0x4000);
 
-        std::cout << "[" << output_prefix << "] Detected OAM DMA routine at ROM 0x"
-                  << std::hex << rom_idx
-                  << " (Bank " << (int)bank << ":0x" << offset << ", size "
-                  << std::dec << overlay.size << "). Mapping to HRAM "
-                  << std::hex << std::showbase << overlay.ram_addr
-                  << std::noshowbase << std::dec << ".\n";
+        std::ostringstream ss;
+        ss << "[" << output_prefix << "] Detected OAM DMA routine at ROM 0x"
+           << std::hex << rom_idx
+           << " (Bank " << (int)bank << ":0x" << offset << ", size "
+           << std::dec << overlay.size << "). Mapping to HRAM "
+           << std::hex << std::showbase << overlay.ram_addr
+           << std::noshowbase << std::dec << ".";
+        log_multi_rom_line(ss.str());
         analyze_opts.ram_overlays.push_back(overlay);
     }
 
@@ -959,9 +999,13 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
         gbrecomp::apply_symbols_to_analysis(symbol_table, analysis);
     }
 
-    std::cout << "[" << output_prefix << "] Found "
-              << analysis.stats.total_functions << " functions, "
-              << analysis.stats.total_blocks << " basic blocks\n";
+    {
+        std::ostringstream ss;
+        ss << "[" << output_prefix << "] Found "
+           << analysis.stats.total_functions << " functions, "
+           << analysis.stats.total_blocks << " basic blocks";
+        log_multi_rom_line(ss.str());
+    }
 
     gbrecomp::ir::BuilderOptions ir_opts;
     ir_opts.emit_comments = options.emit_comments;
@@ -977,6 +1021,7 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     gen_opts.use_prefixed_symbols = true;
     gen_opts.emit_main_entry_point = false;
     gen_opts.emit_cmake = false;
+    gen_opts.parallel_codegen_jobs = options.codegen_jobs;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
     auto output = gbrecomp::codegen::generate_output(
@@ -1009,6 +1054,7 @@ int main(int argc, char* argv[]) {
     bool verbose = false;
     bool trace_log = false;
     size_t limit_instructions = 0;
+    size_t requested_jobs = 0;
     bool single_function = false;
     bool emit_comments = true;
     bool aggressive_scan = true;
@@ -1038,6 +1084,10 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--limit") {
             if (i + 1 < argc) {
                 limit_instructions = std::stoul(argv[++i]);
+            }
+        } else if (arg == "-j" || arg == "--jobs") {
+            if (i + 1 < argc) {
+                requested_jobs = std::stoul(argv[++i]);
             }
         } else if (arg == "--single-function") {
             single_function = true;
@@ -1092,6 +1142,7 @@ int main(int argc, char* argv[]) {
     generation_opts.verbose = verbose;
     generation_opts.trace_log = trace_log;
     generation_opts.limit_instructions = limit_instructions;
+    generation_opts.codegen_jobs = requested_jobs;
     generation_opts.single_function = single_function;
     generation_opts.emit_comments = emit_comments;
     generation_opts.aggressive_scan = aggressive_scan;
@@ -1134,17 +1185,66 @@ int main(int argc, char* argv[]) {
 
         std::cout << "Discovered " << rom_paths.size() << " ROMs under " << input_path << "\n";
 
+        size_t batch_jobs = resolve_parallel_job_count(requested_jobs, rom_paths.size());
+        if ((verbose || trace_log) && batch_jobs > 1) {
+            std::cout << "Verbose/trace logging enabled; using a single batch worker to keep output readable.\n";
+            batch_jobs = 1;
+        }
+        std::cout << "Using " << batch_jobs << " worker"
+                  << (batch_jobs == 1 ? "" : "s")
+                  << " for multi-ROM generation\n";
+
         std::set<std::string> used_prefixes;
-        std::vector<MultiRomModule> modules;
-        modules.reserve(rom_paths.size());
+        std::vector<std::string> module_prefixes;
+        module_prefixes.reserve(rom_paths.size());
 
         for (const fs::path& rom_file : rom_paths) {
-            const std::string prefix = make_unique_prefix(rom_file.stem().string(), used_prefixes);
-            MultiRomModule module;
-            if (!generate_multi_rom_module(rom_file, generation_opts, out_path, prefix, module)) {
+            module_prefixes.push_back(make_unique_prefix(rom_file.stem().string(), used_prefixes));
+        }
+
+        std::vector<MultiRomModule> modules(rom_paths.size());
+        GenerationOptions module_generation_opts = generation_opts;
+        if (batch_jobs > 1) {
+            module_generation_opts.codegen_jobs = 1;
+        }
+
+        if (batch_jobs <= 1) {
+            for (size_t i = 0; i < rom_paths.size(); ++i) {
+                if (!generate_multi_rom_module(rom_paths[i], module_generation_opts, out_path,
+                                               module_prefixes[i], modules[i])) {
+                    return 1;
+                }
+            }
+        } else {
+            std::atomic<size_t> next_rom_index{0};
+            std::atomic<bool> failed{false};
+            std::vector<std::thread> workers;
+            workers.reserve(batch_jobs);
+
+            auto worker = [&]() {
+                for (;;) {
+                    const size_t rom_index = next_rom_index.fetch_add(1);
+                    if (rom_index >= rom_paths.size() || failed.load()) {
+                        return;
+                    }
+                    if (!generate_multi_rom_module(rom_paths[rom_index], module_generation_opts,
+                                                   out_path, module_prefixes[rom_index],
+                                                   modules[rom_index])) {
+                        failed.store(true);
+                        return;
+                    }
+                }
+            };
+
+            for (size_t i = 0; i < batch_jobs; ++i) {
+                workers.emplace_back(worker);
+            }
+            for (std::thread& worker_thread : workers) {
+                worker_thread.join();
+            }
+            if (failed.load()) {
                 return 1;
             }
-            modules.push_back(std::move(module));
         }
 
         std::string launcher_name = sanitize_prefix(out_path.filename().string());
@@ -1303,6 +1403,7 @@ int main(int argc, char* argv[]) {
     gen_opts.output_dir = output_dir;
     gen_opts.emit_comments = emit_comments;
     gen_opts.single_function_mode = single_function;
+    gen_opts.parallel_codegen_jobs = requested_jobs;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
     
     auto output = gbrecomp::codegen::generate_output(

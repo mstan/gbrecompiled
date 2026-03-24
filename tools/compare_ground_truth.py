@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import glob
+import importlib.util
 
 def parse_disassembly(disasm_dir):
     """
@@ -106,11 +107,55 @@ def parse_recompiled_code(recompiled_dir):
                 
     return instructions
 
+def resolve_mgbdis_command(explicit_path=None):
+    """
+    Resolve an external mgbdis installation.
+    Returns a command prefix list, or None if unavailable.
+    """
+    candidates = []
+    if explicit_path:
+        candidates.append(explicit_path)
+
+    env_path = os.environ.get("MGBDIS")
+    if env_path:
+        candidates.append(env_path)
+
+    path_script = shutil.which("mgbdis.py")
+    if path_script:
+        candidates.append(path_script)
+
+    path_executable = shutil.which("mgbdis")
+    if path_executable:
+        candidates.append(path_executable)
+
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+
+        resolved = candidate
+        if not os.path.isabs(resolved) and os.path.sep not in resolved:
+            resolved = shutil.which(resolved) or resolved
+
+        if not os.path.exists(resolved):
+            continue
+
+        if resolved.endswith(".py"):
+            return [sys.executable, resolved]
+        return [resolved]
+
+    if importlib.util.find_spec("mgbdis") is not None:
+        return [sys.executable, "-m", "mgbdis"]
+
+    return None
+
 def main():
     parser = argparse.ArgumentParser(description="Compare recompiled code code against ground truth disassembly.")
     parser.add_argument("rom", help="Path to the original ROM file (optional if --trace is used)", nargs='?', default=None)
     parser.add_argument("recompiled_dir", help="Directory containing recompiled C code")
     parser.add_argument("--trace", help="Path to a .trace file to use as ground truth instead of disassembly")
+    parser.add_argument("--mgbdis", help="Path to an external mgbdis executable or mgbdis.py script")
     parser.add_argument("--temp-dir", default="temp_ground_truth", help="Temporary directory for disassembly")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary disassembly files")
     
@@ -143,18 +188,14 @@ def main():
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir)
         
-        # Assuming mgbdis is in tools/mgbdis/mgbdis.py relative to project root
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        mgbdis_path = os.path.join(script_dir, "mgbdis", "mgbdis.py")
-        
-        if not os.path.exists(mgbdis_path):
-            mgbdis_path = os.path.join(os.getcwd(), "tools", "mgbdis", "mgbdis.py")
-            
-        if not os.path.exists(mgbdis_path):
-            print("Error: Could not find mgbdis.py")
+        mgbdis_cmd = resolve_mgbdis_command(args.mgbdis)
+        if not mgbdis_cmd:
+            print("Error: Could not find mgbdis.")
+            print("Install mgbdis separately and pass --mgbdis /path/to/mgbdis.py,")
+            print("set the MGBDIS environment variable, or use --trace to skip disassembly.")
             sys.exit(1)
-            
-        cmd = [sys.executable, mgbdis_path, rom_path, "--output-dir", temp_dir, "--print-hex", "--overwrite"]
+
+        cmd = mgbdis_cmd + [rom_path, "--output-dir", temp_dir, "--print-hex", "--overwrite"]
         subprocess.check_call(cmd)
         
         # 2. Parse Disassembly

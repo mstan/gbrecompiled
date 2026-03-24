@@ -10,6 +10,7 @@
 #define RECOMPILER_CODEGEN_EMITTER_H
 
 #include "../ir/ir.h"
+#include <cstddef>
 #include <cstdint>
 #include <ostream>
 #include <string>
@@ -38,6 +39,7 @@ struct GeneratorOptions {
     bool emit_cmake = true;              // Emit a standalone CMakeLists.txt
     bool embed_rom_data = true;          // Embed ROM data in output
     bool debug_mode = false;             // Extra debug output
+    size_t parallel_codegen_jobs = 0;    // 0 = auto, 1 = disabled
     
     // Cycle counting
     bool emit_cycle_counting = true;

@@ -11,20 +11,19 @@ add_library(gbrt STATIC
     src/platform_sdl.cpp
 )
 
-# ImGui sources (if using SDL2)
+# Dear ImGui sources (if using SDL2)
 find_package(SDL2 QUIET)
 if(SDL2_FOUND)
     target_sources(gbrt PRIVATE
-        third_party/imgui/imgui.cpp
-        third_party/imgui/imgui_draw.cpp
-        third_party/imgui/imgui_tables.cpp
-        third_party/imgui/imgui_widgets.cpp
-        third_party/imgui/imgui_demo.cpp
-        third_party/imgui/backends/imgui_impl_sdl2.cpp
-        third_party/imgui/backends/imgui_impl_sdlrenderer2.cpp
+        vendor/imgui/imgui.cpp
+        vendor/imgui/imgui_draw.cpp
+        vendor/imgui/imgui_tables.cpp
+        vendor/imgui/imgui_widgets.cpp
+        vendor/imgui/backends/imgui_impl_sdl2.cpp
+        vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp
     )
     target_include_directories(gbrt PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui
     )
 endif()
 

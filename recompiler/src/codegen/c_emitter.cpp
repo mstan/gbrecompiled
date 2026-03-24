@@ -9,10 +9,33 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <atomic>
+#include <exception>
+#include <mutex>
 #include <set>
+#include <thread>
 
 namespace gbrecomp {
 namespace codegen {
+
+static size_t resolve_parallel_job_count(size_t requested_jobs, size_t work_items) {
+    if (work_items <= 1) {
+        return 1;
+    }
+    if (requested_jobs == 1) {
+        return 1;
+    }
+
+    size_t jobs = requested_jobs;
+    if (jobs == 0) {
+        jobs = std::thread::hardware_concurrency();
+        if (jobs == 0) {
+            jobs = 1;
+        }
+    }
+
+    return std::min(jobs, work_items);
+}
 
 /* ============================================================================
  * CEmitter Constructor
@@ -2607,12 +2630,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         current_chunk = chunk_preamble;
     };
 
-    // Emit each function with real IR code into chunked source files.
-    for (const auto& [name, func] : program.functions) {
-        if (inlineable_functions.count(func.name)) {
-            continue; // Skip inlined functions
-        }
-
+    auto emit_function_source = [&](const ir::Function& func) {
         std::ostringstream func_ss;
         func_ss << "/* Function at ";
         if (func.bank > 0) {
@@ -2818,10 +2836,68 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
 
         func_ss << "}\n\n";
-        if (current_chunk.size() + func_ss.str().size() > chunk_target_bytes) {
+        return func_ss.str();
+    };
+
+    std::vector<const ir::Function*> emitted_functions;
+    emitted_functions.reserve(sorted_functions.size());
+    for (const ir::Function* func : sorted_functions) {
+        if (inlineable_functions.count(func->name)) {
+            continue;
+        }
+        emitted_functions.push_back(func);
+    }
+
+    std::vector<std::string> emitted_function_sources(emitted_functions.size());
+    const size_t function_jobs = resolve_parallel_job_count(
+        options.parallel_codegen_jobs, emitted_functions.size());
+
+    if (function_jobs <= 1) {
+        for (size_t i = 0; i < emitted_functions.size(); ++i) {
+            emitted_function_sources[i] = emit_function_source(*emitted_functions[i]);
+        }
+    } else {
+        std::atomic<size_t> next_function_index{0};
+        std::exception_ptr worker_error;
+        std::mutex worker_error_mutex;
+        std::vector<std::thread> workers;
+        workers.reserve(function_jobs);
+
+        auto worker = [&]() {
+            try {
+                for (;;) {
+                    const size_t function_index = next_function_index.fetch_add(1);
+                    if (function_index >= emitted_functions.size()) {
+                        return;
+                    }
+                    emitted_function_sources[function_index] =
+                        emit_function_source(*emitted_functions[function_index]);
+                }
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(worker_error_mutex);
+                if (!worker_error) {
+                    worker_error = std::current_exception();
+                }
+            }
+        };
+
+        for (size_t i = 0; i < function_jobs; ++i) {
+            workers.emplace_back(worker);
+        }
+        for (std::thread& worker_thread : workers) {
+            worker_thread.join();
+        }
+        if (worker_error) {
+            std::rethrow_exception(worker_error);
+        }
+    }
+
+    // Emit each function with real IR code into chunked source files.
+    for (const std::string& function_source : emitted_function_sources) {
+        if (current_chunk.size() + function_source.size() > chunk_target_bytes) {
             flush_chunk();
         }
-        current_chunk += func_ss.str();
+        current_chunk += function_source;
     }
     flush_chunk();
     
@@ -3374,20 +3450,19 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
         cmake_ss << ")\n\n";
 
-        cmake_ss << "# ImGui sources\n";
+        cmake_ss << "# Vendored Dear ImGui subset\n";
         cmake_ss << "target_sources(gbrt PRIVATE\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_draw.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_tables.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_widgets.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/imgui_demo.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdl2.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui_draw.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui_tables.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui_widgets.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdl2.cpp\n";
+        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
         cmake_ss << ")\n";
 
         cmake_ss << "target_include_directories(gbrt PUBLIC \n";
         cmake_ss << "    ${GBRT_DIR}/include\n";
-        cmake_ss << "    ${GBRT_DIR}/third_party/imgui\n";
+        cmake_ss << "    ${GBRT_DIR}/vendor/imgui\n";
         cmake_ss << ")\n";
         cmake_ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
         cmake_ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";

@@ -1,6 +1,0 @@
-[submodule "runtime/third_party/imgui"]
-	path = runtime/third_party/imgui
-	url = https://github.com/ocornut/imgui.git
-[submodule "tools/mgbdis"]
-	path = tools/mgbdis
-	url = https://github.com/mattcurrie/mgbdis.git

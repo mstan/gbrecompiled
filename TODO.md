@@ -1,4 +1,4 @@
-# General
+## General
 - [x] Rendering modes for runtime (how we scale the viewport, how do we handle aspect ratio and window resizing?)
 - [ ] Audio output (how do we handle audio timing and buffering?)
 - [ ] Save data handling (how do we read/write save data, and how do we handle save states?)
@@ -10,9 +10,9 @@
 - [ ] Per game configurations on multi-rom mode
 - [ ] Benchmark performance and memory usage against emulators
 - [x] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used. Gather feedback from interpreter hotspots to guide recompiler improvements.
-- [ ] Add support for parallel recompilation on multi-core machines to speed up the initial generation process. Ideally for multi-rom batch generation as well.
-- [ ] Remove mgbdis from repo
-- [ ] Improve handling of imgui dependency, check if a submodule is the best approach or if we can vendor it in a cleaner way, document the selected approach on the readme
+- [x] Add support for parallel recompilation on multi-core machines to speed up the initial generation process. Ideally for multi-rom batch generation as well.
+- [x] Remove mgbdis from repo
+- [x] Improve handling of imgui dependency, check if a submodule is the best approach or if we can vendor it in a cleaner way, document the selected approach on the readme
 - [ ] Benchmark performance on low-end hardware compared to emulators, and optimize for that use case (ESP32, Raspberry Pi, etc.)
 - [ ] Fix double-click to launch game on multi-rom launcher
 - [ ] Guide the recompilation with .json files, entrypoints, function names, data labels, etc. to improve the generated code quality and stability
@@ -26,9 +26,15 @@
 - [ ] Support shaders
 - [ ] Input remapping for controllers
 - [ ] Clean README and add a cool logo, more screenshots
+
+## Android
+- [ ] Support remapping controller inputs on Android
+- [ ] Custom app icon
+- [ ] Multi-rom support with in-app launcher
+- [ ] Debug overlay and settings menu for performance monitoring and configuration
   
 # Platforms
-- [ ] Android support
+- [x] Android support
 - [ ] WebAssembly support
 
 # Modding / Porting Output Plan

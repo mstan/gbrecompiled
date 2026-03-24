@@ -3392,6 +3392,8 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "# Set C standard\n";
         cmake_ss << "set(CMAKE_C_STANDARD 11)\n";
         cmake_ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n\n";
+        cmake_ss << "set(CMAKE_CXX_STANDARD 17)\n";
+        cmake_ss << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
         cmake_ss << "# Aggressive optimization flags\n";
         cmake_ss << "if(NOT CMAKE_BUILD_TYPE)\n";
         cmake_ss << "    set(CMAKE_BUILD_TYPE Release)\n";

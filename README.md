@@ -62,6 +62,34 @@ Generated projects default to `Release`, compile the generated ROM sources at `-
 
 `gbrecomp` also uses parallel code generation by default on multi-core machines. Pass `--jobs <n>` if you want to cap it manually, or `--jobs 1` for single-threaded debugging.
 
+### Generating an Android Project
+
+```bash
+# Generate the normal desktop project plus an Android scaffold
+./build/bin/gbrecomp path/to/game.gb -o output/game --android
+
+# Build the Android app (SDL2_SOURCE_DIR must point to an SDL2 source checkout)
+SDL2_SOURCE_DIR=/path/to/SDL gradle -p output/game/android :app:assembleDebug
+
+# Install it on a connected device or emulator
+adb install -r output/game/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Android output is currently single-ROM only. The generated Android project is controller-first, uses landscape orientation, targets `arm64-v8a`, and keeps SDL2 external instead of vendoring it into this repo or the generated output.
+
+Default Android controller mapping is position-based so it feels natural on Xbox-style handhelds:
+
+- D-pad or left stick: move
+- Bottom face button (`Xbox A` / `Switch B` / `Cross`): Game Boy `B`
+- Right face button (`Xbox B` / `Switch A` / `Circle`): Game Boy `A`
+- Left shoulder: Game Boy `B`
+- Right shoulder: Game Boy `A`
+- Start / Menu: `Start`
+- Back / View / Share: `Select`
+- Guide / Home or Android Back: open the runtime settings menu
+
+See [ANDROID.md](ANDROID.md) for the full end-to-end workflow, including prerequisites, APK builds, `adb` install commands, and Android-specific notes.
+
 ### Recompiling Multiple ROMs Into One Launcher
 
 ```bash
@@ -157,6 +185,38 @@ The recompiler will:
 3. Decode instructions and track bank switches
 4. Generate C source files with the runtime library
 
+### Android Output
+
+Single-ROM generation can also emit an Android-ready project scaffold:
+
+```bash
+./build/bin/gbrecomp <rom.gb> -o <output_dir> --android
+```
+
+Supported Android flags:
+
+| Flag | Description |
+|------|-------------|
+| `--android` | Emit an Android project under `<output_dir>/android` alongside the normal desktop project |
+| `--android-package <java.package>` | Override the generated Android package name |
+| `--android-app-name <label>` | Override the generated Android app label |
+
+Notes:
+
+- Android output is v1 single-ROM only. Multi-ROM launcher generation stays desktop-only for now.
+- The generated project expects `SDL2_SOURCE_DIR` to be set as either a Gradle property or an environment variable.
+- The generated Android CMake/Gradle files fail fast with a short error if `SDL2_SOURCE_DIR` is missing.
+- The first Android version is controller-first and does not include touch gameplay controls.
+- Face-button mapping is based on physical position, and the runtime labels it according to the connected controller profile when SDL can infer one.
+
+Build the generated Android project from the repo root with:
+
+```bash
+SDL2_SOURCE_DIR=/path/to/SDL gradle -p <output_dir>/android :app:assembleDebug
+```
+
+For a complete Android walkthrough, see [ANDROID.md](ANDROID.md).
+
 ### Multi-ROM Recompilation
 
 You can also point `gbrecomp` at a directory instead of a single ROM:
@@ -204,6 +264,9 @@ If you run the launcher without `--game`, it opens the graphical launcher. The C
 | `--symbols <file>` | Load a `.sym` symbol file and use those names for generated functions and internal labels |
 | `--verbose` | Show detailed analysis statistics |
 | `--use-trace <file>` | Use runtime trace to seed entry points |
+| `--android` | Also emit an Android project scaffold for single-ROM output |
+| `--android-package <java.package>` | Override the generated Android package name |
+| `--android-app-name <label>` | Override the generated Android app label |
 
 **Example:**
 

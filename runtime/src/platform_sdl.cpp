@@ -12,9 +12,14 @@
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
 #include <atomic>
+#include <cctype>
+#include <filesystem>
+#include <string>
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
+
+namespace fs = std::filesystem;
 
 /* ============================================================================
  * SDL State
@@ -49,6 +54,8 @@ static bool g_smooth_lcd_transitions = true;
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
 static bool g_fullscreen = false;
+static bool g_app_suspended = false;
+static bool g_renderer_reset_pending = false;
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
 static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
@@ -62,8 +69,17 @@ typedef enum GBRenderFilterMode {
     GB_RENDER_FILTER_NEAREST = 0,
     GB_RENDER_FILTER_LINEAR = 1,
 } GBRenderFilterMode;
+typedef enum GBControllerLabelProfile {
+    GB_CONTROLLER_LABEL_GENERIC = 0,
+    GB_CONTROLLER_LABEL_XBOX = 1,
+    GB_CONTROLLER_LABEL_PLAYSTATION = 2,
+    GB_CONTROLLER_LABEL_NINTENDO = 3,
+} GBControllerLabelProfile;
 static GBRenderScalingMode g_render_scaling_mode = GB_RENDER_SCALING_PIXEL_PERFECT;
 static GBRenderFilterMode g_render_filter_mode = GB_RENDER_FILTER_NEAREST;
+static SDL_GameControllerType g_controller_type = SDL_CONTROLLER_TYPE_UNKNOWN;
+static GBControllerLabelProfile g_controller_label_profile = GB_CONTROLLER_LABEL_GENERIC;
+static std::string g_controller_name;
 static const char* g_render_scaling_mode_names[] = {
     "Pixel Perfect",
     "Aspect Fit",
@@ -160,6 +176,340 @@ static bool env_flag_enabled(const char* name) {
            strcmp(value, "on") == 0 ||
            strcmp(value, "ON") == 0;
 }
+
+static bool platform_default_fullscreen(void) {
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool platform_uses_app_storage_for_relative_paths(void) {
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+static const char* overlay_menu_hint_text(void) {
+#if defined(__ANDROID__)
+    return "Press Back for Menu";
+#else
+    return "Press ESC for Menu";
+#endif
+}
+
+static const char* overlay_visibility_hint_text(void) {
+#if defined(__ANDROID__)
+    return "Use the settings menu to toggle the overlay";
+#else
+    return "Press F1 for Overlay";
+#endif
+}
+
+static bool string_contains_case_insensitive(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !haystack[0] || !needle[0]) {
+        return false;
+    }
+
+    std::string text(haystack);
+    std::string pattern(needle);
+    for (char& ch : text) ch = (char)std::tolower((unsigned char)ch);
+    for (char& ch : pattern) ch = (char)std::tolower((unsigned char)ch);
+    return text.find(pattern) != std::string::npos;
+}
+
+static bool should_ignore_controller_name(const char* name) {
+    return string_contains_case_insensitive(name, "qwerty") ||
+           string_contains_case_insensitive(name, "keyboard") ||
+           string_contains_case_insensitive(name, "keypad");
+}
+
+static const char* controller_type_name(SDL_GameControllerType type) {
+    switch (type) {
+        case SDL_CONTROLLER_TYPE_XBOX360: return "Xbox 360";
+        case SDL_CONTROLLER_TYPE_XBOXONE: return "Xbox One";
+        case SDL_CONTROLLER_TYPE_PS3: return "PlayStation 3";
+        case SDL_CONTROLLER_TYPE_PS4: return "PlayStation 4";
+        case SDL_CONTROLLER_TYPE_PS5: return "PlayStation 5";
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO: return "Nintendo Switch Pro";
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT: return "Joy-Con Left";
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: return "Joy-Con Right";
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return "Joy-Con Pair";
+        case SDL_CONTROLLER_TYPE_GOOGLE_STADIA: return "Stadia";
+        case SDL_CONTROLLER_TYPE_AMAZON_LUNA: return "Luna";
+        case SDL_CONTROLLER_TYPE_NVIDIA_SHIELD: return "NVIDIA Shield";
+        case SDL_CONTROLLER_TYPE_VIRTUAL: return "Virtual";
+        case SDL_CONTROLLER_TYPE_UNKNOWN:
+        default:
+            return "Unknown";
+    }
+}
+
+static GBControllerLabelProfile detect_controller_label_profile(SDL_GameController* controller) {
+    if (controller) {
+        const SDL_GameControllerType type = SDL_GameControllerGetType(controller);
+        switch (type) {
+            case SDL_CONTROLLER_TYPE_XBOX360:
+            case SDL_CONTROLLER_TYPE_XBOXONE:
+            case SDL_CONTROLLER_TYPE_GOOGLE_STADIA:
+            case SDL_CONTROLLER_TYPE_AMAZON_LUNA:
+            case SDL_CONTROLLER_TYPE_NVIDIA_SHIELD:
+                return GB_CONTROLLER_LABEL_XBOX;
+
+            case SDL_CONTROLLER_TYPE_PS3:
+            case SDL_CONTROLLER_TYPE_PS4:
+            case SDL_CONTROLLER_TYPE_PS5:
+                return GB_CONTROLLER_LABEL_PLAYSTATION;
+
+            case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+            case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+            case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+            case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+                return GB_CONTROLLER_LABEL_NINTENDO;
+
+            default:
+                break;
+        }
+
+        const char* name = SDL_GameControllerName(controller);
+        if (string_contains_case_insensitive(name, "xbox") ||
+            string_contains_case_insensitive(name, "xinput") ||
+            string_contains_case_insensitive(name, "stadia") ||
+            string_contains_case_insensitive(name, "luna") ||
+            string_contains_case_insensitive(name, "shield") ||
+            string_contains_case_insensitive(name, "kishi") ||
+            string_contains_case_insensitive(name, "odin") ||
+            string_contains_case_insensitive(name, "retroid")) {
+            return GB_CONTROLLER_LABEL_XBOX;
+        }
+        if (string_contains_case_insensitive(name, "playstation") ||
+            string_contains_case_insensitive(name, "dualshock") ||
+            string_contains_case_insensitive(name, "dualsense") ||
+            string_contains_case_insensitive(name, "ps3") ||
+            string_contains_case_insensitive(name, "ps4") ||
+            string_contains_case_insensitive(name, "ps5")) {
+            return GB_CONTROLLER_LABEL_PLAYSTATION;
+        }
+        if (string_contains_case_insensitive(name, "switch") ||
+            string_contains_case_insensitive(name, "joy-con") ||
+            string_contains_case_insensitive(name, "joycon") ||
+            string_contains_case_insensitive(name, "nintendo")) {
+            return GB_CONTROLLER_LABEL_NINTENDO;
+        }
+    }
+
+#if defined(__ANDROID__)
+    return GB_CONTROLLER_LABEL_XBOX;
+#else
+    return GB_CONTROLLER_LABEL_GENERIC;
+#endif
+}
+
+static const char* controller_face_south_label(void) {
+    switch (g_controller_label_profile) {
+        case GB_CONTROLLER_LABEL_XBOX: return "A (Bottom)";
+        case GB_CONTROLLER_LABEL_PLAYSTATION: return "Cross (Bottom)";
+        case GB_CONTROLLER_LABEL_NINTENDO: return "B (Bottom)";
+        case GB_CONTROLLER_LABEL_GENERIC:
+        default:
+            return "South / Bottom";
+    }
+}
+
+static const char* controller_face_east_label(void) {
+    switch (g_controller_label_profile) {
+        case GB_CONTROLLER_LABEL_XBOX: return "B (Right)";
+        case GB_CONTROLLER_LABEL_PLAYSTATION: return "Circle (Right)";
+        case GB_CONTROLLER_LABEL_NINTENDO: return "A (Right)";
+        case GB_CONTROLLER_LABEL_GENERIC:
+        default:
+            return "East / Right";
+    }
+}
+
+static const char* controller_left_shoulder_label(void) {
+    switch (g_controller_label_profile) {
+        case GB_CONTROLLER_LABEL_XBOX: return "LB";
+        case GB_CONTROLLER_LABEL_PLAYSTATION: return "L1";
+        case GB_CONTROLLER_LABEL_NINTENDO: return "L";
+        case GB_CONTROLLER_LABEL_GENERIC:
+        default:
+            return "Left Shoulder";
+    }
+}
+
+static const char* controller_right_shoulder_label(void) {
+    switch (g_controller_label_profile) {
+        case GB_CONTROLLER_LABEL_XBOX: return "RB";
+        case GB_CONTROLLER_LABEL_PLAYSTATION: return "R1";
+        case GB_CONTROLLER_LABEL_NINTENDO: return "R";
+        case GB_CONTROLLER_LABEL_GENERIC:
+        default:
+            return "Right Shoulder";
+    }
+}
+
+static const char* controller_back_label(void) {
+    switch (g_controller_label_profile) {
+        case GB_CONTROLLER_LABEL_XBOX: return "View / Back";
+        case GB_CONTROLLER_LABEL_PLAYSTATION: return "Create / Share";
+        case GB_CONTROLLER_LABEL_NINTENDO: return "-";
+        case GB_CONTROLLER_LABEL_GENERIC:
+        default:
+            return "Back / Select";
+    }
+}
+
+static const char* controller_start_label(void) {
+    switch (g_controller_label_profile) {
+        case GB_CONTROLLER_LABEL_XBOX: return "Menu / Start";
+        case GB_CONTROLLER_LABEL_PLAYSTATION: return "Options";
+        case GB_CONTROLLER_LABEL_NINTENDO: return "+";
+        case GB_CONTROLLER_LABEL_GENERIC:
+        default:
+            return "Start";
+    }
+}
+
+static const char* controller_guide_label(void) {
+    switch (g_controller_label_profile) {
+        case GB_CONTROLLER_LABEL_XBOX: return "Xbox / Guide";
+        case GB_CONTROLLER_LABEL_PLAYSTATION: return "PS";
+        case GB_CONTROLLER_LABEL_NINTENDO: return "Home";
+        case GB_CONTROLLER_LABEL_GENERIC:
+        default:
+            return "Guide / Home";
+    }
+}
+
+static void clear_controller_state(void) {
+    if (g_controller) {
+        SDL_GameControllerClose(g_controller);
+        g_controller = NULL;
+    }
+    g_controller_type = SDL_CONTROLLER_TYPE_UNKNOWN;
+    g_controller_label_profile = detect_controller_label_profile(NULL);
+    g_controller_name.clear();
+}
+
+static void refresh_controller_profile(void) {
+    if (!g_controller) {
+        g_controller_type = SDL_CONTROLLER_TYPE_UNKNOWN;
+        g_controller_label_profile = detect_controller_label_profile(NULL);
+        g_controller_name.clear();
+        return;
+    }
+
+    g_controller_type = SDL_GameControllerGetType(g_controller);
+    g_controller_label_profile = detect_controller_label_profile(g_controller);
+    const char* name = SDL_GameControllerName(g_controller);
+    g_controller_name = (name && name[0]) ? name : "Controller";
+    fprintf(stderr,
+            "[SDL] Controller: %s [%s]\n",
+            g_controller_name.c_str(),
+            controller_type_name(g_controller_type));
+}
+
+static bool open_controller_index(int joystick_index) {
+    if (joystick_index < 0 || joystick_index >= SDL_NumJoysticks() || !SDL_IsGameController(joystick_index)) {
+        return false;
+    }
+
+    SDL_GameController* controller = SDL_GameControllerOpen(joystick_index);
+    if (!controller) {
+        return false;
+    }
+
+    if (should_ignore_controller_name(SDL_GameControllerName(controller))) {
+        SDL_GameControllerClose(controller);
+        return false;
+    }
+
+    clear_controller_state();
+    g_controller = controller;
+    refresh_controller_profile();
+    return true;
+}
+
+static bool open_first_available_controller(void) {
+    if (g_controller) {
+        return true;
+    }
+
+    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+        if (open_controller_index(i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static SDL_JoystickID active_controller_instance_id(void) {
+    if (!g_controller) {
+        return -1;
+    }
+    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(g_controller);
+    return joystick ? SDL_JoystickInstanceID(joystick) : -1;
+}
+
+static bool ensure_parent_directory(const fs::path& path) {
+    if (path.parent_path().empty()) {
+        return true;
+    }
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    return !ec;
+}
+
+static std::string extract_path_leaf(const char* path) {
+    if (!path || !path[0]) {
+        return "game";
+    }
+    try {
+        fs::path input(path);
+        std::string leaf = input.filename().string();
+        return leaf.empty() ? std::string(path) : leaf;
+    } catch (...) {
+        return std::string(path);
+    }
+}
+
+static std::string make_pref_storage_dir(const char* app_component) {
+    const char* safe_component = (app_component && app_component[0]) ? app_component : "runtime";
+    char* pref_path = SDL_GetPrefPath("gbrecompiled", safe_component);
+    if (!pref_path) {
+        return std::string();
+    }
+    std::string result(pref_path);
+    SDL_free(pref_path);
+    return result;
+}
+
+static std::string resolve_writable_path(const char* requested_path, const char* app_component) {
+    if (!requested_path || !requested_path[0]) {
+        return std::string();
+    }
+
+    fs::path requested(requested_path);
+    if (!platform_uses_app_storage_for_relative_paths() || requested.is_absolute()) {
+        return requested.lexically_normal().string();
+    }
+
+    const std::string pref_dir = make_pref_storage_dir(app_component);
+    if (pref_dir.empty()) {
+        return requested.lexically_normal().string();
+    }
+
+    fs::path resolved = fs::path(pref_dir) / requested;
+    ensure_parent_directory(resolved);
+    return resolved.lexically_normal().string();
+}
+
+static bool recreate_streaming_texture(void);
+static void set_app_suspended(bool suspended);
 
 static bool frame_is_selected_for_dump(const uint32_t* frames, int count, uint32_t frame) {
     for (int i = 0; i < count; i++) {
@@ -390,13 +740,14 @@ void gb_platform_set_input_record_file(const char* path) {
 
     if (!path || !path[0]) return;
 
-    g_input_record_file = fopen(path, "w");
+    const std::string resolved_path = resolve_writable_path(path, "artifacts");
+    g_input_record_file = fopen(resolved_path.c_str(), "w");
     if (!g_input_record_file) {
-        fprintf(stderr, "[AUTO] Failed to open input record file '%s'\n", path);
+        fprintf(stderr, "[AUTO] Failed to open input record file '%s'\n", resolved_path.c_str());
         return;
     }
 
-    fprintf(stderr, "[AUTO] Recording live input to %s (cycle anchored)\n", path);
+    fprintf(stderr, "[AUTO] Recording live input to %s (cycle anchored)\n", resolved_path.c_str());
 }
 
 void gb_platform_set_dump_frames(const char* frames) {
@@ -428,6 +779,7 @@ void gb_platform_set_screenshot_prefix(const char* prefix) {
 }
 
 static void save_ppm(const char* filename, const uint32_t* fb, int width, int height, int frame_count) {
+    const std::string resolved_filename = resolve_writable_path(filename, "artifacts");
     // Calculate simple hash
     uint32_t hash = 0;
     for (int k = 0; k < width * height; k++) {
@@ -435,7 +787,7 @@ static void save_ppm(const char* filename, const uint32_t* fb, int width, int he
     }
     printf("[AUTO] Frame %d hash: %08X\n", frame_count, hash);
 
-    FILE* f = fopen(filename, "wb");
+    FILE* f = fopen(resolved_filename.c_str(), "wb");
     if (!f) return;
     
     fprintf(f, "P6\n%d %d\n255\n", width, height);
@@ -453,7 +805,7 @@ static void save_ppm(const char* filename, const uint32_t* fb, int width, int he
     
     free(row);
     fclose(f);
-    printf("[AUTO] Saved screenshot: %s\n", filename);
+    printf("[AUTO] Saved screenshot: %s\n", resolved_filename.c_str());
 }
 
 
@@ -587,6 +939,52 @@ static void set_fullscreen_enabled(bool enabled) {
     update_game_viewport();
 }
 
+static bool recreate_streaming_texture(void) {
+    if (!g_renderer || g_benchmark_mode) {
+        return true;
+    }
+
+    if (g_texture) {
+        SDL_DestroyTexture(g_texture);
+        g_texture = NULL;
+    }
+
+    g_texture = SDL_CreateTexture(
+        g_renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        GB_SCREEN_WIDTH,
+        GB_SCREEN_HEIGHT
+    );
+    if (!g_texture) {
+        fprintf(stderr, "[SDL] Failed to recreate texture: %s\n", SDL_GetError());
+        return false;
+    }
+
+    update_render_filter();
+    g_renderer_reset_pending = false;
+    return true;
+}
+
+static void set_app_suspended(bool suspended) {
+    if (g_app_suspended == suspended) {
+        return;
+    }
+
+    g_app_suspended = suspended;
+    if (g_audio_device) {
+        SDL_PauseAudioDevice(g_audio_device, suspended ? 1 : (g_audio_started ? 0 : 1));
+    }
+
+    if (!suspended) {
+        g_last_frame_time = SDL_GetTicks();
+        if (g_window) {
+            update_game_viewport();
+        }
+        g_renderer_reset_pending = true;
+    }
+}
+
 static void reset_runtime_display_defaults(void) {
     g_scale = 5;
     g_speed_percent = 100;
@@ -602,11 +1000,18 @@ static void reset_runtime_display_defaults(void) {
         SDL_RenderSetVSync(g_renderer, 0);
     }
 
+    const bool want_fullscreen = platform_default_fullscreen();
     if (g_window) {
-        if (g_fullscreen) {
-            set_fullscreen_enabled(false);
+        if (g_fullscreen != want_fullscreen) {
+            set_fullscreen_enabled(want_fullscreen);
         }
-        apply_window_scale_preset();
+        if (!g_fullscreen) {
+            apply_window_scale_preset();
+        } else {
+            update_game_viewport();
+        }
+    } else {
+        g_fullscreen = want_fullscreen;
     }
 }
 
@@ -655,11 +1060,19 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
     }
 
-    if (g_benchmark_mode || !g_texture || !g_renderer) {
+    if (g_benchmark_mode || g_app_suspended || !g_renderer) {
         DBG_FRAME("Platform render_frame: host render skipped (benchmark=%d texture=%d renderer=%d)",
                   g_benchmark_mode ? 1 : 0,
                   g_texture == NULL,
                   g_renderer == NULL);
+        g_last_timing.upload_ms = 0.0;
+        g_last_timing.compose_ms = 0.0;
+        g_last_timing.present_ms = 0.0;
+        g_last_timing.total_render_ms = 0.0;
+        return;
+    }
+
+    if ((!g_texture || g_renderer_reset_pending) && !recreate_streaming_texture()) {
         g_last_timing.upload_ms = 0.0;
         g_last_timing.compose_ms = 0.0;
         g_last_timing.present_ms = 0.0;
@@ -806,6 +1219,37 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (ImGui::Button("Reset Speed")) g_speed_percent = 100;
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
 
+        ImGui::Separator();
+        ImGui::TextDisabled("Controls");
+        if (!g_controller_name.empty()) {
+            ImGui::Text("Detected Controller: %s", g_controller_name.c_str());
+            ImGui::TextDisabled("Profile: %s", controller_type_name(g_controller_type));
+        } else {
+#if defined(__ANDROID__)
+            ImGui::TextDisabled("No controller detected. Showing the default handheld layout.");
+#else
+            ImGui::TextDisabled("No controller detected.");
+            ImGui::BulletText("Arrows / WASD: Move");
+            ImGui::BulletText("Z/J: Game Boy A");
+            ImGui::BulletText("X/K: Game Boy B");
+            ImGui::BulletText("Backspace: Select");
+            ImGui::BulletText("Enter: Start");
+#endif
+        }
+        ImGui::BulletText("D-Pad / Left Stick: Move");
+        ImGui::BulletText("%s: Game Boy B", controller_face_south_label());
+        ImGui::BulletText("%s: Game Boy A", controller_face_east_label());
+        ImGui::BulletText("%s: Game Boy B (alt)", controller_left_shoulder_label());
+        ImGui::BulletText("%s: Game Boy A (alt)", controller_right_shoulder_label());
+        ImGui::BulletText("%s: Select", controller_back_label());
+        ImGui::BulletText("%s: Start", controller_start_label());
+        ImGui::BulletText("%s: Settings Menu", controller_guide_label());
+#if defined(__ANDROID__)
+        ImGui::BulletText("Android Back / Escape: Settings Menu");
+#else
+        ImGui::BulletText("Escape: Settings Menu");
+#endif
+
         if (has_interpreter_activity(g_registered_ctx)) {
             const GBInterpreterHotspot* hotspot = &g_registered_ctx->interpreter_hotspots[0];
             ImGui::Separator();
@@ -863,8 +1307,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (ImGui::Begin("Overlay", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
             update_audio_stats_from_ring();
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-            ImGui::Text("Press ESC for Menu");
-            ImGui::Text("Press F1 for Overlay");
+            ImGui::Text("%s", overlay_menu_hint_text());
+            ImGui::Text("%s", overlay_visibility_hint_text());
             ImGui::Text("Viewport: %d x %d (%s)",
                         g_game_viewport.w,
                         g_game_viewport.h,
@@ -925,10 +1369,7 @@ void gb_platform_shutdown(void) {
         g_audio_device = 0;
     }
 
-    if (g_controller) {
-        SDL_GameControllerClose(g_controller);
-        g_controller = NULL;
-    }
+    clear_controller_state();
     g_audio_started = false;
     g_audio_start_threshold = 0;
     
@@ -951,6 +1392,8 @@ void gb_platform_shutdown(void) {
         g_window = NULL;
     }
     g_registered_ctx = NULL;
+    g_app_suspended = false;
+    g_renderer_reset_pending = false;
     SDL_Quit();
 }
 
@@ -1076,7 +1519,9 @@ bool gb_platform_init(int scale) {
     g_manual_joypad_dpad = 0xFF;
     g_script_joypad_buttons = 0xFF;
     g_script_joypad_dpad = 0xFF;
-    g_fullscreen = false;
+    g_fullscreen = platform_default_fullscreen();
+    g_app_suspended = false;
+    g_renderer_reset_pending = false;
     g_show_overlay = false;
     update_effective_joypad_state();
     g_last_guest_framebuffer_valid = false;
@@ -1099,21 +1544,22 @@ bool gb_platform_init(int scale) {
     }
     
     fprintf(stderr, "[SDL] Initializing SDL...\n");
+#if defined(__ANDROID__)
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
     fprintf(stderr, "[SDL] SDL initialized.\n");
 
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (SDL_IsGameController(i)) {
-            g_controller = SDL_GameControllerOpen(i);
-            if (g_controller) {
-                fprintf(stderr, "[SDL] Controller: %s\n", SDL_GameControllerName(g_controller));
-                break;
-            }
-        }
-    }
+#if defined(__ANDROID__)
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+#endif
+
+    clear_controller_state();
+    open_first_available_controller();
     
     /* Initialize Audio - Callback Mode with large buffer */
     SDL_AudioSpec want, have;
@@ -1150,7 +1596,8 @@ bool gb_platform_init(int scale) {
         SDL_WINDOWPOS_CENTERED,
         g_windowed_width,
         g_windowed_height,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        SDL_WINDOW_SHOWN |
+        (g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE)
     );
     
     if (!g_window) {
@@ -1196,21 +1643,12 @@ bool gb_platform_init(int scale) {
     ImGui_ImplSDL2_InitForSDLRenderer(g_window, g_renderer);
     ImGui_ImplSDLRenderer2_Init(g_renderer);
 
-    g_texture = SDL_CreateTexture(
-        g_renderer,
-        SDL_PIXELFORMAT_ARGB8888,
-        SDL_TEXTUREACCESS_STREAMING,
-        GB_SCREEN_WIDTH,
-        GB_SCREEN_HEIGHT
-    );
-    
-    if (!g_texture) {
+    if (!recreate_streaming_texture()) {
         SDL_DestroyRenderer(g_renderer);
         SDL_DestroyWindow(g_window);
         SDL_Quit();
         return false;
     }
-    update_render_filter();
     update_game_viewport();
     
     g_last_frame_time = SDL_GetTicks();
@@ -1218,181 +1656,271 @@ bool gb_platform_init(int scale) {
     return true;
 }
 
+static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
+    if (!event) {
+        return true;
+    }
+
+    const uint8_t joyp = ctx ? ctx->io[0x00] : 0xFF;
+    const bool dpad_selected = !(joyp & 0x10);
+    const bool buttons_selected = !(joyp & 0x20);
+
+    if (event->type == SDL_QUIT) {
+        return false;
+    }
+    if (event->type == SDL_WINDOWEVENT &&
+        event->window.event == SDL_WINDOWEVENT_CLOSE &&
+        (!g_window || event->window.windowID == SDL_GetWindowID(g_window))) {
+        return false;
+    }
+
+    switch (event->type) {
+        case SDL_APP_WILLENTERBACKGROUND:
+            set_app_suspended(true);
+            break;
+
+        case SDL_APP_DIDENTERFOREGROUND:
+            set_app_suspended(false);
+            break;
+
+        case SDL_RENDER_TARGETS_RESET:
+        case SDL_RENDER_DEVICE_RESET:
+            g_renderer_reset_pending = true;
+            recreate_streaming_texture();
+            break;
+
+        case SDL_CONTROLLERDEVICEADDED:
+            if (!g_controller) {
+                open_controller_index(event->cdevice.which);
+            }
+            break;
+
+        case SDL_CONTROLLERDEVICEREMOVED:
+            if (g_controller && active_controller_instance_id() == event->cdevice.which) {
+                clear_controller_state();
+                open_first_available_controller();
+            }
+            break;
+
+        case SDL_CONTROLLERDEVICEREMAPPED:
+            if (g_controller && active_controller_instance_id() == event->cdevice.which) {
+                refresh_controller_profile();
+            }
+            break;
+
+        case SDL_CONTROLLERAXISMOTION: {
+            const int deadzone = 8000;
+
+            if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+                if (event->caxis.value > deadzone) {
+                    g_manual_joypad_dpad &= ~0x01;
+                    g_manual_joypad_dpad |= 0x02;
+                } else if (event->caxis.value < -deadzone) {
+                    g_manual_joypad_dpad &= ~0x02;
+                    g_manual_joypad_dpad |= 0x01;
+                } else {
+                    g_manual_joypad_dpad |= 0x01;
+                    g_manual_joypad_dpad |= 0x02;
+                }
+            }
+
+            if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                if (event->caxis.value > deadzone) {
+                    g_manual_joypad_dpad &= ~0x08;
+                    g_manual_joypad_dpad |= 0x04;
+                } else if (event->caxis.value < -deadzone) {
+                    g_manual_joypad_dpad &= ~0x04;
+                    g_manual_joypad_dpad |= 0x08;
+                } else {
+                    g_manual_joypad_dpad |= 0x04;
+                    g_manual_joypad_dpad |= 0x08;
+                }
+            }
+            break;
+        }
+
+        case SDL_CONTROLLERBUTTONDOWN:
+        case SDL_CONTROLLERBUTTONUP: {
+            const bool pressed = (event->type == SDL_CONTROLLERBUTTONDOWN);
+            bool trigger = false;
+
+            switch (event->cbutton.button) {
+                case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x04;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x08;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x02;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x01;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_A:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x02;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_B:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x01;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x02;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x01;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_START:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x08;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_BACK:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x04;
+                    break;
+
+                case SDL_CONTROLLER_BUTTON_GUIDE:
+                    if (pressed) {
+                        g_show_menu = !g_show_menu;
+                    }
+                    return true;
+
+                default:
+                    break;
+            }
+
+            if (trigger && ctx && pressed) {
+                request_joypad_interrupt(ctx);
+            }
+            break;
+        }
+
+        case SDL_KEYDOWN:
+        case SDL_KEYUP: {
+            const bool pressed = (event->type == SDL_KEYDOWN);
+            bool trigger = false;
+
+            switch (event->key.keysym.scancode) {
+                case SDL_SCANCODE_UP:
+                case SDL_SCANCODE_W:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x04;
+                    break;
+                case SDL_SCANCODE_DOWN:
+                case SDL_SCANCODE_S:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x08;
+                    break;
+                case SDL_SCANCODE_LEFT:
+                case SDL_SCANCODE_A:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x02;
+                    break;
+                case SDL_SCANCODE_RIGHT:
+                case SDL_SCANCODE_D:
+                    if (pressed) { g_manual_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
+                    else g_manual_joypad_dpad |= 0x01;
+                    break;
+
+                case SDL_SCANCODE_Z:
+                case SDL_SCANCODE_J:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x01;
+                    break;
+                case SDL_SCANCODE_X:
+                case SDL_SCANCODE_K:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x02;
+                    break;
+                case SDL_SCANCODE_RSHIFT:
+                case SDL_SCANCODE_BACKSPACE:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x04;
+                    break;
+                case SDL_SCANCODE_RETURN:
+                    if (pressed) { g_manual_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; }
+                    else g_manual_joypad_buttons |= 0x08;
+                    break;
+
+                case SDL_SCANCODE_ESCAPE:
+                case SDL_SCANCODE_AC_BACK:
+                    if (pressed && event->key.repeat == 0) {
+                        g_show_menu = !g_show_menu;
+                    }
+                    return true;
+
+                case SDL_SCANCODE_F1:
+                    if (pressed && event->key.repeat == 0) {
+                        g_show_overlay = !g_show_overlay;
+                    }
+                    return true;
+
+                default:
+                    break;
+            }
+
+            if (trigger && ctx && pressed && event->key.repeat == 0) {
+                request_joypad_interrupt(ctx);
+            }
+            break;
+        }
+
+        case SDL_WINDOWEVENT:
+            if (event->window.event == SDL_WINDOWEVENT_RESIZED ||
+                event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                if (!g_fullscreen) {
+                    g_windowed_width = event->window.data1;
+                    g_windowed_height = event->window.data2;
+                }
+                update_game_viewport();
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    return true;
+}
+
 bool gb_platform_poll_events(GBContext* ctx) {
     SDL_Event event;
-    uint8_t joyp = ctx ? ctx->io[0x00] : 0xFF;
-    bool dpad_selected = !(joyp & 0x10);
-    bool buttons_selected = !(joyp & 0x20);
 
     if (!g_benchmark_mode) {
         while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT) return false;
-            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(g_window))
+            if (ImGui::GetCurrentContext() != NULL) {
+                ImGui_ImplSDL2_ProcessEvent(&event);
+            }
+            if (!handle_runtime_event(&event, ctx)) {
                 return false;
+            }
+        }
 
-            switch (event.type) {
-                    case SDL_CONTROLLERAXISMOTION: {
-                    const int deadzone = 8000;
-
-                    if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
-                        if (event.caxis.value > deadzone) {
-                            g_manual_joypad_dpad &= ~0x01;
-                            g_manual_joypad_dpad |= 0x02;
-                        } else if (event.caxis.value < -deadzone) {
-                            g_manual_joypad_dpad &= ~0x02;
-                            g_manual_joypad_dpad |= 0x01;
-                        } else {
-                            g_manual_joypad_dpad |= 0x01;
-                            g_manual_joypad_dpad |= 0x02;
-                        }
-                    }
-
-                    if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
-                        if (event.caxis.value > deadzone) {
-                            g_manual_joypad_dpad &= ~0x08;
-                            g_manual_joypad_dpad |= 0x04;
-                        } else if (event.caxis.value < -deadzone) {
-                            g_manual_joypad_dpad &= ~0x04;
-                            g_manual_joypad_dpad |= 0x08;
-                        } else {
-                            g_manual_joypad_dpad |= 0x04;
-                            g_manual_joypad_dpad |= 0x08;
-                        }
-                    }
-
-                    break;
-                }
-
-                case SDL_CONTROLLERBUTTONDOWN:
-                case SDL_CONTROLLERBUTTONUP: {
-                    bool pressed = (event.type == SDL_CONTROLLERBUTTONDOWN);
-
-                    switch (event.cbutton.button) {
-                        case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                            if (pressed) g_manual_joypad_dpad &= ~0x04;
-                            else g_manual_joypad_dpad |= 0x04;
-                            break;
-
-                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                            if (pressed) g_manual_joypad_dpad &= ~0x08;
-                            else g_manual_joypad_dpad |= 0x08;
-                            break;
-
-                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                            if (pressed) g_manual_joypad_dpad &= ~0x02;
-                            else g_manual_joypad_dpad |= 0x02;
-                            break;
-
-                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                            if (pressed) g_manual_joypad_dpad &= ~0x01;
-                            else g_manual_joypad_dpad |= 0x01;
-                            break;
-
-                        case SDL_CONTROLLER_BUTTON_A:
-                            if (pressed) g_manual_joypad_buttons &= ~0x01;
-                            else g_manual_joypad_buttons |= 0x01;
-                            break;
-
-                        case SDL_CONTROLLER_BUTTON_B:
-                            if (pressed) g_manual_joypad_buttons &= ~0x02;
-                            else g_manual_joypad_buttons |= 0x02;
-                            break;
-
-                        case SDL_CONTROLLER_BUTTON_START:
-                            if (pressed) g_manual_joypad_buttons &= ~0x08;
-                            else g_manual_joypad_buttons |= 0x08;
-                            break;
-
-                        case SDL_CONTROLLER_BUTTON_BACK:
-                            if (pressed) g_manual_joypad_buttons &= ~0x04;
-                            else g_manual_joypad_buttons |= 0x04;
-                            break;
-                    }
-                    break;
-                }
-
-                case SDL_KEYDOWN:
-                case SDL_KEYUP: {
-                    bool pressed = (event.type == SDL_KEYDOWN);
-                    bool trigger = false;
-                    
-                    switch (event.key.keysym.scancode) {
-                        /* D-pad */
-                        case SDL_SCANCODE_UP:
-                        case SDL_SCANCODE_W:
-                            if (pressed) { g_manual_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
-                            else g_manual_joypad_dpad |= 0x04;
-                            break;
-                        case SDL_SCANCODE_DOWN:
-                        case SDL_SCANCODE_S:
-                            if (pressed) { g_manual_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
-                            else g_manual_joypad_dpad |= 0x08;
-                            break;
-                        case SDL_SCANCODE_LEFT:
-                        case SDL_SCANCODE_A:
-                            if (pressed) { g_manual_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
-                            else g_manual_joypad_dpad |= 0x02;
-                            break;
-                        case SDL_SCANCODE_RIGHT:
-                        case SDL_SCANCODE_D:
-                            if (pressed) { g_manual_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
-                            else g_manual_joypad_dpad |= 0x01;
-                            break;
-                        
-                        /* Buttons */
-                        case SDL_SCANCODE_Z:
-                        case SDL_SCANCODE_J:
-                            if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; } /* A */
-                            else g_manual_joypad_buttons |= 0x01;
-                            break;
-                        case SDL_SCANCODE_X:
-                        case SDL_SCANCODE_K:
-                            if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; } /* B */
-                            else g_manual_joypad_buttons |= 0x02;
-                            break;
-                        case SDL_SCANCODE_RSHIFT:
-                        case SDL_SCANCODE_BACKSPACE:
-                            if (pressed) { g_manual_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; } /* Select */
-                            else g_manual_joypad_buttons |= 0x04;
-                            break;
-                        case SDL_SCANCODE_RETURN:
-                            if (pressed) { g_manual_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; } /* Start */
-                            else g_manual_joypad_buttons |= 0x08;
-                            break;
-                        
-                        case SDL_SCANCODE_ESCAPE:
-                            if (pressed) {
-                                g_show_menu = !g_show_menu;
-                            }
-                            return true; // Don't block
-
-                        case SDL_SCANCODE_F1:
-                            if (pressed && event.key.repeat == 0) {
-                                g_show_overlay = !g_show_overlay;
-                            }
-                            return true; // Don't block
-                            
-                        default:
-                            break;
-                    }
-                    
-                    if (trigger && ctx && event.key.repeat == 0) {
-                        request_joypad_interrupt(ctx);
-                    }
-                    break;
-                }
-                
-                case SDL_WINDOWEVENT:
-                    if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
-                        event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                        if (!g_fullscreen) {
-                            g_windowed_width = event.window.data1;
-                            g_windowed_height = event.window.data2;
-                        }
-                        update_game_viewport();
-                    }
-                    break;
+        while (g_app_suspended) {
+            if (!SDL_WaitEvent(&event)) {
+                continue;
+            }
+            if (ImGui::GetCurrentContext() != NULL) {
+                ImGui_ImplSDL2_ProcessEvent(&event);
+            }
+            if (!handle_runtime_event(&event, ctx)) {
+                return false;
             }
         }
     }
@@ -1423,6 +1951,9 @@ bool gb_platform_poll_events(GBContext* ctx) {
 
     uint8_t new_script_dpad = (uint8_t)(previous_script_dpad & (uint8_t)(~g_script_joypad_dpad) & 0x0F);
     uint8_t new_script_buttons = (uint8_t)(previous_script_buttons & (uint8_t)(~g_script_joypad_buttons) & 0x0F);
+    uint8_t joyp = ctx ? ctx->io[0x00] : 0xFF;
+    bool dpad_selected = !(joyp & 0x10);
+    bool buttons_selected = !(joyp & 0x20);
     if (ctx && ((new_script_dpad && dpad_selected) || (new_script_buttons && buttons_selected))) {
         request_joypad_interrupt(ctx);
     }
@@ -1462,7 +1993,7 @@ uint8_t gb_platform_get_joypad(void) {
 }
 
 void gb_platform_vsync(uint32_t frame_cycles) {
-    if (g_benchmark_mode) {
+    if (g_benchmark_mode || g_app_suspended) {
         g_last_timing.pacing_cycles = (frame_cycles > 0) ? frame_cycles : 70224u;
         g_last_timing.pacing_ms = 0.0;
         return;
@@ -1566,26 +2097,23 @@ void gb_platform_set_title(const char* title) {
  * ========================================================================== */
 
 static void sdl_get_save_path(char* buffer, size_t size, const char* rom_name) {
+    const std::string base_name = extract_path_leaf(rom_name);
+    const std::string filename = base_name + ".sav";
+
+#if defined(__ANDROID__)
+    const std::string resolved = resolve_writable_path(filename.c_str(), base_name.c_str());
+    snprintf(buffer, size, "%s", resolved.c_str());
+#else
     char* base_path = SDL_GetBasePath();
     if (base_path) {
-        // Extract just the filename from rom_name to avoid path traversal issues
-        const char* base_name = strrchr(rom_name, '/');
-#ifdef _WIN32
-        const char* base_name_win = strrchr(rom_name, '\\');
-        if (base_name_win > base_name) base_name = base_name_win;
-#endif
-        if (base_name) {
-            base_name++; // Skip separator
-        } else {
-            base_name = rom_name;
-        }
-
-        snprintf(buffer, size, "%s%s.sav", base_path, base_name);
+        fs::path resolved = fs::path(base_path) / filename;
         SDL_free(base_path);
+        snprintf(buffer, size, "%s", resolved.lexically_normal().string().c_str());
     } else {
-        // Fallback to CWD if SDL_GetBasePath fails
-        snprintf(buffer, size, "%s.sav", rom_name);
+        const std::string resolved = resolve_writable_path(filename.c_str(), base_name.c_str());
+        snprintf(buffer, size, "%s", resolved.c_str());
     }
+#endif
 }
 
 static bool sdl_load_battery_ram(GBContext* ctx, const char* rom_name, void* data, size_t size) {

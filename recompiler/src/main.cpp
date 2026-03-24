@@ -51,6 +51,9 @@ void print_usage(const char* program) {
     std::cout << "  --trace               Trace execution analysis (very verbose)\n";
     std::cout << "  --limit <n>           Limit analysis to n instructions\n";
     std::cout << "  -j, --jobs <n>        Parallel workers for codegen and batch generation (0=auto)\n";
+    std::cout << "  --android             Also emit an Android project scaffold (single-ROM only)\n";
+    std::cout << "  --android-package <p> Android Java package (default: io.gbrecompiled.<game>)\n";
+    std::cout << "  --android-app-name <n> Android app name (default: ROM title)\n";
     std::cout << "  --single-function     Generate all code in a single function\n";
     std::cout << "  --no-comments         Don't include disassembly comments\n";
     std::cout << "  --bank <n>            Only process bank n\n";
@@ -192,6 +195,9 @@ struct GenerationOptions {
     std::vector<uint32_t> manual_entry_points;
     std::string trace_file_path;
     std::string symbol_file_path;
+    bool emit_android_project = false;
+    std::string android_package;
+    std::string android_app_name;
 };
 
 struct MultiRomModule {
@@ -364,12 +370,460 @@ static std::string build_runtime_relative_path(const fs::path& output_dir) {
 }
 
 static bool write_text_file(const fs::path& path, const std::string& content) {
+    if (!path.parent_path().empty()) {
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        if (ec) {
+            return false;
+        }
+    }
     std::ofstream out(path);
     if (!out) {
         return false;
     }
     out << content;
     return static_cast<bool>(out);
+}
+
+static std::string sanitize_java_package_segment(const std::string& name) {
+    std::string result;
+    result.reserve(name.size() + 4);
+
+    for (unsigned char ch : name) {
+        if (std::isalnum(ch)) {
+            result.push_back((char)std::tolower(ch));
+        } else {
+            result.push_back('_');
+        }
+    }
+
+    if (result.empty()) {
+        result = "game";
+    }
+    if (std::isdigit((unsigned char)result.front())) {
+        result.insert(result.begin(), '_');
+    }
+
+    return result;
+}
+
+static bool is_valid_java_package(const std::string& package_name) {
+    if (package_name.empty()) {
+        return false;
+    }
+
+    size_t start = 0;
+    while (start < package_name.size()) {
+        size_t end = package_name.find('.', start);
+        if (end == std::string::npos) {
+            end = package_name.size();
+        }
+        if (end == start) {
+            return false;
+        }
+
+        const unsigned char first = (unsigned char)package_name[start];
+        if (!(std::isalpha(first) || first == '_')) {
+            return false;
+        }
+
+        for (size_t i = start + 1; i < end; ++i) {
+            const unsigned char ch = (unsigned char)package_name[i];
+            if (!(std::isalnum(ch) || ch == '_')) {
+                return false;
+            }
+        }
+
+        start = end + 1;
+    }
+
+    return true;
+}
+
+static std::string make_default_android_package(const std::string& output_prefix) {
+    return "io.gbrecompiled." + sanitize_java_package_segment(output_prefix);
+}
+
+static std::string escape_xml_string(const std::string& input) {
+    std::ostringstream ss;
+    for (unsigned char ch : input) {
+        switch (ch) {
+            case '&':
+                ss << "&amp;";
+                break;
+            case '<':
+                ss << "&lt;";
+                break;
+            case '>':
+                ss << "&gt;";
+                break;
+            case '"':
+                ss << "&quot;";
+                break;
+            case '\'':
+                ss << "&apos;";
+                break;
+            default:
+                if (ch < 0x20 && ch != '\n' && ch != '\r' && ch != '\t') {
+                    ss << '?';
+                } else {
+                    ss << static_cast<char>(ch);
+                }
+                break;
+        }
+    }
+    return ss.str();
+}
+
+static std::string make_relative_path(const fs::path& from_dir, const fs::path& to_path) {
+    try {
+        return fs::relative(fs::absolute(to_path), fs::absolute(from_dir)).generic_string();
+    } catch (...) {
+        return fs::absolute(to_path).generic_string();
+    }
+}
+
+static std::string java_package_to_path(const std::string& package_name) {
+    std::string path = package_name;
+    std::replace(path.begin(), path.end(), '.', '/');
+    return path;
+}
+
+static std::vector<std::string> collect_generated_source_files(const gbrecomp::codegen::GeneratedOutput& output) {
+    std::vector<std::string> source_files;
+    if (!output.main_file.empty()) {
+        source_files.push_back(output.main_file);
+    }
+    if (!output.source_file.empty()) {
+        source_files.push_back(output.source_file);
+    }
+    for (const auto& extra_file : output.extra_files) {
+        if (extra_file.is_source) {
+            source_files.push_back(extra_file.filename);
+        }
+    }
+    if (!output.rom_data_file.empty()) {
+        source_files.push_back(output.rom_data_file);
+    }
+    return source_files;
+}
+
+static std::string make_android_settings_gradle(const std::string& project_name) {
+    std::ostringstream ss;
+    ss << "pluginManagement {\n";
+    ss << "    repositories {\n";
+    ss << "        google()\n";
+    ss << "        mavenCentral()\n";
+    ss << "        gradlePluginPortal()\n";
+    ss << "    }\n";
+    ss << "}\n\n";
+    ss << "dependencyResolutionManagement {\n";
+    ss << "    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n";
+    ss << "    repositories {\n";
+    ss << "        google()\n";
+    ss << "        mavenCentral()\n";
+    ss << "    }\n";
+    ss << "}\n\n";
+    ss << "rootProject.name = \"" << escape_c_string(project_name) << "-android\"\n";
+    ss << "include(\":app\")\n";
+    return ss.str();
+}
+
+static std::string make_android_root_build_gradle(void) {
+    return R"GRADLE(plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
+)GRADLE";
+}
+
+static std::string make_android_gradle_properties(void) {
+    return R"PROPS(org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.nonTransitiveRClass=true
+)PROPS";
+}
+
+static std::string make_android_gitignore(void) {
+    return R"GITIGNORE(.gradle/
+build/
+app/build/
+local.properties
+captures/
+)GITIGNORE";
+}
+
+static std::string make_android_app_build_gradle(const std::string& android_package) {
+    std::ostringstream ss;
+    ss << "plugins {\n";
+    ss << "    id 'com.android.application'\n";
+    ss << "}\n\n";
+    ss << "def sdl2SourceDir = providers.gradleProperty(\"SDL2_SOURCE_DIR\").orNull ?: System.getenv(\"SDL2_SOURCE_DIR\")\n";
+    ss << "if (!sdl2SourceDir) {\n";
+    ss << "    throw new GradleException(\"SDL2_SOURCE_DIR is required. Set the Gradle property or environment variable SDL2_SOURCE_DIR to an SDL2 source checkout.\")\n";
+    ss << "}\n\n";
+    ss << "android {\n";
+    ss << "    namespace \"" << android_package << "\"\n";
+    ss << "    compileSdk 34\n\n";
+    ss << "    defaultConfig {\n";
+    ss << "        applicationId \"" << android_package << "\"\n";
+    ss << "        minSdk 24\n";
+    ss << "        targetSdk 34\n";
+    ss << "        versionCode 1\n";
+    ss << "        versionName \"1.0\"\n";
+    ss << "        externalNativeBuild {\n";
+    ss << "            cmake {\n";
+    ss << "                arguments \"-DANDROID_STL=c++_shared\", \"-DSDL2_SOURCE_DIR=${sdl2SourceDir}\"\n";
+    ss << "                abiFilters \"arm64-v8a\"\n";
+    ss << "            }\n";
+    ss << "        }\n";
+    ss << "    }\n\n";
+    ss << "    buildTypes {\n";
+    ss << "        debug {\n";
+    ss << "            debuggable true\n";
+    ss << "        }\n";
+    ss << "        release {\n";
+    ss << "            minifyEnabled false\n";
+    ss << "            proguardFiles getDefaultProguardFile(\"proguard-android-optimize.txt\"), \"proguard-rules.pro\"\n";
+    ss << "        }\n";
+    ss << "    }\n\n";
+    ss << "    externalNativeBuild {\n";
+    ss << "        cmake {\n";
+    ss << "            path file(\"jni/CMakeLists.txt\")\n";
+    ss << "        }\n";
+    ss << "    }\n\n";
+    ss << "    sourceSets {\n";
+    ss << "        main {\n";
+    ss << "            java.srcDirs += [file(\"${sdl2SourceDir}/android-project/app/src/main/java\")]\n";
+    ss << "        }\n";
+    ss << "    }\n\n";
+    ss << "    lint {\n";
+    ss << "        abortOnError false\n";
+    ss << "    }\n";
+    ss << "}\n";
+    return ss.str();
+}
+
+static std::string make_android_proguard_rules(void) {
+    return "# Intentionally empty for generated debug-friendly builds.\n";
+}
+
+static std::string make_android_manifest(const std::string& android_package) {
+    std::ostringstream ss;
+    ss << "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
+    ss << "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n\n";
+    ss << "    <uses-feature android:name=\"android.hardware.touchscreen\" android:required=\"false\" />\n";
+    ss << "    <uses-feature android:name=\"android.hardware.gamepad\" android:required=\"false\" />\n";
+    ss << "    <uses-feature android:name=\"android.hardware.bluetooth\" android:required=\"false\" />\n";
+    ss << "    <uses-feature android:name=\"android.hardware.usb.host\" android:required=\"false\" />\n";
+    ss << "    <uses-feature android:name=\"android.hardware.type.pc\" android:required=\"false\" />\n";
+    ss << "    <uses-permission android:name=\"android.permission.VIBRATE\" />\n\n";
+    ss << "    <application\n";
+    ss << "        android:allowBackup=\"true\"\n";
+    ss << "        android:hardwareAccelerated=\"true\"\n";
+    ss << "        android:label=\"@string/app_name\">\n";
+    ss << "        <meta-data android:name=\"SDL_ENV.SDL_ANDROID_TRAP_BACK_BUTTON\" android:value=\"1\" />\n";
+    ss << "        <activity\n";
+    ss << "            android:name=\"" << escape_xml_string(android_package) << ".GameActivity\"\n";
+    ss << "            android:alwaysRetainTaskState=\"true\"\n";
+    ss << "            android:configChanges=\"layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation\"\n";
+    ss << "            android:exported=\"true\"\n";
+    ss << "            android:label=\"@string/app_name\"\n";
+    ss << "            android:launchMode=\"singleTask\"\n";
+    ss << "            android:preferMinimalPostProcessing=\"true\"\n";
+    ss << "            android:screenOrientation=\"landscape\">\n";
+    ss << "            <intent-filter>\n";
+    ss << "                <action android:name=\"android.intent.action.MAIN\" />\n";
+    ss << "                <category android:name=\"android.intent.category.LAUNCHER\" />\n";
+    ss << "            </intent-filter>\n";
+    ss << "        </activity>\n";
+    ss << "    </application>\n";
+    ss << "</manifest>\n";
+    return ss.str();
+}
+
+static std::string make_android_strings_xml(const std::string& app_name) {
+    std::ostringstream ss;
+    ss << "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
+    ss << "<resources>\n";
+    ss << "    <string name=\"app_name\">" << escape_xml_string(app_name) << "</string>\n";
+    ss << "</resources>\n";
+    return ss.str();
+}
+
+static std::string make_android_activity_java(const std::string& android_package) {
+    std::ostringstream ss;
+    ss << "package " << android_package << ";\n\n";
+    ss << "import org.libsdl.app.SDLActivity;\n\n";
+    ss << "public final class GameActivity extends SDLActivity {\n";
+    ss << "}\n";
+    return ss.str();
+}
+
+static std::string make_android_jni_cmake(void) {
+    return R"CMAKE(cmake_minimum_required(VERSION 3.16)
+
+project(gbrecomp_android_host C CXX)
+
+if(NOT DEFINED SDL2_SOURCE_DIR OR SDL2_SOURCE_DIR STREQUAL "")
+    if(DEFINED ENV{SDL2_SOURCE_DIR} AND NOT "$ENV{SDL2_SOURCE_DIR}" STREQUAL "")
+        set(SDL2_SOURCE_DIR "$ENV{SDL2_SOURCE_DIR}")
+    endif()
+endif()
+
+if(NOT DEFINED SDL2_SOURCE_DIR OR SDL2_SOURCE_DIR STREQUAL "")
+    message(FATAL_ERROR "SDL2_SOURCE_DIR is required. Set the Gradle property or environment variable SDL2_SOURCE_DIR to an SDL2 source checkout.")
+endif()
+
+get_filename_component(SDL2_SOURCE_DIR "${SDL2_SOURCE_DIR}" ABSOLUTE)
+if(NOT EXISTS "${SDL2_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "SDL2_SOURCE_DIR='${SDL2_SOURCE_DIR}' does not point to an SDL2 source tree.")
+endif()
+
+add_subdirectory("${SDL2_SOURCE_DIR}" SDL EXCLUDE_FROM_ALL)
+add_subdirectory(src)
+)CMAKE";
+}
+
+static std::string make_android_jni_src_cmake(const fs::path& output_dir,
+                                              const std::string& output_prefix,
+                                              const gbrecomp::codegen::GeneratedOutput& output) {
+    const fs::path src_dir = output_dir / "android" / "app" / "jni" / "src";
+    const fs::path runtime_dir = fs::absolute(output_dir / build_runtime_relative_path(output_dir));
+    const std::string output_rel = make_relative_path(src_dir, output_dir);
+    const std::string runtime_rel = make_relative_path(src_dir, runtime_dir);
+    const std::vector<std::string> generated_source_files = collect_generated_source_files(output);
+
+    std::ostringstream ss;
+    ss << "cmake_minimum_required(VERSION 3.16)\n\n";
+    ss << "project(" << output_prefix << "_android_runtime C CXX)\n\n";
+    ss << "set(CMAKE_C_STANDARD 11)\n";
+    ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n";
+    ss << "set(CMAKE_CXX_STANDARD 17)\n";
+    ss << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
+    ss << "set(GBRECOMP_OUT_DIR \"${CMAKE_CURRENT_LIST_DIR}/" << output_rel << "\")\n";
+    ss << "set(GBRT_DIR \"${CMAKE_CURRENT_LIST_DIR}/" << runtime_rel << "\")\n\n";
+    ss << "if(TARGET SDL2::SDL2)\n";
+    ss << "    set(GBRECOMP_SDL_TARGET SDL2::SDL2)\n";
+    ss << "elseif(TARGET SDL2)\n";
+    ss << "    set(GBRECOMP_SDL_TARGET SDL2)\n";
+    ss << "elseif(TARGET SDL2-static)\n";
+    ss << "    set(GBRECOMP_SDL_TARGET SDL2-static)\n";
+    ss << "else()\n";
+    ss << "    message(FATAL_ERROR \"Unable to find an SDL2 CMake target after adding SDL2_SOURCE_DIR\")\n";
+    ss << "endif()\n\n";
+    ss << "if(TARGET SDL2::SDL2main)\n";
+    ss << "    set(GBRECOMP_SDL_MAIN_TARGET SDL2::SDL2main)\n";
+    ss << "elseif(TARGET SDL2main)\n";
+    ss << "    set(GBRECOMP_SDL_MAIN_TARGET SDL2main)\n";
+    ss << "else()\n";
+    ss << "    set(GBRECOMP_SDL_MAIN_TARGET \"\")\n";
+    ss << "endif()\n\n";
+    ss << "add_library(gbrt STATIC\n";
+    ss << "    ${GBRT_DIR}/src/gbrt.c\n";
+    ss << "    ${GBRT_DIR}/src/differential.c\n";
+    ss << "    ${GBRT_DIR}/src/ppu.c\n";
+    ss << "    ${GBRT_DIR}/src/audio.c\n";
+    ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
+    ss << "    ${GBRT_DIR}/src/interpreter.c\n";
+    ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
+    ss << ")\n\n";
+    ss << "target_sources(gbrt PRIVATE\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_draw.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_tables.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_widgets.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdl2.cpp\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
+    ss << ")\n";
+    ss << "target_include_directories(gbrt PUBLIC\n";
+    ss << "    ${GBRT_DIR}/include\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui\n";
+    ss << ")\n";
+    ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n";
+    ss << "target_compile_features(gbrt PUBLIC c_std_11 cxx_std_17)\n";
+    ss << "target_link_libraries(gbrt PUBLIC ${GBRECOMP_SDL_TARGET})\n\n";
+    ss << "add_library(main SHARED\n";
+    for (const auto& filename : generated_source_files) {
+        ss << "    ${GBRECOMP_OUT_DIR}/" << filename << "\n";
+    }
+    ss << ")\n\n";
+    ss << "target_include_directories(main PRIVATE\n";
+    ss << "    ${GBRECOMP_OUT_DIR}\n";
+    ss << "    ${GBRT_DIR}/include\n";
+    ss << "    ${GBRT_DIR}/vendor/imgui\n";
+    ss << ")\n";
+    ss << "set(GBRECOMP_GENERATED_SOURCES\n";
+    for (const auto& filename : generated_source_files) {
+        ss << "    ${GBRECOMP_OUT_DIR}/" << filename << "\n";
+    }
+    ss << ")\n";
+    ss << "if(CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
+    ss << "    target_compile_options(gbrt PRIVATE -O0 -g)\n";
+    ss << "else()\n";
+    ss << "    target_compile_options(gbrt PRIVATE -O3)\n";
+    ss << "    set_source_files_properties(${GBRECOMP_GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS \"-O3\")\n";
+    ss << "endif()\n";
+    ss << "target_link_libraries(main PRIVATE gbrt ${GBRECOMP_SDL_TARGET})\n";
+    ss << "if(GBRECOMP_SDL_MAIN_TARGET)\n";
+    ss << "    target_link_libraries(main PRIVATE ${GBRECOMP_SDL_MAIN_TARGET})\n";
+    ss << "endif()\n";
+    return ss.str();
+}
+
+static std::string make_android_readme(const fs::path& output_dir,
+                                       const std::string& app_name,
+                                       const std::string& android_package) {
+    std::ostringstream ss;
+    ss << "# " << app_name << " Android Scaffold\n\n";
+    ss << "This directory was generated by `gbrecomp --android`.\n\n";
+    ss << "Requirements:\n";
+    ss << "- Android Studio or Gradle with the Android SDK/NDK installed\n";
+    ss << "- An SDL2 source checkout available through `SDL2_SOURCE_DIR`\n\n";
+    ss << "Package: `" << android_package << "`\n";
+    ss << "ABI: `arm64-v8a`\n";
+    ss << "Min SDK: `24`\n";
+    ss << "Target SDK: `34`\n";
+    ss << "Orientation: landscape\n\n";
+    ss << "Default controller mapping:\n";
+    ss << "- D-pad or left stick: move\n";
+    ss << "- Bottom face button (`Xbox A` / `Switch B` / `Cross`): Game Boy `B`\n";
+    ss << "- Right face button (`Xbox B` / `Switch A` / `Circle`): Game Boy `A`\n";
+    ss << "- Left shoulder: Game Boy `B`\n";
+    ss << "- Right shoulder: Game Boy `A`\n";
+    ss << "- Start / Menu: `Start`\n";
+    ss << "- Back / View / Share: `Select`\n";
+    ss << "- Guide / Home or Android Back: open the runtime settings menu\n\n";
+    ss << "Build from the repo root:\n";
+    ss << "```bash\n";
+    ss << "SDL2_SOURCE_DIR=/path/to/SDL gradle -p " << (output_dir / "android").generic_string() << " :app:assembleDebug\n";
+    ss << "```\n\n";
+    ss << "Open `" << (output_dir / "android").generic_string() << "` in Android Studio if you prefer the IDE flow.\n";
+    ss << "The native build will fail fast if `SDL2_SOURCE_DIR` is missing.\n";
+    ss << "This v1 Android scaffold is controller-first and does not include touch gameplay controls.\n";
+    return ss.str();
+}
+
+static bool write_android_project(const fs::path& output_dir,
+                                  const std::string& output_prefix,
+                                  const gbrecomp::codegen::GeneratedOutput& output,
+                                  const std::string& android_package,
+                                  const std::string& android_app_name) {
+    const fs::path android_dir = output_dir / "android";
+    const fs::path package_java_dir = android_dir / "app" / "src" / "main" / "java" / java_package_to_path(android_package);
+
+    return write_text_file(android_dir / "settings.gradle", make_android_settings_gradle(output_prefix)) &&
+           write_text_file(android_dir / "build.gradle", make_android_root_build_gradle()) &&
+           write_text_file(android_dir / "gradle.properties", make_android_gradle_properties()) &&
+           write_text_file(android_dir / ".gitignore", make_android_gitignore()) &&
+           write_text_file(android_dir / "README.md", make_android_readme(output_dir, android_app_name, android_package)) &&
+           write_text_file(android_dir / "app" / "build.gradle", make_android_app_build_gradle(android_package)) &&
+           write_text_file(android_dir / "app" / "proguard-rules.pro", make_android_proguard_rules()) &&
+           write_text_file(android_dir / "app" / "src" / "main" / "AndroidManifest.xml", make_android_manifest(android_package)) &&
+           write_text_file(android_dir / "app" / "src" / "main" / "res" / "values" / "strings.xml", make_android_strings_xml(android_app_name)) &&
+           write_text_file(package_java_dir / "GameActivity.java", make_android_activity_java(android_package)) &&
+           write_text_file(android_dir / "app" / "jni" / "CMakeLists.txt", make_android_jni_cmake()) &&
+           write_text_file(android_dir / "app" / "jni" / "src" / "CMakeLists.txt",
+                           make_android_jni_src_cmake(output_dir, output_prefix, output));
 }
 
 static std::string make_launcher_source(const std::string& launcher_name,
@@ -862,6 +1316,8 @@ static std::string make_multi_rom_cmake(const std::string& project_name,
     ss << "include(CheckIPOSupported)\n\n";
     ss << "set(CMAKE_C_STANDARD 11)\n";
     ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n\n";
+    ss << "set(CMAKE_CXX_STANDARD 17)\n";
+    ss << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     ss << "if(NOT CMAKE_BUILD_TYPE)\n";
     ss << "    set(CMAKE_BUILD_TYPE Release)\n";
     ss << "endif()\n";
@@ -1062,6 +1518,9 @@ int main(int argc, char* argv[]) {
     std::vector<uint32_t> manual_entry_points;
     std::string trace_file_path;
     std::string symbol_file_path;
+    bool emit_android_project = false;
+    std::string android_package;
+    std::string android_app_name;
     
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -1088,6 +1547,16 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-j" || arg == "--jobs") {
             if (i + 1 < argc) {
                 requested_jobs = std::stoul(argv[++i]);
+            }
+        } else if (arg == "--android") {
+            emit_android_project = true;
+        } else if (arg == "--android-package") {
+            if (i + 1 < argc) {
+                android_package = argv[++i];
+            }
+        } else if (arg == "--android-app-name") {
+            if (i + 1 < argc) {
+                android_app_name = argv[++i];
             }
         } else if (arg == "--single-function") {
             single_function = true;
@@ -1137,6 +1606,14 @@ int main(int argc, char* argv[]) {
         print_usage(argv[0]);
         return 1;
     }
+    if (!emit_android_project && (!android_package.empty() || !android_app_name.empty())) {
+        std::cerr << "Error: --android-package and --android-app-name require --android\n";
+        return 1;
+    }
+    if (emit_android_project && (disasm_only || analyze_only)) {
+        std::cerr << "Error: --android is only supported when generating code\n";
+        return 1;
+    }
 
     GenerationOptions generation_opts;
     generation_opts.verbose = verbose;
@@ -1149,6 +1626,9 @@ int main(int argc, char* argv[]) {
     generation_opts.manual_entry_points = manual_entry_points;
     generation_opts.trace_file_path = trace_file_path;
     generation_opts.symbol_file_path = symbol_file_path;
+    generation_opts.emit_android_project = emit_android_project;
+    generation_opts.android_package = android_package;
+    generation_opts.android_app_name = android_app_name;
     
     print_banner();
 
@@ -1156,6 +1636,10 @@ int main(int argc, char* argv[]) {
     if (fs::exists(input_path) && fs::is_directory(input_path)) {
         if (disasm_only || analyze_only) {
             std::cerr << "Error: Directory mode does not support --disasm or --analyze\n";
+            return 1;
+        }
+        if (emit_android_project) {
+            std::cerr << "Error: Android project generation is only supported for single-ROM output in v1\n";
             return 1;
         }
         if (specific_bank >= 0 || !manual_entry_points.empty()) {
@@ -1421,6 +1905,29 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Failed to write output files\n";
         return 1;
     }
+
+    std::string resolved_android_package;
+    std::string resolved_android_app_name;
+    if (emit_android_project) {
+        resolved_android_package = android_package.empty()
+            ? make_default_android_package(gen_opts.output_prefix)
+            : android_package;
+        if (!is_valid_java_package(resolved_android_package)) {
+            std::cerr << "Error: Invalid Android package name '" << resolved_android_package << "'\n";
+            return 1;
+        }
+        resolved_android_app_name = android_app_name;
+        if (resolved_android_app_name.empty()) {
+            resolved_android_app_name = !rom.header().title.empty()
+                ? rom.header().title
+                : gen_opts.output_prefix;
+        }
+        if (!write_android_project(out_path, gen_opts.output_prefix, output,
+                                   resolved_android_package, resolved_android_app_name)) {
+            std::cerr << "Error: Failed to write Android project scaffold\n";
+            return 1;
+        }
+    }
     
     std::cout << "\nGenerated files:\n";
     std::cout << "  " << (out_path / output.header_file) << "\n";
@@ -1430,11 +1937,23 @@ int main(int argc, char* argv[]) {
     if (!output.rom_data_file.empty()) {
         std::cout << "  " << (out_path / output.rom_data_file) << "\n";
     }
+    if (emit_android_project) {
+        std::cout << "  " << (out_path / "android" / "app" / "build.gradle") << "\n";
+        std::cout << "  " << (out_path / "android" / "app" / "jni" / "src" / "CMakeLists.txt") << "\n";
+        std::cout << "  " << (out_path / "android" / "app" / "src" / "main" / "AndroidManifest.xml") << "\n";
+    }
     
     std::cout << "\nBuild instructions:\n";
     std::cout << "  cmake -G Ninja -S " << out_path << " -B " << (out_path / "build") << "\n";
     std::cout << "  ninja -C " << (out_path / "build") << "\n";
     std::cout << "  " << ((out_path / "build") / gen_opts.output_prefix) << "\n";
+    if (emit_android_project) {
+        std::cout << "\nAndroid build instructions:\n";
+        std::cout << "  SDL2_SOURCE_DIR=/path/to/SDL gradle -p " << (out_path / "android") << " :app:assembleDebug\n";
+        std::cout << "  Open " << (out_path / "android") << " in Android Studio if you prefer the IDE flow.\n";
+        std::cout << "  Package: " << resolved_android_package << "\n";
+        std::cout << "  App name: " << resolved_android_app_name << "\n";
+    }
     
     return 0;
 }

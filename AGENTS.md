@@ -138,9 +138,8 @@ python3 tools/benchmark_emulators.py roms/game.gb \
 Important benchmark rules:
 
 - The benchmark script auto-builds a dedicated optimized recompiled binary in `build_bench_o3` by default.
-- That benchmark build uses `GBRECOMP_GENERATED_OPT_LEVEL=3`.
-- This matters because normal generated dev builds intentionally keep generated sources at a lower optimization level for rebuild speed.
-- If you benchmark the edit build directly, you may get misleading "recompiler is slower" results.
+- Generated projects now default to a release-first profile: `Release`, `GBRECOMP_GENERATED_OPT_LEVEL=3`, and IPO/LTO enabled when the toolchain supports it.
+- The dedicated benchmark build still matters because it gives you a clean output directory and an easy place to override optimization knobs without disturbing your day-to-day build tree.
 - Use `--no-recompiled-autobuild` only if you intentionally want to benchmark the exact binary already on disk.
 - The benchmark script already forces headless benchmark mode through environment variables and runtime flags.
 

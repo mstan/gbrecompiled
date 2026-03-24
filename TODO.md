@@ -21,7 +21,7 @@
 - [ ] Improve asset handling, currently they're hardcoded as raw data blobs in the code
 - [x] Fix save not detected on pokemon blue
 - [ ] Implement savestates
-- [ ] Update AGENTS.md
+- [x] Update AGENTS.md
 - [x] Python script to summarize interpreter .log files, showing which functions are hotspots for interpreter fallback and which instructions are causing it
 - [ ] Revisit more aggressive compiler optimizations
  

@@ -828,13 +828,18 @@ static std::string make_multi_rom_cmake(const std::string& project_name,
     std::ostringstream ss;
     ss << "cmake_minimum_required(VERSION 3.16)\n";
     ss << "project(" << project_name << " C CXX)\n\n";
+    ss << "include(CheckIPOSupported)\n\n";
     ss << "set(CMAKE_C_STANDARD 11)\n";
     ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n\n";
     ss << "if(NOT CMAKE_BUILD_TYPE)\n";
     ss << "    set(CMAKE_BUILD_TYPE Release)\n";
     ss << "endif()\n";
     ss << "if(CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang\")\n";
-    ss << "    add_compile_options(-O3)\n";
+    ss << "    if(CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
+    ss << "        add_compile_options(-O0 -g)\n";
+    ss << "    else()\n";
+    ss << "        add_compile_options(-O3)\n";
+    ss << "    endif()\n";
     ss << "endif()\n\n";
     ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
     ss << "find_package(SDL2 REQUIRED)\n\n";
@@ -867,13 +872,24 @@ static std::string make_multi_rom_cmake(const std::string& project_name,
         ss << "    " << filename << "\n";
     }
     ss << ")\n\n";
-    ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"1\" CACHE STRING \"Optimization level for generated ROM source files\")\n";
+    ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"3\" CACHE STRING \"Optimization level for generated ROM source files\")\n";
+    ss << "set_property(CACHE GBRECOMP_GENERATED_OPT_LEVEL PROPERTY STRINGS 0 1 2 3)\n";
+    ss << "option(GBRECOMP_ENABLE_IPO \"Enable interprocedural optimization/LTO for non-Debug builds\" ON)\n";
     ss << "set(GBRECOMP_GENERATED_SOURCES\n";
     for (const std::string& filename : generated_sources) {
         ss << "    " << filename << "\n";
     }
     ss << ")\n";
     ss << "set_source_files_properties(${GBRECOMP_GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS \"-O${GBRECOMP_GENERATED_OPT_LEVEL}\")\n\n";
+    ss << "if(GBRECOMP_ENABLE_IPO AND NOT CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
+    ss << "    check_ipo_supported(RESULT GBRECOMP_IPO_SUPPORTED OUTPUT GBRECOMP_IPO_ERROR)\n";
+    ss << "    if(GBRECOMP_IPO_SUPPORTED)\n";
+    ss << "        set_property(TARGET gbrt PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)\n";
+    ss << "        set_property(TARGET " << project_name << " PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)\n";
+    ss << "    else()\n";
+    ss << "        message(STATUS \"GB Recompiled: IPO/LTO not enabled (${GBRECOMP_IPO_ERROR})\")\n";
+    ss << "    endif()\n";
+    ss << "endif()\n\n";
     ss << "target_link_libraries(" << project_name << " gbrt)\n";
     return ss.str();
 }

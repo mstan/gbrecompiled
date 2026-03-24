@@ -58,6 +58,8 @@ ninja -C output/game/build
 ./output/game/build/game
 ```
 
+Generated projects default to `Release`, compile the generated ROM sources at `-O3`, and enable IPO/LTO automatically when the local toolchain supports it. For faster iteration while debugging, configure with something like `-DCMAKE_BUILD_TYPE=Debug -DGBRECOMP_GENERATED_OPT_LEVEL=1 -DGBRECOMP_ENABLE_IPO=OFF`.
+
 ### Recompiling Multiple ROMs Into One Launcher
 
 ```bash
@@ -402,7 +404,7 @@ Use `--benchmark` when timing a recompiled binary so the runtime does not sleep 
 
 The helper script below benchmarks the generated binary against PyBoy by default, repeats each run, samples peak RSS with `psutil`, and writes optional JSON for later comparison.
 
-By default, it also auto-builds a dedicated benchmark binary in `build_bench_o3` with `GBRECOMP_GENERATED_OPT_LEVEL=3`, so you do not accidentally compare PyBoy against a lower-optimization edit build:
+Generated projects already default to the release-oriented optimization profile described above. By default, the benchmark helper still auto-builds a dedicated binary in `build_bench_o3` so the benchmark runs from a clean build directory and can override the generated-source optimization level when needed:
 
 ```bash
 python3 tools/benchmark_emulators.py roms/tetris.gb \

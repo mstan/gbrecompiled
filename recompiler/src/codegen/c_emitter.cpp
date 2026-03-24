@@ -3312,6 +3312,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         std::ostringstream cmake_ss;
         cmake_ss << "cmake_minimum_required(VERSION 3.16)\n";
         cmake_ss << "project(" << options.output_prefix << " C CXX)\n\n";
+        cmake_ss << "include(CheckIPOSupported)\n\n";
         cmake_ss << "# Set C standard\n";
         cmake_ss << "set(CMAKE_C_STANDARD 11)\n";
         cmake_ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n\n";
@@ -3320,7 +3321,11 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    set(CMAKE_BUILD_TYPE Release)\n";
         cmake_ss << "endif()\n";
         cmake_ss << "if(CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang\")\n";
-        cmake_ss << "    add_compile_options(-O3)\n";
+        cmake_ss << "    if(CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
+        cmake_ss << "        add_compile_options(-O0 -g)\n";
+        cmake_ss << "    else()\n";
+        cmake_ss << "        add_compile_options(-O3)\n";
+        cmake_ss << "    endif()\n";
         cmake_ss << "endif()\n\n";
         // Calculate relative path to runtime
         namespace fs = std::filesystem;
@@ -3403,14 +3408,26 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
         cmake_ss << "    " << options.output_prefix << "_rom.c\n";
         cmake_ss << ")\n\n";
-        cmake_ss << "# The generated ROM translation unit is very large; keep it below -O3 so rebuilds stay practical.\n";
-        cmake_ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"1\" CACHE STRING \"Optimization level for the generated ROM source file\")\n";
+        cmake_ss << "# Generated ROM code defaults to the same release-first optimization profile as the runtime.\n";
+        cmake_ss << "# Lower GBRECOMP_GENERATED_OPT_LEVEL or disable GBRECOMP_ENABLE_IPO if you want faster edit/debug builds.\n";
+        cmake_ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"3\" CACHE STRING \"Optimization level for the generated ROM source file\")\n";
+        cmake_ss << "set_property(CACHE GBRECOMP_GENERATED_OPT_LEVEL PROPERTY STRINGS 0 1 2 3)\n";
+        cmake_ss << "option(GBRECOMP_ENABLE_IPO \"Enable interprocedural optimization/LTO for non-Debug builds\" ON)\n";
         cmake_ss << "set(GBRECOMP_GENERATED_SOURCES\n";
         for (const auto& filename : generated_source_files) {
             cmake_ss << "    " << filename << "\n";
         }
         cmake_ss << ")\n";
         cmake_ss << "set_source_files_properties(${GBRECOMP_GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS \"-O${GBRECOMP_GENERATED_OPT_LEVEL}\")\n\n";
+        cmake_ss << "if(GBRECOMP_ENABLE_IPO AND NOT CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
+        cmake_ss << "    check_ipo_supported(RESULT GBRECOMP_IPO_SUPPORTED OUTPUT GBRECOMP_IPO_ERROR)\n";
+        cmake_ss << "    if(GBRECOMP_IPO_SUPPORTED)\n";
+        cmake_ss << "        set_property(TARGET gbrt PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)\n";
+        cmake_ss << "        set_property(TARGET " << options.output_prefix << " PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)\n";
+        cmake_ss << "    else()\n";
+        cmake_ss << "        message(STATUS \"GB Recompiled: IPO/LTO not enabled (${GBRECOMP_IPO_ERROR})\")\n";
+        cmake_ss << "    endif()\n";
+        cmake_ss << "endif()\n\n";
         cmake_ss << "target_link_libraries(" << options.output_prefix << " gbrt)\n";
         output.cmake_content = cmake_ss.str();
         output.cmake_file = "CMakeLists.txt";

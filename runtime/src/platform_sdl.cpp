@@ -43,6 +43,7 @@ static int g_speed_percent = 100;
 static int g_palette_idx = 0;
 static bool g_smooth_lcd_transitions = true;
 static bool g_launcher_return_enabled = false;
+static bool g_benchmark_mode = false;
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
 static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
@@ -118,6 +119,20 @@ static int g_dump_count = 0;
 static uint32_t g_dump_present_frames[MAX_DUMP_FRAMES];
 static int g_dump_present_count = 0;
 static char g_screenshot_prefix[64] = "screenshot";
+
+static bool env_flag_enabled(const char* name) {
+    const char* value = SDL_getenv(name);
+    if (!value || !value[0]) {
+        return false;
+    }
+    return strcmp(value, "1") == 0 ||
+           strcmp(value, "true") == 0 ||
+           strcmp(value, "TRUE") == 0 ||
+           strcmp(value, "yes") == 0 ||
+           strcmp(value, "YES") == 0 ||
+           strcmp(value, "on") == 0 ||
+           strcmp(value, "ON") == 0;
+}
 
 static bool frame_is_selected_for_dump(const uint32_t* frames, int count, uint32_t frame) {
     for (int i = 0; i < count; i++) {
@@ -436,13 +451,11 @@ static void ensure_lcd_off_framebuffer(void) {
 }
 
 static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_frame) {
-    if (!g_texture || !g_renderer || !framebuffer) {
+    if (!framebuffer) {
         DBG_FRAME("Platform render_frame: SKIPPED (null: texture=%d, renderer=%d, fb=%d)",
                   g_texture == NULL, g_renderer == NULL, framebuffer == NULL);
         return;
     }
-
-    double total_render_start_ms = sdl_now_ms();
     g_present_count++;
     if (count_guest_frame) {
         g_frame_count++;
@@ -469,6 +482,20 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                  (unsigned long long)g_present_count);
         save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
     }
+
+    if (g_benchmark_mode || !g_texture || !g_renderer) {
+        DBG_FRAME("Platform render_frame: host render skipped (benchmark=%d texture=%d renderer=%d)",
+                  g_benchmark_mode ? 1 : 0,
+                  g_texture == NULL,
+                  g_renderer == NULL);
+        g_last_timing.upload_ms = 0.0;
+        g_last_timing.compose_ms = 0.0;
+        g_last_timing.present_ms = 0.0;
+        g_last_timing.total_render_ms = 0.0;
+        return;
+    }
+
+    double total_render_start_ms = sdl_now_ms();
 
     /* Debug: check framebuffer content on first few guest frames */
     if (count_guest_frame && g_frame_count <= 3) {
@@ -687,9 +714,11 @@ void gb_platform_shutdown(void) {
     g_audio_started = false;
     g_audio_start_threshold = 0;
     
-    ImGui_ImplSDLRenderer2_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
-    ImGui::DestroyContext();
+    if (ImGui::GetCurrentContext() != NULL) {
+        ImGui_ImplSDLRenderer2_Shutdown();
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+    }
 
     if (g_texture) {
         SDL_DestroyTexture(g_texture);
@@ -705,6 +734,10 @@ void gb_platform_shutdown(void) {
     }
     g_registered_ctx = NULL;
     SDL_Quit();
+}
+
+void gb_platform_set_benchmark_mode(bool enabled) {
+    g_benchmark_mode = enabled;
 }
 
 void gb_platform_set_launcher_return_enabled(bool enabled) {
@@ -812,6 +845,7 @@ static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
 }
 
 bool gb_platform_init(int scale) {
+    g_benchmark_mode = g_benchmark_mode || env_flag_enabled("GBRECOMP_BENCHMARK");
     g_scale = scale;
     if (g_scale < 1) g_scale = 1;
     if (g_scale > 8) g_scale = 8;
@@ -822,6 +856,24 @@ bool gb_platform_init(int scale) {
     g_script_joypad_buttons = 0xFF;
     g_script_joypad_dpad = 0xFF;
     update_effective_joypad_state();
+    g_last_guest_framebuffer_valid = false;
+    g_present_count = 0;
+    g_last_timing = {};
+
+    if (g_benchmark_mode) {
+        if (!SDL_getenv("SDL_VIDEODRIVER")) {
+            SDL_setenv("SDL_VIDEODRIVER", "dummy", 0);
+        }
+        if (!SDL_getenv("SDL_AUDIODRIVER")) {
+            SDL_setenv("SDL_AUDIODRIVER", "dummy", 0);
+        }
+        if (SDL_Init(SDL_INIT_TIMER) < 0) {
+            fprintf(stderr, "[SDL] SDL_Init failed in benchmark mode: %s\n", SDL_GetError());
+            return false;
+        }
+        g_last_frame_time = SDL_GetTicks();
+        return true;
+    }
     
     fprintf(stderr, "[SDL] Initializing SDL...\n");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
@@ -945,164 +997,166 @@ bool gb_platform_poll_events(GBContext* ctx) {
     uint8_t joyp = ctx ? ctx->io[0x00] : 0xFF;
     bool dpad_selected = !(joyp & 0x10);
     bool buttons_selected = !(joyp & 0x20);
-    
-    while (SDL_PollEvent(&event)) {
-         ImGui_ImplSDL2_ProcessEvent(&event);
-         if (event.type == SDL_QUIT) return false;
-         if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(g_window))
-            return false;
 
-        switch (event.type) {
-                case SDL_CONTROLLERAXISMOTION: {
-                const int deadzone = 8000;
+    if (!g_benchmark_mode) {
+        while (SDL_PollEvent(&event)) {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+            if (event.type == SDL_QUIT) return false;
+            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(g_window))
+                return false;
 
-                if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
-                    if (event.caxis.value > deadzone) {
-                        g_manual_joypad_dpad &= ~0x01;
-                        g_manual_joypad_dpad |= 0x02;
-                    } else if (event.caxis.value < -deadzone) {
-                        g_manual_joypad_dpad &= ~0x02;
-                        g_manual_joypad_dpad |= 0x01;
-                    } else {
-                        g_manual_joypad_dpad |= 0x01;
-                        g_manual_joypad_dpad |= 0x02;
-                    }
-                }
+            switch (event.type) {
+                    case SDL_CONTROLLERAXISMOTION: {
+                    const int deadzone = 8000;
 
-                if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
-                    if (event.caxis.value > deadzone) {
-                        g_manual_joypad_dpad &= ~0x08;
-                        g_manual_joypad_dpad |= 0x04;
-                    } else if (event.caxis.value < -deadzone) {
-                        g_manual_joypad_dpad &= ~0x04;
-                        g_manual_joypad_dpad |= 0x08;
-                    } else {
-                        g_manual_joypad_dpad |= 0x04;
-                        g_manual_joypad_dpad |= 0x08;
-                    }
-                }
-
-                break;
-            }
-
-            case SDL_CONTROLLERBUTTONDOWN:
-            case SDL_CONTROLLERBUTTONUP: {
-                bool pressed = (event.type == SDL_CONTROLLERBUTTONDOWN);
-
-                switch (event.cbutton.button) {
-                    case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                        if (pressed) g_manual_joypad_dpad &= ~0x04;
-                        else g_manual_joypad_dpad |= 0x04;
-                        break;
-
-                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                        if (pressed) g_manual_joypad_dpad &= ~0x08;
-                        else g_manual_joypad_dpad |= 0x08;
-                        break;
-
-                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                        if (pressed) g_manual_joypad_dpad &= ~0x02;
-                        else g_manual_joypad_dpad |= 0x02;
-                        break;
-
-                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                        if (pressed) g_manual_joypad_dpad &= ~0x01;
-                        else g_manual_joypad_dpad |= 0x01;
-                        break;
-
-                    case SDL_CONTROLLER_BUTTON_A:
-                        if (pressed) g_manual_joypad_buttons &= ~0x01;
-                        else g_manual_joypad_buttons |= 0x01;
-                        break;
-
-                    case SDL_CONTROLLER_BUTTON_B:
-                        if (pressed) g_manual_joypad_buttons &= ~0x02;
-                        else g_manual_joypad_buttons |= 0x02;
-                        break;
-
-                    case SDL_CONTROLLER_BUTTON_START:
-                        if (pressed) g_manual_joypad_buttons &= ~0x08;
-                        else g_manual_joypad_buttons |= 0x08;
-                        break;
-
-                    case SDL_CONTROLLER_BUTTON_BACK:
-                        if (pressed) g_manual_joypad_buttons &= ~0x04;
-                        else g_manual_joypad_buttons |= 0x04;
-                        break;
-                }
-                break;
-            }
-
-            case SDL_KEYDOWN:
-            case SDL_KEYUP: {
-                bool pressed = (event.type == SDL_KEYDOWN);
-                bool trigger = false;
-                
-                switch (event.key.keysym.scancode) {
-                    /* D-pad */
-                    case SDL_SCANCODE_UP:
-                    case SDL_SCANCODE_W:
-                        if (pressed) { g_manual_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
-                        else g_manual_joypad_dpad |= 0x04;
-                        break;
-                    case SDL_SCANCODE_DOWN:
-                    case SDL_SCANCODE_S:
-                        if (pressed) { g_manual_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
-                        else g_manual_joypad_dpad |= 0x08;
-                        break;
-                    case SDL_SCANCODE_LEFT:
-                    case SDL_SCANCODE_A:
-                        if (pressed) { g_manual_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
-                        else g_manual_joypad_dpad |= 0x02;
-                        break;
-                    case SDL_SCANCODE_RIGHT:
-                    case SDL_SCANCODE_D:
-                        if (pressed) { g_manual_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
-                        else g_manual_joypad_dpad |= 0x01;
-                        break;
-                    
-                    /* Buttons */
-                    case SDL_SCANCODE_Z:
-                    case SDL_SCANCODE_J:
-                        if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; } /* A */
-                        else g_manual_joypad_buttons |= 0x01;
-                        break;
-                    case SDL_SCANCODE_X:
-                    case SDL_SCANCODE_K:
-                        if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; } /* B */
-                        else g_manual_joypad_buttons |= 0x02;
-                        break;
-                    case SDL_SCANCODE_RSHIFT:
-                    case SDL_SCANCODE_BACKSPACE:
-                        if (pressed) { g_manual_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; } /* Select */
-                        else g_manual_joypad_buttons |= 0x04;
-                        break;
-                    case SDL_SCANCODE_RETURN:
-                        if (pressed) { g_manual_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; } /* Start */
-                        else g_manual_joypad_buttons |= 0x08;
-                        break;
-                    
-                    case SDL_SCANCODE_ESCAPE:
-                        if (pressed) {
-                            g_show_menu = !g_show_menu;
+                    if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+                        if (event.caxis.value > deadzone) {
+                            g_manual_joypad_dpad &= ~0x01;
+                            g_manual_joypad_dpad |= 0x02;
+                        } else if (event.caxis.value < -deadzone) {
+                            g_manual_joypad_dpad &= ~0x02;
+                            g_manual_joypad_dpad |= 0x01;
+                        } else {
+                            g_manual_joypad_dpad |= 0x01;
+                            g_manual_joypad_dpad |= 0x02;
                         }
-                        return true; // Don't block
+                    }
+
+                    if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                        if (event.caxis.value > deadzone) {
+                            g_manual_joypad_dpad &= ~0x08;
+                            g_manual_joypad_dpad |= 0x04;
+                        } else if (event.caxis.value < -deadzone) {
+                            g_manual_joypad_dpad &= ~0x04;
+                            g_manual_joypad_dpad |= 0x08;
+                        } else {
+                            g_manual_joypad_dpad |= 0x04;
+                            g_manual_joypad_dpad |= 0x08;
+                        }
+                    }
+
+                    break;
+                }
+
+                case SDL_CONTROLLERBUTTONDOWN:
+                case SDL_CONTROLLERBUTTONUP: {
+                    bool pressed = (event.type == SDL_CONTROLLERBUTTONDOWN);
+
+                    switch (event.cbutton.button) {
+                        case SDL_CONTROLLER_BUTTON_DPAD_UP:
+                            if (pressed) g_manual_joypad_dpad &= ~0x04;
+                            else g_manual_joypad_dpad |= 0x04;
+                            break;
+
+                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+                            if (pressed) g_manual_joypad_dpad &= ~0x08;
+                            else g_manual_joypad_dpad |= 0x08;
+                            break;
+
+                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+                            if (pressed) g_manual_joypad_dpad &= ~0x02;
+                            else g_manual_joypad_dpad |= 0x02;
+                            break;
+
+                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                            if (pressed) g_manual_joypad_dpad &= ~0x01;
+                            else g_manual_joypad_dpad |= 0x01;
+                            break;
+
+                        case SDL_CONTROLLER_BUTTON_A:
+                            if (pressed) g_manual_joypad_buttons &= ~0x01;
+                            else g_manual_joypad_buttons |= 0x01;
+                            break;
+
+                        case SDL_CONTROLLER_BUTTON_B:
+                            if (pressed) g_manual_joypad_buttons &= ~0x02;
+                            else g_manual_joypad_buttons |= 0x02;
+                            break;
+
+                        case SDL_CONTROLLER_BUTTON_START:
+                            if (pressed) g_manual_joypad_buttons &= ~0x08;
+                            else g_manual_joypad_buttons |= 0x08;
+                            break;
+
+                        case SDL_CONTROLLER_BUTTON_BACK:
+                            if (pressed) g_manual_joypad_buttons &= ~0x04;
+                            else g_manual_joypad_buttons |= 0x04;
+                            break;
+                    }
+                    break;
+                }
+
+                case SDL_KEYDOWN:
+                case SDL_KEYUP: {
+                    bool pressed = (event.type == SDL_KEYDOWN);
+                    bool trigger = false;
+                    
+                    switch (event.key.keysym.scancode) {
+                        /* D-pad */
+                        case SDL_SCANCODE_UP:
+                        case SDL_SCANCODE_W:
+                            if (pressed) { g_manual_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
+                            else g_manual_joypad_dpad |= 0x04;
+                            break;
+                        case SDL_SCANCODE_DOWN:
+                        case SDL_SCANCODE_S:
+                            if (pressed) { g_manual_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
+                            else g_manual_joypad_dpad |= 0x08;
+                            break;
+                        case SDL_SCANCODE_LEFT:
+                        case SDL_SCANCODE_A:
+                            if (pressed) { g_manual_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
+                            else g_manual_joypad_dpad |= 0x02;
+                            break;
+                        case SDL_SCANCODE_RIGHT:
+                        case SDL_SCANCODE_D:
+                            if (pressed) { g_manual_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
+                            else g_manual_joypad_dpad |= 0x01;
+                            break;
                         
-                    default:
-                        break;
+                        /* Buttons */
+                        case SDL_SCANCODE_Z:
+                        case SDL_SCANCODE_J:
+                            if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; } /* A */
+                            else g_manual_joypad_buttons |= 0x01;
+                            break;
+                        case SDL_SCANCODE_X:
+                        case SDL_SCANCODE_K:
+                            if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; } /* B */
+                            else g_manual_joypad_buttons |= 0x02;
+                            break;
+                        case SDL_SCANCODE_RSHIFT:
+                        case SDL_SCANCODE_BACKSPACE:
+                            if (pressed) { g_manual_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; } /* Select */
+                            else g_manual_joypad_buttons |= 0x04;
+                            break;
+                        case SDL_SCANCODE_RETURN:
+                            if (pressed) { g_manual_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; } /* Start */
+                            else g_manual_joypad_buttons |= 0x08;
+                            break;
+                        
+                        case SDL_SCANCODE_ESCAPE:
+                            if (pressed) {
+                                g_show_menu = !g_show_menu;
+                            }
+                            return true; // Don't block
+                            
+                        default:
+                            break;
+                    }
+                    
+                    if (trigger && ctx && event.key.repeat == 0) {
+                        request_joypad_interrupt(ctx);
+                    }
+                    break;
                 }
                 
-                if (trigger && ctx && event.key.repeat == 0) {
-                    request_joypad_interrupt(ctx);
-                }
-                break;
+                case SDL_WINDOWEVENT:
+                    if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+                        /* Handle resize if needed or just let SDL/ImGui handle it */
+                    }
+                    break;
             }
-            
-            case SDL_WINDOWEVENT:
-                if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                    /* Handle resize if needed or just let SDL/ImGui handle it */
-                }
-                break;
         }
     }
     
@@ -1171,6 +1225,11 @@ uint8_t gb_platform_get_joypad(void) {
 }
 
 void gb_platform_vsync(uint32_t frame_cycles) {
+    if (g_benchmark_mode) {
+        g_last_timing.pacing_cycles = (frame_cycles > 0) ? frame_cycles : 70224u;
+        g_last_timing.pacing_ms = 0.0;
+        return;
+    }
     /* 
      * Frame pacing: Run at the DMG frame cadence derived from 70224 cycles
      * at 4194304 Hz, and ease off sleeping when audio fill is too low.
@@ -1260,7 +1319,7 @@ void gb_platform_set_smooth_lcd_transitions(bool enabled) {
 }
 
 void gb_platform_set_title(const char* title) {
-    if (g_window) {
+    if (g_window && !g_benchmark_mode) {
         SDL_SetWindowTitle(g_window, title);
     }
 }
@@ -1357,6 +1416,7 @@ bool gb_platform_poll_events(GBContext* ctx) {
 void gb_platform_set_input_script(const char* script) { (void)script; }
 
 void gb_platform_set_input_record_file(const char* path) { (void)path; }
+void gb_platform_set_benchmark_mode(bool enabled) { (void)enabled; }
 
 void gb_platform_render_frame(const uint32_t* framebuffer) {
     (void)framebuffer;

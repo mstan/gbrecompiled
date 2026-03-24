@@ -10,7 +10,7 @@
 - [x] Graphical launcher for multi-rom support
 - [ ] Per game configurations on multi-rom mode
 - [ ] Benchmark performance and memory usage against emulators
-- [ ] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used. Gather feedback from interpreter hotspots to guide recompiler improvements.
+- [x] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used. Gather feedback from interpreter hotspots to guide recompiler improvements.
 - [ ] Add support for parallel recompilation
 - [ ] Remove mgbdis from repo
 - [ ] Improve handling of imgui dependency
@@ -19,10 +19,11 @@
 - [ ] Guide the recompilation with .json files, entrypoints, function names, data labels, etc. to improve the generated code quality and stability
 - [ ] Fix "ghosting" on screen shake on pokemon blue when receiving damage, likely a timing issue with the current rendering approach
 - [ ] Improve asset handling, currently they're hardcoded as raw data blobs in the code
-- [ ] Fix save not detected on pokemon blue
+- [x] Fix save not detected on pokemon blue
 - [ ] Implement savestates
 - [ ] Update AGENTS.md
-- [ ] Python script to summarize interpreter .log files, showing which functions are hotspots for interpreter fallback and which instructions are causing it
+- [x] Python script to summarize interpreter .log files, showing which functions are hotspots for interpreter fallback and which instructions are causing it
+- [ ] Revisit more aggressive compiler optimizations
  
 # Platforms
 - [ ] Android support

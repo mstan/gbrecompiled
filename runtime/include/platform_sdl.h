@@ -50,6 +50,11 @@ bool gb_platform_init(int scale);
 void gb_platform_register_context(GBContext* ctx);
 
 /**
+ * @brief Enable a headless benchmark mode with no host pacing or UI work.
+ */
+void gb_platform_set_benchmark_mode(bool enabled);
+
+/**
  * @brief Enable or disable the launcher return action in the runtime menu.
  */
 void gb_platform_set_launcher_return_enabled(bool enabled);

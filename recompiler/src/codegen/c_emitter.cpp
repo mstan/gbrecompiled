@@ -3023,6 +3023,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    bool report_interpreter_hotspots = false;\n";
     main_ss << "    unsigned long interpreter_hotspot_limit = 8;\n";
     main_ss << "    int smooth_lcd_transitions_override = -1;\n";
+    main_ss << "    bool benchmark_mode = false;\n";
     main_ss << "    for (int i = 1; i < argc; i++) {\n";
     main_ss << "        if (strcmp(argv[i], \"--log-file\") == 0 && i + 1 < argc) {\n";
     main_ss << "            log_file = argv[++i];\n";
@@ -3099,6 +3100,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            differential_log_fallbacks = true;\n";
     main_ss << "        } else if (strcmp(argv[i], \"--differential-fail-on-fallback\") == 0) {\n";
     main_ss << "            differential_fail_on_fallback = true;\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--benchmark\") == 0) {\n";
+    main_ss << "            benchmark_mode = true;\n";
     main_ss << "        }\n";
     main_ss << "    }\n\n";
     main_ss << "    if (debug_performance) {\n";
@@ -3155,6 +3158,9 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    audio_stats_set_log_to_console(audio_stats_console);\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
     main_ss << "    // Initialize SDL2 platform with 3x scaling\n";
+    main_ss << "    if (benchmark_mode) {\n";
+    main_ss << "        gb_platform_set_benchmark_mode(true);\n";
+    main_ss << "    }\n";
     main_ss << "    if (!gb_platform_init(3)) {\n";
     main_ss << "        fprintf(stderr, \"Failed to initialize platform\\n\");\n";
     main_ss << "        gb_context_destroy(ctx);\n";

@@ -298,6 +298,7 @@ When running a recompiled game:
 | `--report-interpreter-hotspots` | Print an end-of-run interpreter summary with total fallback entries, interpreted instructions/cycles, top hotspots, and the last uncovered opcode site |
 | `--interpreter-hotspot-limit <n>` | Limit how many hotspot rows are printed by `--report-interpreter-hotspots` |
 | `--limit-frames <n>` | Stop the run after `n` completed guest frames |
+| `--benchmark` | Run headless and uncapped for benchmarking. Host rendering, audio output, and wall-clock pacing are skipped so the runtime can execute as fast as possible |
 | `--smooth-lcd-transitions` | Force the SDL host smoother on for long guest frames, including LCD-off stretches (default) |
 | `--no-smooth-lcd-transitions` | Disable the SDL host smoother for long guest frames |
 | `--differential [steps]` | Compare generated execution against the interpreter for N steps (default `10000`) |
@@ -394,6 +395,58 @@ python3 tools/compare_lcd_transitions.py roms/game.gb \
 ```
 
 The runtime side of that report uses exact LCDC transition logs. The PyBoy side is sampled at frame boundaries, so it is best used to confirm whether our LCD-off stretches are obviously longer or happening in different places than the reference. The PyBoy helper tools accept cycle-anchored scripts too, but they quantize those presses to frame boundaries during replay.
+
+### Benchmark Against Emulators
+
+Use `--benchmark` when timing a recompiled binary so the runtime does not sleep to real-time or spend time on host UI work.
+
+The helper script below benchmarks the generated binary against PyBoy by default, repeats each run, samples peak RSS with `psutil`, and writes optional JSON for later comparison.
+
+By default, it also auto-builds a dedicated benchmark binary in `build_bench_o3` with `GBRECOMP_GENERATED_OPT_LEVEL=3`, so you do not accidentally compare PyBoy against a lower-optimization edit build:
+
+```bash
+python3 tools/benchmark_emulators.py roms/tetris.gb \
+  --recompiled-binary tetris_test/build/tetris \
+  --frames 1800 \
+  --repeat 5 \
+  --json-out logs/tetris_benchmark.json
+```
+
+The report includes:
+
+- mean wall time per runner
+- guest frames per second
+- effective `x realtime`
+- peak RSS in MB
+- speedup relative to the emulator baseline
+
+If you want to benchmark the existing binary exactly as-is, disable the auto-build step:
+
+```bash
+python3 tools/benchmark_emulators.py roms/tetris.gb \
+  --recompiled-binary tetris_test/build/tetris \
+  --no-recompiled-autobuild
+```
+
+You can also point the optimized benchmark build somewhere else or choose a different generated-source optimization level:
+
+```bash
+python3 tools/benchmark_emulators.py roms/pokeblue.gb \
+  --recompiled-binary output/pokeblue_interpreter_test/build/pokeblue \
+  --recompiled-build-dir output/pokeblue_interpreter_test/build_bench_o3 \
+  --recompiled-opt-level 3
+```
+
+You can add other emulators with custom command templates:
+
+```bash
+python3 tools/benchmark_emulators.py roms/game.gb \
+  --recompiled-binary output/game/build/game \
+  --frames 1200 \
+  --emulator-cmd "OtherEmu=/path/to/emulator {rom}"
+```
+
+Template placeholders available to `--emulator-cmd` are `{rom}`, `{frames}`, `{input}`, `{input_script}`, `{input_file}`, and `{recompiled_binary}`.
 
 ### Controls
 

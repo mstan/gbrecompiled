@@ -619,11 +619,3 @@ Key components:
 This project is licensed under the MIT License.
 
 **Note**: GameBoy is a trademark of Nintendo. This project does not include any copyrighted ROM data. You must provide your own legally obtained ROM files.
-
----
-
-## Acknowledgments
-
-- [Pan Docs](https://gbdev.io/pandocs/) - The definitive GameBoy technical reference
-- The gbdev community for extensive documentation and test ROMs
-- [N64Recomp](https://github.com/Mr-Wiseguy/N64Recomp) - The original recompiler that inspired this project

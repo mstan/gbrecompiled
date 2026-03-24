@@ -3153,9 +3153,6 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    gb_audio_set_debug_capture_seconds(debug_audio_seconds);\n";
     main_ss << "    if (debug_audio_trace) gb_audio_set_debug_trace(true);\n";
     main_ss << "    audio_stats_set_log_to_console(audio_stats_console);\n";
-    main_ss << "    " << options.output_prefix << "_init(ctx);\n";
-    main_ss << "    int exit_code = 0;\n";
-    main_ss << "\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
     main_ss << "    // Initialize SDL2 platform with 3x scaling\n";
     main_ss << "    if (!gb_platform_init(3)) {\n";
@@ -3167,6 +3164,11 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    if (smooth_lcd_transitions_override >= 0) {\n";
     main_ss << "        gb_platform_set_smooth_lcd_transitions(smooth_lcd_transitions_override != 0);\n";
     main_ss << "    }\n";
+    main_ss << "#endif\n";
+    main_ss << "    " << options.output_prefix << "_init(ctx);\n";
+    main_ss << "    int exit_code = 0;\n";
+    main_ss << "\n";
+    main_ss << "#ifdef GB_HAS_SDL2\n";
     main_ss << "    if (report_interpreter_hotspots) {\n";
     main_ss << "        gbrt_enable_interpreter_summary(ctx, (unsigned)interpreter_hotspot_limit);\n";
     main_ss << "    }\n";

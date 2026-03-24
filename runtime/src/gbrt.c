@@ -35,6 +35,7 @@ static uint64_t gbrt_ppu_trace_start_frame = 0;
 static uint64_t gbrt_ppu_trace_end_frame = 0;
 
 static inline void gb_sync(GBContext* ctx);
+static bool gb_context_try_load_battery_ram(GBContext* ctx);
 
 static int gbrt_compare_hotspots_desc(const GBInterpreterHotspot* lhs,
                                       const GBInterpreterHotspot* rhs) {
@@ -228,6 +229,63 @@ static void gbrt_log_vram_write(GBContext* ctx,
  * Context Management
  * ========================================================================== */
 
+static bool gb_cart_type_has_battery(uint8_t type) {
+    switch (type) {
+        case 0x03: /* MBC1+RAM+BATTERY */
+        case 0x06: /* MBC2+BATTERY */
+        case 0x09: /* ROM+RAM+BATTERY */
+        case 0x0D: /* MMM01+RAM+BATTERY */
+        case 0x0F: /* MBC3+TIMER+BATTERY */
+        case 0x10: /* MBC3+TIMER+RAM+BATTERY */
+        case 0x13: /* MBC3+RAM+BATTERY */
+        case 0x1B: /* MBC5+RAM+BATTERY */
+        case 0x1E: /* MBC5+RUMBLE+RAM+BATTERY */
+        case 0x22: /* MBC7+SENSOR+RUMBLE+RAM+BATTERY */
+        case 0xFF: /* HuC1+RAM+BATTERY */
+            return true;
+    }
+    return false;
+}
+
+static void gb_context_get_rom_title(const GBContext* ctx, char title[17]) {
+    memset(title, 0, 17);
+    if (!ctx || !ctx->rom || ctx->rom_size <= 0x143) {
+        strcpy(title, "UNKNOWN_GAME");
+        return;
+    }
+
+    memcpy(title, &ctx->rom[0x134], 16);
+    for (int i = 0; i < 16; i++) {
+        if (title[i] == 0 || title[i] < 32 || title[i] > 126) {
+            title[i] = 0;
+        }
+    }
+    if (title[0] == 0) {
+        strcpy(title, "UNKNOWN_GAME");
+    }
+}
+
+static bool gb_context_try_load_battery_ram(GBContext* ctx) {
+    if (!ctx || !ctx->rom || ctx->rom_size <= 0x149 || !ctx->eram || !ctx->eram_size) {
+        return false;
+    }
+    if (!ctx->callbacks.load_battery_ram) {
+        return false;
+    }
+    if (!gb_cart_type_has_battery(ctx->rom[0x147])) {
+        return false;
+    }
+
+    char title[17];
+    gb_context_get_rom_title(ctx, title);
+    if (!ctx->callbacks.load_battery_ram(ctx, title, ctx->eram, ctx->eram_size)) {
+        return false;
+    }
+
+    printf("[GBRT] Loaded battery RAM for '%s'\n", title);
+    return true;
+}
+
 GBContext* gb_context_create(const GBConfig* config) {
     gbrt_load_ppu_trace_config();
 
@@ -282,7 +340,7 @@ void gb_context_destroy(GBContext* ctx) {
     if (!ctx) return;
     
     /* Save RAM before destroying if available */
-    if (ctx->eram && ctx->ram_enabled && ctx->callbacks.save_battery_ram) {
+    if (ctx->eram && ctx->callbacks.save_battery_ram) {
         gb_context_save_ram(ctx);
     }
     
@@ -439,23 +497,7 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
         uint8_t type = ctx->rom[0x147];
         uint8_t ram_size_code = ctx->rom[0x149];
         
-        /* Check if battery is present */
-        bool has_battery = false;
-        switch (type) {
-            case 0x03: /* MBC1+RAM+BATTERY */
-            case 0x06: /* MBC2+BATTERY */
-            case 0x09: /* ROM+RAM+BATTERY */
-            case 0x0D: /* MMM01+RAM+BATTERY */
-            case 0x0F: /* MBC3+TIMER+BATTERY */
-            case 0x10: /* MBC3+TIMER+RAM+BATTERY */
-            case 0x13: /* MBC3+RAM+BATTERY */
-            case 0x1B: /* MBC5+RAM+BATTERY */
-            case 0x1E: /* MBC5+RUMBLE+RAM+BATTERY */
-            case 0x22: /* MBC7+SENSOR+RUMBLE+RAM+BATTERY */
-            case 0xFF: /* HuC1+RAM+BATTERY */
-                has_battery = true;
-                break;
-        }
+        bool has_battery = gb_cart_type_has_battery(type);
         
         /* Calculate RAM size */
         size_t ram_bytes = 0;
@@ -488,19 +530,8 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
                 printf("[GBRT] Allocated %zu bytes for External RAM\n", ram_bytes);
                 
                 /* Load Save Data if Battery Present */
-                if (has_battery && ctx->callbacks.load_battery_ram) {
-                    /* Get ROM title for filename */
-                    char title[17] = {0};
-                    memcpy(title, &ctx->rom[0x134], 16);
-                    /* Sanitize title */
-                    for(int i=0; i<16; i++) {
-                        if(title[i] == 0 || title[i] < 32 || title[i] > 126) title[i] = 0;
-                    }
-                    if(title[0] == 0) strcpy(title, "UNKNOWN_GAME");
-                    
-                    if (ctx->callbacks.load_battery_ram(ctx, title, ctx->eram, ctx->eram_size)) {
-                         printf("[GBRT] Loaded battery RAM for '%s'\n", title);
-                    }
+                if (has_battery) {
+                    gb_context_try_load_battery_ram(ctx);
                 }
             }
         }
@@ -515,14 +546,8 @@ bool gb_context_save_ram(GBContext* ctx) {
     }
     
     /* Get ROM title for filename */
-    char title[17] = {0};
-    if (ctx->rom_size > 0x143) {
-        memcpy(title, &ctx->rom[0x134], 16);
-        for(int i=0; i<16; i++) {
-            if(title[i] == 0 || title[i] < 32 || title[i] > 126) title[i] = 0;
-        }
-    }
-    if(title[0] == 0) strcpy(title, "UNKNOWN_GAME");
+    char title[17];
+    gb_context_get_rom_title(ctx, title);
     
     bool result = ctx->callbacks.save_battery_ram(ctx, title, ctx->eram, ctx->eram_size);
     if (result) {
@@ -2342,7 +2367,11 @@ bool gb_frame_complete(GBContext* ctx) { return ctx->frame_done != 0; }
 
 void gb_set_platform_callbacks(GBContext* ctx, const GBPlatformCallbacks* c) {
     if (ctx && c) {
+        bool had_load_battery_ram = ctx->callbacks.load_battery_ram != NULL;
         ctx->callbacks = *c;
+        if (!had_load_battery_ram && ctx->callbacks.load_battery_ram) {
+            gb_context_try_load_battery_ram(ctx);
+        }
     }
 }
 

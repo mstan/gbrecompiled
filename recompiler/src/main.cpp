@@ -57,14 +57,50 @@ void print_usage(const char* program) {
     std::cout << "  -h, --help            Show this help\n";
 }
 
-static bool detect_oam_dma_overlay(const gbrecomp::ROM& rom,
-                                   gbrecomp::AnalyzerOptions::RamOverlay& overlay) {
+static std::vector<uint16_t> find_oam_dma_overlay_destinations(const std::vector<uint8_t>& data,
+                                                               uint16_t source_addr,
+                                                               uint16_t overlay_size) {
+    std::vector<uint16_t> destinations;
+    if (overlay_size == 0 || overlay_size > 0xFF || data.size() < 14) {
+        return destinations;
+    }
+
+    for (size_t i = 0; i + 13 < data.size(); ++i) {
+        if (data[i] != 0x0E ||       // LD C,imm8
+            data[i + 2] != 0x06 ||   // LD B,imm8
+            data[i + 4] != 0x21 ||   // LD HL,imm16
+            data[i + 7] != 0x2A ||   // LDI A,(HL)
+            data[i + 8] != 0xE2 ||   // LD (C),A
+            data[i + 9] != 0x0C ||   // INC C
+            data[i + 10] != 0x05 ||  // DEC B
+            data[i + 11] != 0x20 ||  // JR NZ,rel8
+            data[i + 12] != 0xFA ||  // rel8 = -6
+            data[i + 13] != 0xC9) {  // RET
+            continue;
+        }
+
+        uint8_t count = data[i + 3];
+        uint16_t copied_source = static_cast<uint16_t>(data[i + 5] | (data[i + 6] << 8));
+        if (count != overlay_size || copied_source != source_addr) {
+            continue;
+        }
+
+        destinations.push_back(static_cast<uint16_t>(0xFF00 | data[i + 1]));
+    }
+
+    std::sort(destinations.begin(), destinations.end());
+    destinations.erase(std::unique(destinations.begin(), destinations.end()), destinations.end());
+    return destinations;
+}
+
+static std::vector<gbrecomp::AnalyzerOptions::RamOverlay> detect_oam_dma_overlays(const gbrecomp::ROM& rom) {
     const std::vector<uint8_t>& data = rom.bytes();
     const std::vector<uint8_t> wait_pattern = {0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9};
+    std::vector<gbrecomp::AnalyzerOptions::RamOverlay> overlays;
 
     auto it = std::search(data.begin(), data.end(), wait_pattern.begin(), wait_pattern.end());
     if (it == data.end()) {
-        return false;
+        return overlays;
     }
 
     size_t rom_idx = static_cast<size_t>(std::distance(data.begin(), it));
@@ -85,10 +121,20 @@ static bool detect_oam_dma_overlay(const gbrecomp::ROM& rom,
         offset = static_cast<uint16_t>(offset + 0x4000);
     }
 
-    overlay.ram_addr = 0xFF80;
-    overlay.rom_addr = gbrecomp::AnalysisResult::make_addr(bank, offset);
-    overlay.size = overlay_size;
-    return true;
+    std::vector<uint16_t> destinations = find_oam_dma_overlay_destinations(data, offset, overlay_size);
+    if (destinations.empty()) {
+        destinations.push_back(0xFF80);
+    }
+
+    for (uint16_t ram_addr : destinations) {
+        gbrecomp::AnalyzerOptions::RamOverlay overlay;
+        overlay.ram_addr = ram_addr;
+        overlay.rom_addr = gbrecomp::AnalysisResult::make_addr(bank, offset);
+        overlay.size = overlay_size;
+        overlays.push_back(overlay);
+    }
+
+    return overlays;
 }
 
 static void append_codegen_ram_overlays(
@@ -874,8 +920,9 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     analyze_opts.aggressive_scan = options.aggressive_scan;
     analyze_opts.trace_file_path = options.trace_file_path;
 
-    gbrecomp::AnalyzerOptions::RamOverlay overlay;
-    if (detect_oam_dma_overlay(rom, overlay)) {
+    const std::vector<gbrecomp::AnalyzerOptions::RamOverlay> dma_overlays =
+        detect_oam_dma_overlays(rom);
+    for (const auto& overlay : dma_overlays) {
         uint8_t bank = static_cast<uint8_t>(overlay.rom_addr >> 16);
         uint16_t offset = static_cast<uint16_t>(overlay.rom_addr & 0xFFFF);
         size_t rom_idx = (offset < 0x4000)
@@ -885,7 +932,9 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
         std::cout << "[" << output_prefix << "] Detected OAM DMA routine at ROM 0x"
                   << std::hex << rom_idx
                   << " (Bank " << (int)bank << ":0x" << offset << ", size "
-                  << std::dec << overlay.size << "). Mapping to HRAM 0xFF80.\n";
+                  << std::dec << overlay.size << "). Mapping to HRAM "
+                  << std::hex << std::showbase << overlay.ram_addr
+                  << std::noshowbase << std::dec << ".\n";
         analyze_opts.ram_overlays.push_back(overlay);
     }
 
@@ -1183,8 +1232,9 @@ int main(int argc, char* argv[]) {
     analyze_opts.aggressive_scan = aggressive_scan;
     analyze_opts.trace_file_path = trace_file_path;
 
-    gbrecomp::AnalyzerOptions::RamOverlay overlay;
-    if (detect_oam_dma_overlay(rom, overlay)) {
+    const std::vector<gbrecomp::AnalyzerOptions::RamOverlay> dma_overlays =
+        detect_oam_dma_overlays(rom);
+    for (const auto& overlay : dma_overlays) {
             uint8_t bank = static_cast<uint8_t>(overlay.rom_addr >> 16);
             uint16_t offset = static_cast<uint16_t>(overlay.rom_addr & 0xFFFF);
             size_t rom_idx = (offset < 0x4000)
@@ -1193,7 +1243,9 @@ int main(int argc, char* argv[]) {
 
             std::cout << "Detected OAM DMA routine at ROM 0x" << std::hex << rom_idx
                         << " (Bank " << (int)bank << ":0x" << offset << ", size "
-                        << std::dec << overlay.size << "). Mapping to HRAM 0xFF80.\n";
+                        << std::dec << overlay.size << "). Mapping to HRAM "
+                        << std::hex << std::showbase << overlay.ram_addr
+                        << std::noshowbase << std::dec << ".\n";
 
             analyze_opts.ram_overlays.push_back(overlay);
     }

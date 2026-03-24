@@ -1223,16 +1223,101 @@ uint8_t gbrt_try_execute_highmem_stub(GBContext* ctx, uint16_t addr) {
     }
 }
 
+static uint8_t gbrt_match_hram_bytes(GBContext* ctx,
+                                     uint16_t addr,
+                                     const uint8_t* pattern,
+                                     size_t pattern_len) {
+    if (!ctx || !pattern || pattern_len == 0) {
+        return 0;
+    }
+
+    if (addr < 0xFF80 || addr > 0xFFFE) {
+        return 0;
+    }
+
+    uint32_t end_addr = (uint32_t)addr + (uint32_t)pattern_len - 1u;
+    if (end_addr > 0xFFFEu) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < pattern_len; ++i) {
+        if (gb_read8(ctx, (uint16_t)(addr + (uint16_t)i)) != pattern[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint8_t gbrt_execute_oam_dma_wait_loop(GBContext* ctx,
+                                              uint16_t addr,
+                                              uint8_t start_dma,
+                                              uint8_t initialize_counter) {
+    uint32_t cycles = 0;
+    ctx->pc = addr;
+
+    if (start_dma) {
+        gb_write8(ctx, 0xFF46, ctx->a);
+        ctx->pc = (uint16_t)(addr + 2);
+        cycles += 12;
+    }
+
+    if (initialize_counter) {
+        ctx->a = 0x28;
+        ctx->pc = (uint16_t)(ctx->pc + 2);
+        cycles += 8;
+    }
+
+    while (1) {
+        ctx->a = gb_dec8(ctx, ctx->a);
+        ctx->pc = (uint16_t)(ctx->pc + 1);
+        cycles += 4;
+
+        if (!ctx->f_z) {
+            ctx->pc = (uint16_t)(ctx->pc - 1);
+            cycles += 12;
+            continue;
+        }
+
+        ctx->pc = (uint16_t)(ctx->pc + 2);
+        cycles += 8;
+        break;
+    }
+
+    gb_tick(ctx, cycles);
+    if (ctx->stopped) {
+        return 1;
+    }
+
+    gb_ret(ctx);
+    gb_tick(ctx, 16);
+    return 1;
+}
+
 uint8_t gbrt_try_execute_hram_stub(GBContext* ctx, uint16_t addr) {
-    (void)ctx;
-    (void)addr;
-    /* Do not shortcut HRAM DMA helpers here.
-     *
-     * Games like Donkey Kong copy the standard OAM DMA wait routine into
-     * HRAM and call it. Returning immediately after LDH (0x46),A executes
-     * RET while DMA is still active, so the stack pop sees 0xFF and jumps
-     * to 0xFFFF. Let the interpreter execute the real HRAM bytes instead.
+    static const uint8_t dma_wait_full[] = {0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9};
+    static const uint8_t dma_wait_delay[] = {0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9};
+    static const uint8_t dma_wait_loop[] = {0x3D, 0x20, 0xFD, 0xC9};
+
+    if (!ctx) {
+        return 0;
+    }
+
+    /*
+     * Some games build the standard OAM DMA wait helper dynamically in HRAM
+     * and call different entrypoints into the same tiny loop. We cannot return
+     * early after starting DMA because the RET must happen only after enough
+     * cycles have elapsed for HRAM stack access to become valid again.
      */
+    if (gbrt_match_hram_bytes(ctx, addr, dma_wait_full, sizeof(dma_wait_full))) {
+        return gbrt_execute_oam_dma_wait_loop(ctx, addr, 1, 1);
+    }
+    if (gbrt_match_hram_bytes(ctx, addr, dma_wait_delay, sizeof(dma_wait_delay))) {
+        return gbrt_execute_oam_dma_wait_loop(ctx, addr, 0, 1);
+    }
+    if (gbrt_match_hram_bytes(ctx, addr, dma_wait_loop, sizeof(dma_wait_loop))) {
+        return gbrt_execute_oam_dma_wait_loop(ctx, addr, 0, 0);
+    }
+
     return 0;
 }
 

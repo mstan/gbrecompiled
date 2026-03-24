@@ -117,6 +117,33 @@ static bool is_rst28_jump_table(const ROM& rom) {
 }
 
 /**
+ * @brief Check if RST 00 is a jump table dispatcher
+ *
+ * Castlevania uses a compact dispatcher at 0x0000:
+ *   POP HL
+ *   RST 08
+ *   JP HL
+ *
+ * The bytes following an RST 00 call site are 16-bit table entries, just like
+ * the more common RST 28 dispatch pattern.
+ */
+static bool is_rst00_jump_table(const ROM& rom) {
+    if (rom.read_banked(0, 0x0000) != 0xE1 ||  // POP HL
+        rom.read_banked(0, 0x0001) != 0xCF ||  // RST 08
+        rom.read_banked(0, 0x0002) != 0xE9) {  // JP HL
+        return false;
+    }
+
+    // The helper reached through RST 08 should at least begin by doubling A.
+    return rom.read_banked(0, 0x0008) == 0x87; // ADD A,A
+}
+
+static bool is_jump_table_rst_vector(const ROM& rom, uint8_t rst_vector) {
+    return (rst_vector == 0x00 && is_rst00_jump_table(rom)) ||
+           (rst_vector == 0x28 && is_rst28_jump_table(rom));
+}
+
+/**
  * @brief Check if RST 28 falls through into RST 30
  * 
  * When RST 28 is a jump table dispatcher, it typically continues through
@@ -157,7 +184,7 @@ static bool rst28_uses_rst30(const ROM& rom) {
  * @param bank Bank number for the call site
  * @return Vector of extracted jump table target addresses
  */
-static std::vector<uint16_t> extract_rst28_table_entries(const ROM& rom, uint16_t rst_call_addr, uint8_t bank) {
+static std::vector<uint16_t> extract_rst_table_entries(const ROM& rom, uint16_t rst_call_addr, uint8_t bank) {
     std::vector<uint16_t> targets;
     
     // Table starts immediately after the RST 28 opcode (1 byte)
@@ -361,8 +388,15 @@ static int is_likely_valid_code(const ROM& rom, uint8_t bank, uint16_t addr) {
         
         // RST instructions in data are suspicious (0x00 or 0xFF)
         if (instr.type == InstructionType::RST) {
+            if (is_jump_table_rst_vector(rom, instr.rst_vector)) {
+                if (instructions_checked >= 1) {
+                    return (curr + instr.length - addr);
+                }
+                return 0;
+            }
+
             if (instr.opcode == 0xC7 || instr.opcode == 0xFF) {
-                 if (instructions_checked < 2) return 0;
+                if (instructions_checked < 2) return 0;
             }
         }
 
@@ -437,6 +471,10 @@ static bool has_plausible_branch_prefix(const ROM& rom, uint8_t bank, uint16_t a
             return saw_memory_or_control;
         }
 
+        if (instr.type == InstructionType::RST && is_jump_table_rst_vector(rom, instr.rst_vector)) {
+            return saw_memory_or_control;
+        }
+
         if (instr.is_jump && !instr.is_conditional) {
             return saw_memory_or_control;
         }
@@ -491,24 +529,51 @@ static bool is_bank_entry_stub(const ROM& rom, uint8_t bank, uint16_t addr) {
  * @brief Scan for 16-bit pointers that likely lead to code
  */
 static void find_pointer_entry_points(const ROM& rom, AnalysisResult& result, std::queue<AnalysisState>& work_queue) {
-    // Scan Bank 0 for potential 16-bit pointers
-    // Typically pointers are found after the header (0x150)
-    for (uint16_t addr = 0x0150; addr < 0x3FFE; addr++) {
-        uint8_t lo = rom.read_banked(0, addr);
-        uint8_t hi = rom.read_banked(0, addr + 1);
-        uint16_t target = lo | (hi << 8);
-        
-        // Target must be in ROM
-        if (target >= 0x0150 && target < 0x8000) {
-            uint8_t tbank = (target < 0x4000) ? 0 : 1; 
-            // If it's a pointer to code, suggest it as an entry point
-            if (is_likely_valid_code(rom, tbank, target)) {
-                uint32_t full_addr = make_address(tbank, target);
-                if (result.call_targets.find(full_addr) == result.call_targets.end()) {
-                    result.call_targets.insert(full_addr);
-                    result.strong_call_targets.insert(full_addr);
-                    work_queue.push({full_addr, -1, -1, -1, -1, -1, -1, -1, -1, (tbank > 0 ? tbank : (uint8_t)1)});
+    auto seed_pointer_target = [&](uint8_t target_bank, uint16_t target) {
+        if (!is_likely_direct_branch_target(rom, target_bank, target)) {
+            return;
+        }
+
+        uint32_t full_addr = make_address(target_bank, target);
+        if (result.call_targets.find(full_addr) != result.call_targets.end()) {
+            return;
+        }
+
+        result.call_targets.insert(full_addr);
+        result.strong_call_targets.insert(full_addr);
+        work_queue.push({full_addr, -1, -1, -1, -1, -1, -1, -1, -1, (target_bank > 0 ? target_bank : (uint8_t)1)});
+    };
+
+    for (uint8_t bank = 0; bank < rom.bank_count(); ++bank) {
+        uint16_t scan_start = (bank == 0) ? 0x0150 : 0x4000;
+        uint16_t scan_end = 0x3FFE;
+        if (bank > 0) {
+            scan_end = 0x7FFE;
+        }
+
+        for (uint16_t addr = scan_start; addr < scan_end; addr++) {
+            uint8_t lo = rom.read_banked(bank, addr);
+            uint8_t hi = rom.read_banked(bank, addr + 1);
+            uint16_t target = lo | (hi << 8);
+
+            // Target must be in ROM
+            if (target < 0x0150 || target >= 0x8000) {
+                continue;
+            }
+
+            if (target < 0x4000) {
+                seed_pointer_target(0, target);
+                continue;
+            }
+
+            if (bank == 0) {
+                // Bank 0 tables commonly point into switchable banks. Probe every
+                // switchable bank and keep only targets that look like real code.
+                for (uint8_t target_bank = 1; target_bank < rom.bank_count(); ++target_bank) {
+                    seed_pointer_target(target_bank, target);
                 }
+            } else {
+                seed_pointer_target(bank, target);
             }
         }
     }
@@ -939,14 +1004,14 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             result.strong_call_targets.insert(make_address(0, instr.rst_vector));
             work_queue.push({make_address(0, instr.rst_vector), -1, -1, -1, -1, -1, -1, -1, -1, 1});
             
-            bool is_rst28_jt = (instr.rst_vector == 0x28 && is_rst28_jump_table(rom));
-            if (is_rst28_jt) {
-                std::vector<uint16_t> table_targets = extract_rst28_table_entries(rom, offset, bank);
+            bool is_jump_table_rst = is_jump_table_rst_vector(rom, instr.rst_vector);
+            if (is_jump_table_rst) {
+                std::vector<uint16_t> table_targets = extract_rst_table_entries(rom, offset, bank);
                 for (uint16_t target : table_targets) {
                     uint8_t tbank = (target < 0x4000) ? 0 : bank;
                     if (tbank == 0 && target >= 0x4000) tbank = 1;
 
-                    if (is_likely_valid_code(rom, tbank, target)) {
+                    if (is_likely_direct_branch_target(rom, tbank, target)) {
                         result.call_targets.insert(make_address(tbank, target));
                         result.strong_call_targets.insert(make_address(tbank, target));
                         work_queue.push({make_address(tbank, target), -1, -1, -1, -1, -1, -1, -1, -1, tbank});

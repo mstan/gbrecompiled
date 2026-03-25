@@ -27,6 +27,12 @@
 - [ ] Input remapping for controllers
 - [ ] Clean README and add a cool logo, more screenshots
 
+## GBC
+- [x] GBC modes is not loading the save file
+- [ ] Improve binary size for GBC games (pokemon crystal is ~130mb)
+- [ ] Symbol-guided recompilation for GBC
+- [~] Builds are taking too long, especially linking
+
 ## Android
 - [ ] Support remapping controller inputs on Android
 - [ ] Custom app icon

@@ -121,6 +121,12 @@ struct AnalysisResult {
     // function entries, but are tracked separately from user-visible entry
     // points so later passes can distinguish them.
     std::set<uint32_t> synthetic_entry_targets;
+
+    // Targets discovered through static/computed jump analysis. These need to
+    // remain dispatchable roots if no larger function absorbs them, but they
+    // should not automatically force hard function boundaries the way real
+    // call targets do.
+    std::set<uint32_t> branch_entry_targets;
     
     // Computed jump targets (JP HL, etc.)
     std::set<uint32_t> computed_jump_targets;

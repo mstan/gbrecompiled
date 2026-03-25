@@ -1,6 +1,6 @@
 # GB Recompiled
 
-A **static recompiler** for original GameBoy ROMs that translates Z80 assembly directly into portable, modern C code.
+A **static recompiler** for Game Boy and Game Boy Color ROMs that translates LR35902 code directly into portable, modern C code.
 
 <p align="center">
   <img src="dino.png" alt="GB Recompiled Screenshot" width="400">
@@ -49,6 +49,8 @@ ninja -C build
 ```bash
 # Generate C code from a ROM
 ./build/bin/gbrecomp path/to/game.gb -o output/game
+# or
+./build/bin/gbrecomp path/to/game.gbc -o output/game
 
 # Build the generated project
 cmake -G Ninja -S output/game -B output/game/build
@@ -58,9 +60,11 @@ ninja -C output/game/build
 ./output/game/build/game
 ```
 
-Generated projects default to `Release`, compile the generated ROM sources at `-O3`, and enable IPO/LTO automatically when the local toolchain supports it. For faster iteration while debugging, configure with something like `-DCMAKE_BUILD_TYPE=Debug -DGBRECOMP_GENERATED_OPT_LEVEL=1 -DGBRECOMP_ENABLE_IPO=OFF`.
+Generated projects now default to a smaller manual-testing profile: `MinSizeRel`, generated ROM sources at `-O1`, IPO/LTO off, section-based dead stripping on supported toolchains, and post-link symbol stripping enabled by default. For maximum runtime performance, configure explicitly with something like `-DCMAKE_BUILD_TYPE=Release -DGBRECOMP_GENERATED_OPT_LEVEL=3 -DGBRECOMP_ENABLE_IPO=ON -DGBRECOMP_ENABLE_STRIP=OFF`.
 
 `gbrecomp` also uses parallel code generation by default on multi-core machines. Pass `--jobs <n>` if you want to cap it manually, or `--jobs 1` for single-threaded debugging.
+
+Game Boy Color support is now implemented in the main runtime and generated projects. Representative CGB games such as Pokemon Crystal and Link's Awakening are working well, but some CGB hardware-test and edge-case accuracy work is still in progress. See [GBC.md](GBC.md) for the current status.
 
 ### Generating an Android Project
 
@@ -371,6 +375,7 @@ When running a recompiled game:
 | `--interpreter-hotspot-limit <n>` | Limit how many hotspot rows are printed by `--report-interpreter-hotspots` |
 | `--limit-frames <n>` | Stop the run after `n` completed guest frames |
 | `--benchmark` | Run headless and uncapped for benchmarking. Host rendering, audio output, and wall-clock pacing are skipped so the runtime can execute as fast as possible |
+| `--model auto|dmg|cgb` | Select hardware mode. `auto` uses the ROM header, `dmg` forces DMG, and `cgb` runs CGB hardware, using compatibility mode for DMG cartridges |
 | `--smooth-lcd-transitions` | Force the SDL host smoother on for long guest frames, including LCD-off stretches (default) |
 | `--no-smooth-lcd-transitions` | Disable the SDL host smoother for long guest frames |
 | `--differential [steps]` | Compare generated execution against the interpreter for N steps (default `10000`) |
@@ -385,6 +390,14 @@ Example:
 ```bash
 ./output/game/build/game --differential 500000 --differential-log 100000
 ```
+
+Model-selection notes:
+
+- `--model auto` is the default. It selects CGB for cartridges with header byte `0x143` set to `0x80` or `0xC0`, otherwise DMG.
+- `--model cgb` runs DMG cartridges in CGB compatibility mode.
+- `--model dmg` rejects CGB-only cartridges with a clear startup error.
+
+For the current Game Boy Color support status, validated behavior, and remaining work, see [GBC.md](GBC.md).
 
 For multi-ROM output, pass launcher options first and then the normal runtime options for the selected game:
 
@@ -474,7 +487,7 @@ Use `--benchmark` when timing a recompiled binary so the runtime does not sleep 
 
 The helper script below benchmarks the generated binary against PyBoy by default, repeats each run, samples peak RSS with `psutil`, and writes optional JSON for later comparison.
 
-Generated projects already default to the release-oriented optimization profile described above. By default, the benchmark helper still auto-builds a dedicated binary in `build_bench_o3` so the benchmark runs from a clean build directory and can override the generated-source optimization level when needed:
+Generated projects now default to the faster manual-testing profile described above. The benchmark helper still auto-builds a dedicated optimized binary in `build_bench_o3`, forces `Release`, and enables IPO/LTO so benchmark runs keep the old “full optimization” path without slowing down day-to-day manual test builds:
 
 ```bash
 python3 tools/benchmark_emulators.py roms/tetris.gb \

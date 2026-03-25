@@ -679,22 +679,36 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         for (uint8_t bank : known_banks) {
             if (bank == 0) continue;
 
-            bool seeded_bank = false;
-            for (uint16_t addr = 0x4000; addr < 0x4008; addr++) {
-                if (!is_bank_entry_stub(rom, bank, addr)) continue;
-
+            Decoder bank_entry_decoder(rom);
+            auto seed_bank_target = [&](uint16_t addr) {
                 uint32_t target = make_address(bank, addr);
-                work_queue.push({target, -1, -1, -1, -1, -1, -1, -1, -1, bank});
-                result.call_targets.insert(target);
-                result.strong_call_targets.insert(target);
+                if (result.call_targets.insert(target).second) {
+                    result.strong_call_targets.insert(target);
+                    work_queue.push({target, -1, -1, -1, -1, -1, -1, -1, -1, bank});
+                } else {
+                    result.strong_call_targets.insert(target);
+                }
+            };
+
+            bool seeded_bank = false;
+            Instruction bank_start = bank_entry_decoder.decode(0x4000, bank);
+            if (!is_uniform_padding(rom, bank, 0x4000, 0x00, 8) &&
+                !is_uniform_padding(rom, bank, 0x4000, 0xFF, 8) &&
+                bank_start.type != InstructionType::UNDEFINED &&
+                bank_start.type != InstructionType::INVALID) {
+                seed_bank_target(0x4000);
                 seeded_bank = true;
             }
 
-            if (!seeded_bank && is_likely_valid_code(rom, bank, 0x4000)) {
-                uint32_t target = make_address(bank, 0x4000);
-                work_queue.push({target, -1, -1, -1, -1, -1, -1, -1, -1, bank});
-                result.call_targets.insert(target);
-                result.strong_call_targets.insert(target);
+            for (uint16_t addr = 0x4000; addr < 0x4008; addr++) {
+                if (!is_bank_entry_stub(rom, bank, addr)) continue;
+
+                seed_bank_target(addr);
+                seeded_bank = true;
+            }
+
+            if (!seeded_bank && is_likely_valid_code(rom, bank, 0x4001)) {
+                seed_bank_target(0x4001);
             }
         }
     }
@@ -1012,10 +1026,11 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                     if (tbank == 0 && target >= 0x4000) tbank = 1;
 
                     if (is_likely_direct_branch_target(rom, tbank, target)) {
-                        result.call_targets.insert(make_address(tbank, target));
-                        result.strong_call_targets.insert(make_address(tbank, target));
-                        work_queue.push({make_address(tbank, target), -1, -1, -1, -1, -1, -1, -1, -1, tbank});
-                        result.label_addresses.insert(make_address(tbank, target));
+                        uint32_t full_target = make_address(tbank, target);
+                        result.call_targets.insert(full_target);
+                        result.branch_entry_targets.insert(full_target);
+                        work_queue.push({full_target, -1, -1, -1, -1, -1, -1, -1, -1, tbank});
+                        result.label_addresses.insert(full_target);
                     }
                 }
             } else {
@@ -1060,12 +1075,13 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 }
 
                 if (target_valid) {
-                    if ((target >= 0x4000 && target <= 0x7FFF) || tbank != bank) {
-                        result.call_targets.insert(make_address(tbank, target));
-                        result.strong_call_targets.insert(make_address(tbank, target));
+                    uint32_t full_target = make_address(tbank, target);
+                    if (tbank != bank) {
+                        result.call_targets.insert(full_target);
+                        result.branch_entry_targets.insert(full_target);
                     }
-                    result.label_addresses.insert(make_address(tbank, target));
-                    work_queue.push({make_address(tbank, target), known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, tbank});
+                    result.label_addresses.insert(full_target);
+                    work_queue.push({full_target, known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, tbank});
                 }
             } else if (instr.type == InstructionType::JR_N || instr.type == InstructionType::JR_CC_N) {
                 uint16_t target = offset + instr.length + instr.offset;
@@ -1132,10 +1148,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                     uint16_t target = (uint16_t)combined_hl;
                     uint8_t tbank = target_bank(target);
                     std::cout << "[ANALYSIS] Resolved static JP HL at " << std::hex << (int)bank << ":" << offset << " -> " << (int)tbank << ":" << target << std::dec << "\n";
-                    result.call_targets.insert(make_address(tbank, target));
-                    result.strong_call_targets.insert(make_address(tbank, target));
-                    result.label_addresses.insert(make_address(tbank, target));
-                    work_queue.push({make_address(tbank, target), known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, tbank});
+                    uint32_t full_target = make_address(tbank, target);
+                    result.call_targets.insert(full_target);
+                    result.branch_entry_targets.insert(full_target);
+                    result.computed_jump_targets.insert(full_target);
+                    result.label_addresses.insert(full_target);
+                    work_queue.push({full_target, known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, tbank});
                 } else {
                     // Backtracking Jump Table Heuristic
                     bool found_table = false;
@@ -1155,9 +1173,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                                 if (target >= 0x0100 && target < 0x8000) {
                                     uint8_t tbank = target_bank(target);
                                     if (is_likely_valid_code(rom, tbank, target)) {
-                                        result.call_targets.insert(make_address(tbank, target));
-                                        result.strong_call_targets.insert(make_address(tbank, target));
-                                        work_queue.push({make_address(tbank, target), -1, -1, -1, -1, -1, -1, -1, -1, tbank});
+                                        uint32_t full_target = make_address(tbank, target);
+                                        result.call_targets.insert(full_target);
+                                        result.branch_entry_targets.insert(full_target);
+                                        result.computed_jump_targets.insert(full_target);
+                                        result.label_addresses.insert(full_target);
+                                        work_queue.push({full_target, -1, -1, -1, -1, -1, -1, -1, -1, tbank});
                                         found_table = true;
                                     }
                                 }
@@ -1447,7 +1468,8 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         if (total_instrs < MIN_FUNCTION_SIZE &&
             !is_special_entry &&
             !result.strong_call_targets.count(func_addr) &&
-            !result.synthetic_entry_targets.count(func_addr)) {
+            !result.synthetic_entry_targets.count(func_addr) &&
+            !result.branch_entry_targets.count(func_addr)) {
             functions_to_remove.insert(func_addr);
         }
     }

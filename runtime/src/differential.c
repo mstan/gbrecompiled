@@ -56,8 +56,8 @@ static void gb_diff_print_state(FILE* stream, const char* label, const GBContext
     fprintf(stream,
             "[DIFF] %s PC=%03X:%04X SP=%04X "
             "A=%02X B=%02X C=%02X D=%02X E=%02X H=%02X L=%02X F=%02X "
-            "IME=%u IME_PENDING=%u HALT=%u STOP=%u HALT_BUG=%u "
-            "ROM=%03X RAM=%02X WRAM=%u VRAM=%u DMA=%u/%u "
+            "IME=%u IME_PENDING=%u HALT=%u STOP=%u STOP_MODE=%u HALT_BUG=%u DS=%u "
+            "ROM=%03X RAM=%02X WRAM=%u VRAM=%u DMA=%u/%u HDMA=%04X->%04X/%u "
             "CYC=%u FRAME=%u DIV=%04X\n",
             label,
             gb_diff_current_bank(ctx),
@@ -75,13 +75,18 @@ static void gb_diff_print_state(FILE* stream, const char* label, const GBContext
             ctx->ime_pending,
             ctx->halted,
             ctx->stopped,
+            ctx->stop_mode_active,
             ctx->halt_bug,
+            ctx->cgb_double_speed,
             ctx->rom_bank,
             ctx->ram_bank,
             ctx->wram_bank,
             ctx->vram_bank,
             ctx->dma.progress,
             ctx->dma.cycles_remaining,
+            ctx->hdma.source,
+            ctx->hdma.dest,
+            ctx->hdma.blocks_remaining,
             ctx->cycles,
             ctx->frame_cycles,
             ctx->div_counter);
@@ -359,6 +364,9 @@ static bool gb_diff_compare_ppu(const GBContext* generated_ctx,
     DIFF_PPU_FIELD(obp1, "%u");
     DIFF_PPU_FIELD(wy, "%u");
     DIFF_PPU_FIELD(wx, "%u");
+    DIFF_PPU_FIELD(bgpi, "%u");
+    DIFF_PPU_FIELD(obpi, "%u");
+    DIFF_PPU_FIELD(opri, "%u");
     DIFF_PPU_FIELD(stat_irq_state, "%u");
     DIFF_PPU_FIELD(mode, "%u");
     DIFF_PPU_FIELD(mode_cycles, "%u");
@@ -376,6 +384,33 @@ static bool gb_diff_compare_ppu(const GBContext* generated_ctx,
                                 generated->framebuffer,
                                 interpreted->framebuffer,
                                 sizeof(generated->framebuffer),
+                                message,
+                                message_size)) {
+        return false;
+    }
+
+    if (!gb_diff_compare_region("PPU color framebuffer",
+                                (const uint8_t*)generated->color_framebuffer,
+                                (const uint8_t*)interpreted->color_framebuffer,
+                                sizeof(generated->color_framebuffer),
+                                message,
+                                message_size)) {
+        return false;
+    }
+
+    if (!gb_diff_compare_region("PPU BG palette RAM",
+                                generated->bg_palette_ram,
+                                interpreted->bg_palette_ram,
+                                sizeof(generated->bg_palette_ram),
+                                message,
+                                message_size)) {
+        return false;
+    }
+
+    if (!gb_diff_compare_region("PPU OBJ palette RAM",
+                                generated->obj_palette_ram,
+                                interpreted->obj_palette_ram,
+                                sizeof(generated->obj_palette_ram),
                                 message,
                                 message_size)) {
         return false;
@@ -421,11 +456,15 @@ static bool gb_diff_compare_contexts(const GBContext* generated,
     DIFF_FIELD(ime_pending, "%u");
     DIFF_FIELD(halted, "%u");
     DIFF_FIELD(stopped, "%u");
+    DIFF_FIELD(stop_mode_active, "%u");
     DIFF_FIELD(halt_bug, "%u");
+    DIFF_FIELD(cgb_double_speed, "%u");
     DIFF_FIELD(rom_bank, "%u");
     DIFF_FIELD(ram_bank, "%u");
     DIFF_FIELD(wram_bank, "%u");
     DIFF_FIELD(vram_bank, "%u");
+    DIFF_FIELD(config.model, "%u");
+    DIFF_FIELD(config.cgb_compatibility_mode, "%u");
     DIFF_FIELD(mbc_type, "%u");
     DIFF_FIELD(ram_enabled, "%u");
     DIFF_FIELD(mbc_mode, "%u");
@@ -442,6 +481,11 @@ static bool gb_diff_compare_contexts(const GBContext* generated,
     DIFF_FIELD(dma.source_high, "%u");
     DIFF_FIELD(dma.progress, "%u");
     DIFF_FIELD(dma.cycles_remaining, "%u");
+    DIFF_FIELD(hdma.source, "%u");
+    DIFF_FIELD(hdma.dest, "%u");
+    DIFF_FIELD(hdma.blocks_remaining, "%u");
+    DIFF_FIELD(hdma.active, "%u");
+    DIFF_FIELD(hdma.hblank_mode, "%u");
     DIFF_FIELD(rtc.s, "%u");
     DIFF_FIELD(rtc.m, "%u");
     DIFF_FIELD(rtc.h, "%u");

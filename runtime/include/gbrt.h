@@ -35,6 +35,9 @@ typedef enum {
  */
 typedef struct {
     GBModel model;
+    bool cgb_compatibility_mode; /**< Run CGB hardware in DMG compatibility mode */
+    bool cartridge_supports_cgb; /**< Cartridge advertises CGB support */
+    bool cartridge_requires_cgb; /**< Cartridge is CGB-only */
     bool enable_bootrom;
     bool enable_audio;
     bool enable_serial;
@@ -116,6 +119,8 @@ typedef struct {
     /* Save Data / External RAM */
     bool (*load_battery_ram)(GBContext* ctx, const char* rom_name, void* data, size_t size);
     bool (*save_battery_ram)(GBContext* ctx, const char* rom_name, const void* data, size_t size);
+    bool (*load_rtc_data)(GBContext* ctx, const char* rom_name, void* data, size_t size);
+    bool (*save_rtc_data)(GBContext* ctx, const char* rom_name, const void* data, size_t size);
 } GBPlatformCallbacks;
 
 /**
@@ -157,9 +162,11 @@ typedef struct GBContext {
     uint8_t ime;          /**< Interrupt Master Enable */
     uint8_t ime_pending;  /**< IME will be enabled after next instruction */
     uint8_t halted;       /**< CPU is halted */
-    uint8_t stopped;      /**< CPU is stopped */
+    uint8_t stopped;      /**< Scheduler/execution slice requested to stop */
+    uint8_t stop_mode_active; /**< CPU is in STOP low-power mode */
     uint8_t halt_bug;     /**< HALT bug: next instruction byte read twice */
     uint8_t single_step_mode; /**< Debug mode: execute at most one instruction */
+    uint8_t cgb_double_speed; /**< CGB double-speed mode is enabled */
     
     /* OAM DMA state */
     struct {
@@ -170,12 +177,25 @@ typedef struct GBContext {
         uint16_t cycles_remaining; /**< Cycles until DMA completes */
         uint8_t startup_delay;  /**< T-cycles before DMA bus blocking starts (2 M-cycles = 8 T-cycles) */
     } dma;
+
+    /* CGB HDMA state */
+    struct {
+        uint16_t source;        /**< Current source address */
+        uint16_t dest;          /**< Current destination address (0x8000-0x9FF0) */
+        uint8_t blocks_remaining; /**< Remaining 0x10-byte blocks */
+        uint8_t active;         /**< Transfer is currently active */
+        uint8_t hblank_mode;    /**< Transfer runs during HBlank only */
+    } hdma;
     
     /* Current bank numbers */
     uint16_t rom_bank;    /**< Current ROM bank (0x4000-0x7FFF) - 9 bits for MBC5 */
     uint8_t ram_bank;     /**< Current RAM bank */
     uint8_t wram_bank;    /**< Current WRAM bank (CGB only) */
     uint8_t vram_bank;    /**< Current VRAM bank (CGB only) */
+
+    /* Runtime configuration */
+    GBConfig config;
+    char save_id[64];
     
     /* MBC state */
     uint8_t mbc_type;
@@ -206,6 +226,13 @@ typedef struct GBContext {
     /* Timer internal state */
     uint16_t div_counter;   /**< Internal 16-bit divider counter */
     uint8_t tima_reload_pending; /**< TIMA overflow delay: > 0 means reload in N T-cycles */
+
+    /* Serial transfer state */
+    struct {
+        uint8_t active;      /**< Internal-clock transfer currently in progress */
+        uint8_t fast_clock;  /**< CGB fast serial clock is selected */
+        uint32_t cycles_remaining; /**< Remaining CPU cycles until completion */
+    } serial_transfer;
     
     /* Memory pointers */
     uint8_t* rom;         /**< ROM data */
@@ -304,6 +331,13 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size);
  * @return true on success
  */
 bool gb_context_save_ram(GBContext* ctx);
+
+/**
+ * @brief Set a stable save identifier to use instead of the cartridge header title
+ * @param ctx Target context
+ * @param save_id Generated-project or ROM basename
+ */
+void gb_context_set_save_id(GBContext* ctx, const char* save_id);
 
 /* ============================================================================
  * Memory Access
@@ -509,6 +543,11 @@ static inline void gb_unpack_flags(GBContext* ctx) {
  * @brief Add cycles to the timing counters
  */
 void gb_add_cycles(GBContext* ctx, uint32_t cycles);
+
+/**
+ * @brief Run one HBlank HDMA block if a transfer is pending
+ */
+void gbrt_hdma_hblank(GBContext* ctx);
 
 /**
  * @brief Check if a frame worth of cycles has elapsed

@@ -10,7 +10,12 @@ Important directories:
 - `logs/`: runtime logs, interpreter logs, benchmark results, and repro captures
 - `tools/`: helper scripts for testing, benchmarking, trace capture, and log analysis
 
-Use `README.md` for current user-facing workflows and `TODO.md` for the live project backlog. Do not rely on `ROADMAP.md` or `ARCH.md`; they are not current repo anchors anymore.
+Use `README.md` for current user-facing workflows, `TODO.md` for the live project backlog, and `GBC.md` for the current Game Boy Color support status / remaining work.
+
+## Hardware References
+- When implementing or debugging hardware behavior, consult `tech_docs/pan_docs.md` first.
+- Use the local `SameBoy/` codebase as the second reference when Pan Docs is ambiguous or you need a proven implementation to compare against.
+- This is especially important for CGB registers, timing, palette handling, HDMA, speed switching, and DMG-on-CGB compatibility behavior.
 
 ## Build Standards
 - Always use CMake + Ninja.
@@ -138,7 +143,7 @@ python3 tools/benchmark_emulators.py roms/game.gb \
 Important benchmark rules:
 
 - The benchmark script auto-builds a dedicated optimized recompiled binary in `build_bench_o3` by default.
-- Generated projects now default to a release-first profile: `Release`, `GBRECOMP_GENERATED_OPT_LEVEL=3`, and IPO/LTO enabled when the toolchain supports it.
+- Generated projects now default to a smaller iteration profile: `MinSizeRel`, `GBRECOMP_GENERATED_OPT_LEVEL=1`, and IPO/LTO off unless explicitly enabled.
 - The dedicated benchmark build still matters because it gives you a clean output directory and an easy place to override optimization knobs without disturbing your day-to-day build tree.
 - Use `--no-recompiled-autobuild` only if you intentionally want to benchmark the exact binary already on disk.
 - The benchmark script already forces headless benchmark mode through environment variables and runtime flags.

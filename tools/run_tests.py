@@ -127,6 +127,14 @@ MOONEYE_ACCEPTANCE = [
     "acceptance/timer/tma_write_reloading.gb",
 ]
 
+MOONEYE_CGB = [
+    "misc/boot_regs-cgb.gb",
+    "misc/boot_div-cgb0.gb",
+    "misc/boot_div-cgbABCDE.gb",
+    "misc/bits/unused_hwio-C.gb",
+    "misc/ppu/vblank_stat_intr-C.gb",
+]
+
 
 def sanitize(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
@@ -141,11 +149,13 @@ def find_executable(build_dir: Path) -> Optional[Path]:
 
 
 def run_test(name: str, rom_path: Path, frame_limit: int, suite: str,
+             model: Optional[str] = None,
              dry_run: bool = False, rebuild: bool = False) -> dict:
     result = {
         "name":        name,
         "suite":       suite,
         "rom":         str(rom_path.relative_to(WORKSPACE)),
+        "model":       model or "auto",
         "status":      "unknown",
         "serial_hex":  "",
         "serial_text": "",
@@ -229,8 +239,11 @@ def run_test(name: str, rom_path: Path, frame_limit: int, suite: str,
     # (60fps ≈ 1s of game time per 60 frames; add 30s overhead for SDL init).
     run_timeout = max(60, frame_limit // 60 * 2 + 30)
     try:
+        argv = [str(binary), "--limit-frames", str(frame_limit)]
+        if model:
+            argv.extend(["--model", model])
         r = subprocess.run(
-            [str(binary), "--limit-frames", str(frame_limit)],
+            argv,
             capture_output=True, timeout=run_timeout,
         )
         raw = r.stdout
@@ -290,7 +303,7 @@ def build_test_list(filter_str: Optional[str] = None) -> list:
     for name, rom_rel, frames, suite in BLARGG_ROMS:
         rom = WORKSPACE / rom_rel
         if rom.exists():
-            tests.append((name, rom, frames, suite))
+            tests.append((name, rom, frames, suite, None))
 
     # Mooneye acceptance + timer suite
     for rel in MOONEYE_ACCEPTANCE:
@@ -298,10 +311,16 @@ def build_test_list(filter_str: Optional[str] = None) -> list:
         if rom.exists():
             name = rom.stem
             # Mooneye tests complete within 120 frames typically
-            tests.append((name, rom, 300, "mooneye"))
+            tests.append((name, rom, 300, "mooneye", None))
+
+    for rel in MOONEYE_CGB:
+        rom = MOONEYE_BASE / rel
+        if rom.exists():
+            name = rom.stem
+            tests.append((name, rom, 300, "mooneye", "cgb"))
 
     if filter_str:
-        tests = [(n, r, f, s) for n, r, f, s in tests if filter_str.lower() in n.lower()]
+        tests = [(n, r, f, s, m) for n, r, f, s, m in tests if filter_str.lower() in n.lower()]
 
     return tests
 
@@ -309,7 +328,8 @@ def build_test_list(filter_str: Optional[str] = None) -> list:
 def print_result_line(result: dict):
     icon  = "✓" if result["status"] == "pass" else ("?" if result["status"] == "incomplete" else "✗")
     suite = result["suite"].upper()[:7].ljust(7)
-    name  = result["name"][:45].ljust(45)
+    label = result["name"] if result.get("model", "auto") == "auto" else f"{result['name']} [{result['model']}]"
+    name  = label[:45].ljust(45)
     st    = result["status"].upper()[:10].ljust(10)
     secs  = f"{result['elapsed']:5.1f}s"
     print(f"  {icon} [{suite}] {name} {st} {secs}")
@@ -339,7 +359,8 @@ def generate_accuracy_md(results: list, output_path: Path):
             preview = ""
             if r["suite"] == "blargg" and r["serial_text"]:
                 preview = r["serial_text"].replace("\n", " · ")[:80]
-            lines.append(f"| {r['name']} | {badge} | {preview} |")
+            label = r["name"] if r.get("model", "auto") == "auto" else f"{r['name']} [{r['model']}]"
+            lines.append(f"| {label} | {badge} | {preview} |")
         return "\n".join(lines)
 
     md = f"""# GameBoy Recompiler — Accuracy Report
@@ -371,7 +392,7 @@ These ROMs output ASCII text via the serial port. "Passed" in the output = pass.
 ## Mooneye Acceptance Tests
 
 Mooneye tests signal pass by writing the Fibonacci sequence `03 05 08 0D 15 22` to the serial port.
-Tests marked **GS** target DMG/SGB hardware specifically.
+Tests marked **GS** target DMG/SGB hardware specifically. Curated CGB entries are run with `--model cgb`.
 
 ### bits
 | Test | Result | Notes |
@@ -414,7 +435,6 @@ Tests marked **GS** target DMG/SGB hardware specifically.
 
 - **Cycle-exact timing**: The static recompiler batches instructions between sync points; some cycle-exact Mooneye timing tests will fail even with an otherwise correct interpreter.
 - **Boot ROM**: Tests that check boot-ROM register state (`boot_regs-*`, `boot_div-*`, `boot_hwio-*`) are skipped — the recompiler does not emulate the boot ROM.
-- **CGB-only tests**: Any test suffixed `-C` or operating on CGB-only hardware is expected to fail.
 - **Blargg frame limits**: Some Blargg tests (`cpu_instrs`) run for several minutes; they are cut off at 180 frames and may show as "incomplete" if they need more time.
 """
     output_path.write_text(md)
@@ -440,13 +460,15 @@ def main():
     print(f"Running {len(tests)} tests (output: {TEST_OUTPUT})\n")
 
     results = []
-    for i, (name, rom, frames, suite) in enumerate(tests):
+    for i, (name, rom, frames, suite, model) in enumerate(tests):
         tag = f"[{i+1}/{len(tests)}]"
-        print(f"  {tag} {name} ({suite}, {frames}fr) ...", end="", flush=True)
-        r = run_test(name, rom, frames, suite, dry_run=args.dry_run, rebuild=args.rebuild)
+        mode_suffix = "" if model is None else f", model={model}"
+        print(f"  {tag} {name} ({suite}, {frames}fr{mode_suffix}) ...", end="", flush=True)
+        r = run_test(name, rom, frames, suite, model=model, dry_run=args.dry_run, rebuild=args.rebuild)
         results.append(r)
         icon = "✓" if r["status"] == "pass" else ("?" if r["status"] == "incomplete" else "✗")
-        print(f"\r  {tag} {icon} {name:<45} {r['status']:<12} {r['elapsed']:4.1f}s")
+        label = name if model is None else f"{name} [{model}]"
+        print(f"\r  {tag} {icon} {label:<45} {r['status']:<12} {r['elapsed']:4.1f}s")
 
     passed    = sum(1 for r in results if r["status"] == "pass")
     failed    = sum(1 for r in results if r["status"] == "fail")

@@ -2096,9 +2096,10 @@ void gb_platform_set_title(const char* title) {
  * Save Data
  * ========================================================================== */
 
-static void sdl_get_save_path(char* buffer, size_t size, const char* rom_name) {
+static void sdl_get_persistent_path(char* buffer, size_t size, const char* rom_name, const char* extension) {
     const std::string base_name = extract_path_leaf(rom_name);
-    const std::string filename = base_name + ".sav";
+    const std::string suffix = (extension && extension[0]) ? extension : ".sav";
+    const std::string filename = base_name + suffix;
 
 #if defined(__ANDROID__)
     const std::string resolved = resolve_writable_path(filename.c_str(), base_name.c_str());
@@ -2114,6 +2115,14 @@ static void sdl_get_save_path(char* buffer, size_t size, const char* rom_name) {
         snprintf(buffer, size, "%s", resolved.c_str());
     }
 #endif
+}
+
+static void sdl_get_save_path(char* buffer, size_t size, const char* rom_name) {
+    sdl_get_persistent_path(buffer, size, rom_name, ".sav");
+}
+
+static void sdl_get_rtc_path(char* buffer, size_t size, const char* rom_name) {
+    sdl_get_persistent_path(buffer, size, rom_name, ".rtc");
 }
 
 static bool sdl_load_battery_ram(GBContext* ctx, const char* rom_name, void* data, size_t size) {
@@ -2144,12 +2153,42 @@ static bool sdl_save_battery_ram(GBContext* ctx, const char* rom_name, const voi
     return written == size;
 }
 
+static bool sdl_load_rtc_data(GBContext* ctx, const char* rom_name, void* data, size_t size) {
+    (void)ctx;
+    char filename[512];
+    sdl_get_rtc_path(filename, sizeof(filename), rom_name);
+
+    FILE* f = fopen(filename, "rb");
+    if (!f) return false;
+
+    size_t read = fread(data, 1, size, f);
+    fclose(f);
+
+    return read == size;
+}
+
+static bool sdl_save_rtc_data(GBContext* ctx, const char* rom_name, const void* data, size_t size) {
+    (void)ctx;
+    char filename[512];
+    sdl_get_rtc_path(filename, sizeof(filename), rom_name);
+
+    FILE* f = fopen(filename, "wb");
+    if (!f) return false;
+
+    size_t written = fwrite(data, 1, size, f);
+    fclose(f);
+
+    return written == size;
+}
+
 void gb_platform_register_context(GBContext* ctx) {
     g_registered_ctx = ctx;
     GBPlatformCallbacks callbacks = {
         .on_audio_sample = on_audio_sample,
         .load_battery_ram = sdl_load_battery_ram,
-        .save_battery_ram = sdl_save_battery_ram
+        .save_battery_ram = sdl_save_battery_ram,
+        .load_rtc_data = sdl_load_rtc_data,
+        .save_rtc_data = sdl_save_rtc_data
     };
     gb_set_platform_callbacks(ctx, &callbacks);
 }

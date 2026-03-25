@@ -112,6 +112,9 @@ typedef struct GBPPU {
     uint8_t obp1;       /* 0xFF49 - OBJ Palette 1 */
     uint8_t wy;         /* 0xFF4A - Window Y */
     uint8_t wx;         /* 0xFF4B - Window X */
+    uint8_t bgpi;       /* 0xFF68 - BG palette index */
+    uint8_t obpi;       /* 0xFF6A - OBJ palette index */
+    uint8_t opri;       /* Internal object priority mode */
 
     /* Registers latched at the start of mode 3 for the active scanline */
     uint8_t latched_lcdc;
@@ -132,9 +135,16 @@ typedef struct GBPPU {
     
     /* Framebuffer (2-bit color indices) */
     uint8_t framebuffer[GB_FRAMEBUFFER_SIZE];
-    
+
+    /* 15-bit color framebuffer for CGB palettes */
+    uint16_t color_framebuffer[GB_FRAMEBUFFER_SIZE];
+
     /* RGB framebuffer for display (32-bit RGBA) */
     uint32_t rgb_framebuffer[GB_FRAMEBUFFER_SIZE];
+
+    /* CGB palette RAM */
+    uint8_t bg_palette_ram[0x40];
+    uint8_t obj_palette_ram[0x40];
     
     /* Frame complete flag */
     bool frame_ready;
@@ -153,7 +163,7 @@ void ppu_init(GBPPU* ppu);
 /**
  * @brief Reset PPU to initial state
  */
-void ppu_reset(GBPPU* ppu);
+void ppu_reset(GBPPU* ppu, const GBContext* ctx);
 
 /**
  * @brief Tick the PPU for a number of cycles

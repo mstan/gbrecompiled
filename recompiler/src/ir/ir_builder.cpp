@@ -382,6 +382,9 @@ Program IRBuilder::build(const AnalysisResult& analysis, const std::string& rom_
             
             // Copy end_address from source block for correct fallthrough handling
             dst_block.end_address = src_block.end_address;
+            dst_block.is_entry = src_block.is_function_entry;
+            dst_block.is_interrupt_handler = src_block.is_interrupt_entry;
+            dst_block.is_reachable = src_block.is_reachable;
             
             // Lower each instruction in the block
             for (size_t idx : src_block.instruction_indices) {

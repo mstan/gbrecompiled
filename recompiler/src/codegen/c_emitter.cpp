@@ -1934,6 +1934,8 @@ GeneratedOutput generate_output(const ir::Program& program,
                                 size_t rom_size,
                                 const GeneratorOptions& options) {
     GeneratedOutput output;
+    const bool rom_is_cgb = rom_size > 0x143 && (rom_data[0x143] == 0x80 || rom_data[0x143] == 0xC0);
+    const bool rom_is_cgb_only = rom_size > 0x143 && rom_data[0x143] == 0xC0;
     
     // Generate header
     std::ostringstream header_ss;
@@ -1941,6 +1943,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     header_ss << "#ifndef " << options.output_prefix << "_H\n";
     header_ss << "#define " << options.output_prefix << "_H\n\n";
     header_ss << "#include \"gbrt.h\"\n\n";
+    header_ss << "const GBConfig* " << options.output_prefix << "_default_config(void);\n";
     header_ss << "void " << options.output_prefix << "_run(GBContext* ctx);\n";
     header_ss << "void " << options.output_prefix << "_init(GBContext* ctx);\n";
     header_ss << "int " << module_main_name(options) << "(int argc, char* argv[]);\n\n";
@@ -2003,6 +2006,19 @@ GeneratedOutput generate_output(const ir::Program& program,
     internal_header_ss << "    GB_IO_OBP1 = 0xFF49,\n";
     internal_header_ss << "    GB_IO_WY = 0xFF4A,\n";
     internal_header_ss << "    GB_IO_WX = 0xFF4B,\n";
+    internal_header_ss << "    GB_IO_KEY1 = 0xFF4D,\n";
+    internal_header_ss << "    GB_IO_VBK = 0xFF4F,\n";
+    internal_header_ss << "    GB_IO_HDMA1 = 0xFF51,\n";
+    internal_header_ss << "    GB_IO_HDMA2 = 0xFF52,\n";
+    internal_header_ss << "    GB_IO_HDMA3 = 0xFF53,\n";
+    internal_header_ss << "    GB_IO_HDMA4 = 0xFF54,\n";
+    internal_header_ss << "    GB_IO_HDMA5 = 0xFF55,\n";
+    internal_header_ss << "    GB_IO_BGPI = 0xFF68,\n";
+    internal_header_ss << "    GB_IO_BGPD = 0xFF69,\n";
+    internal_header_ss << "    GB_IO_OBPI = 0xFF6A,\n";
+    internal_header_ss << "    GB_IO_OBPD = 0xFF6B,\n";
+    internal_header_ss << "    GB_IO_OPRI = 0xFF6C,\n";
+    internal_header_ss << "    GB_IO_SVBK = 0xFF70,\n";
     internal_header_ss << "    GB_IO_IE = 0xFFFF\n";
     internal_header_ss << "};\n\n";
 
@@ -2275,8 +2291,81 @@ GeneratedOutput generate_output(const ir::Program& program,
     // Disable function inlining while correctness validation is being rebuilt.
     std::set<std::string> inlineable_functions;
     
+    auto collect_dispatchable_pcs = [&](const ir::Function& func) {
+        std::set<uint16_t> dispatchable_pcs;
+        std::set<uint16_t> resumable_block_starts;
+        std::set<uint16_t> available_pcs;
+
+        for (uint32_t block_id : func.block_ids) {
+            auto block_it = program.blocks.find(block_id);
+            if (block_it == program.blocks.end()) {
+                continue;
+            }
+
+            const ir::BasicBlock& block = block_it->second;
+            resumable_block_starts.insert(block.start_address);
+            available_pcs.insert(block.start_address);
+            for (const auto& instr : block.instructions) {
+                if (instr.has_source_location) {
+                    available_pcs.insert(instr.source_address);
+                }
+            }
+        }
+
+        dispatchable_pcs.insert(func.entry_address);
+        for (uint16_t block_start : resumable_block_starts) {
+            dispatchable_pcs.insert(block_start);
+        }
+
+        for (uint32_t block_id : func.block_ids) {
+            auto block_it = program.blocks.find(block_id);
+            if (block_it == program.blocks.end()) {
+                continue;
+            }
+
+            const ir::BasicBlock& block = block_it->second;
+            for (size_t instr_index = 0; instr_index < block.instructions.size(); ++instr_index) {
+                const auto& instr = block.instructions[instr_index];
+                if (!instr.has_source_location) {
+                    continue;
+                }
+
+                uint16_t next_pc = 0;
+                if (instr_index + 1 < block.instructions.size()) {
+                    const auto& next_instr = block.instructions[instr_index + 1];
+                    if (next_instr.has_source_location) {
+                        next_pc = next_instr.source_address;
+                    }
+                } else {
+                    next_pc = block.end_address;
+                }
+
+                if (next_pc == 0) {
+                    continue;
+                }
+                if (!available_pcs.count(next_pc) && next_pc != func.entry_address) {
+                    continue;
+                }
+
+                switch (instr.opcode) {
+                    case ir::Opcode::CALL:
+                    case ir::Opcode::CALL_CC:
+                    case ir::Opcode::RST:
+                    case ir::Opcode::HALT:
+                    case ir::Opcode::STOP:
+                        dispatchable_pcs.insert(next_pc);
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
+        return dispatchable_pcs;
+    };
+
     // Group functions by address for the switch statement.
-    // In single-step mode we may re-enter at any instruction PC, not just block or function starts.
+    // Only keep normal execution resume points here; single-step can fall back to the interpreter.
     struct DispatchEntry {
         uint8_t bank;
         std::string name;
@@ -2298,20 +2387,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     std::map<uint16_t, std::vector<DispatchEntry>> addr_to_funcs;
 
     for (const auto& [name, func] : program.functions) {
-        std::set<uint16_t> function_pcs;
-        for (uint32_t block_id : func.block_ids) {
-            auto block_it = program.blocks.find(block_id);
-            if (block_it == program.blocks.end()) continue;
-            for (const auto& instr : block_it->second.instructions) {
-                if (instr.has_source_location) {
-                    function_pcs.insert(instr.source_address);
-                }
-            }
-        }
-
-        if (function_pcs.empty()) {
-            function_pcs.insert(func.entry_address);
-        }
+        std::set<uint16_t> function_pcs = collect_dispatchable_pcs(func);
 
         for (uint16_t pc_addr : function_pcs) {
             addr_to_funcs[pc_addr].push_back({
@@ -2649,28 +2725,34 @@ GeneratedOutput generate_output(const ir::Program& program,
                 return it_a->second.start_address < it_b->second.start_address;
             });
 
-        std::set<uint16_t> dispatchable_pcs;
         std::map<uint16_t, std::string> block_labels_by_addr;
         for (uint32_t block_id : sorted_block_ids) {
             auto it = program.blocks.find(block_id);
             if (it == program.blocks.end()) continue;
             block_labels_by_addr[it->second.start_address] = it->second.label;
-            for (const auto& instr : it->second.instructions) {
-                if (instr.has_source_location) {
-                    dispatchable_pcs.insert(instr.source_address);
-                }
-            }
         }
+        std::set<uint16_t> dispatchable_pcs = collect_dispatchable_pcs(func);
+        const bool entry_only_resume =
+            dispatchable_pcs.size() == 1 && *dispatchable_pcs.begin() == func.entry_address;
 
-        func_ss << "    switch (ctx->pc) {\n";
-        for (uint16_t pc_addr : dispatchable_pcs) {
-            func_ss << "        case 0x" << std::hex << std::setfill('0') << std::setw(4)
-                    << pc_addr << std::dec << ": goto pc_"
-                    << std::hex << std::setfill('0') << std::setw(4)
-                    << pc_addr << std::dec << ";\n";
+        if (!entry_only_resume) {
+            func_ss << "    switch (ctx->pc) {\n";
+            for (uint16_t pc_addr : dispatchable_pcs) {
+                const auto block_label_it = block_labels_by_addr.find(pc_addr);
+                func_ss << "        case 0x" << std::hex << std::setfill('0') << std::setw(4)
+                        << pc_addr << std::dec << ": goto ";
+                if (block_label_it != block_labels_by_addr.end()) {
+                    func_ss << block_label_it->second;
+                } else {
+                    func_ss << "pc_"
+                            << std::hex << std::setfill('0') << std::setw(4)
+                            << pc_addr << std::dec;
+                }
+                func_ss << ";\n";
+            }
+            func_ss << "        default: break;\n";
+            func_ss << "    }\n\n";
         }
-        func_ss << "        default: break;\n";
-        func_ss << "    }\n\n";
 
         std::set<uint16_t> emitted_pc_labels;
         for (size_t block_idx = 0; block_idx < sorted_block_ids.size(); block_idx++) {
@@ -2685,6 +2767,8 @@ GeneratedOutput generate_output(const ir::Program& program,
                 const auto& ir_instr = block.instructions[i];
 
                 if (ir_instr.has_source_location &&
+                    dispatchable_pcs.count(ir_instr.source_address) > 0 &&
+                    block_labels_by_addr.count(ir_instr.source_address) == 0 &&
                     emitted_pc_labels.insert(ir_instr.source_address).second) {
                     func_ss << "pc_" << std::hex << std::setfill('0') << std::setw(4)
                             << ir_instr.source_address << std::dec << ":\n";
@@ -2906,6 +2990,20 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "extern const uint8_t " << rom_data_symbol_name(options) << "[];\n";
     source_ss << "extern const size_t " << rom_size_symbol_name(options) << ";\n\n";
     
+    source_ss << "const GBConfig* " << options.output_prefix << "_default_config(void) {\n";
+    source_ss << "    static const GBConfig config = {\n";
+    source_ss << "        .model = " << (rom_is_cgb ? "GB_MODEL_CGB" : "GB_MODEL_DMG") << ",\n";
+    source_ss << "        .cgb_compatibility_mode = false,\n";
+    source_ss << "        .cartridge_supports_cgb = " << (rom_is_cgb ? "true" : "false") << ",\n";
+    source_ss << "        .cartridge_requires_cgb = " << (rom_is_cgb_only ? "true" : "false") << ",\n";
+    source_ss << "        .enable_bootrom = false,\n";
+    source_ss << "        .enable_audio = true,\n";
+    source_ss << "        .enable_serial = true,\n";
+    source_ss << "        .speed_percent = 100,\n";
+    source_ss << "    };\n";
+    source_ss << "    return &config;\n";
+    source_ss << "}\n\n";
+
     // Emit init and run functions
     source_ss << "void " << options.output_prefix << "_init(GBContext* ctx) {\n";
     source_ss << "    /* Load ROM data into context */\n";
@@ -2913,6 +3011,7 @@ GeneratedOutput generate_output(const ir::Program& program,
               << ", " << rom_size_symbol_name(options) << ");\n";
     source_ss << "    /* Set MBC type from header */\n";
     source_ss << "    ctx->mbc_type = " << rom_data_symbol_name(options) << "[0x147];\n";
+    source_ss << "    gb_context_reset(ctx, true);\n";
     source_ss << "}\n\n";
     
     source_ss << "void " << options.output_prefix << "_run(GBContext* ctx) {\n";
@@ -3100,6 +3199,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    unsigned long interpreter_hotspot_limit = 8;\n";
     main_ss << "    int smooth_lcd_transitions_override = -1;\n";
     main_ss << "    bool benchmark_mode = false;\n";
+    main_ss << "    const char* model_override = \"auto\";\n";
     main_ss << "    for (int i = 1; i < argc; i++) {\n";
     main_ss << "        if (strcmp(argv[i], \"--log-file\") == 0 && i + 1 < argc) {\n";
     main_ss << "            log_file = argv[++i];\n";
@@ -3160,6 +3260,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            smooth_lcd_transitions_override = 1;\n";
     main_ss << "        } else if (strcmp(argv[i], \"--no-smooth-lcd-transitions\") == 0) {\n";
     main_ss << "            smooth_lcd_transitions_override = 0;\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--model\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            model_override = argv[++i];\n";
     main_ss << "        } else if (strcmp(argv[i], \"--differential\") == 0) {\n";
     main_ss << "            differential_mode = true;\n";
     main_ss << "            if (i + 1 < argc && argv[i + 1][0] != '-') {\n";
@@ -3192,18 +3294,38 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "                slow_frame_ms,\n";
     main_ss << "                slow_vsync_ms);\n";
     main_ss << "    }\n\n";
+    main_ss << "    GBConfig runtime_config = *" << options.output_prefix << "_default_config();\n";
+    main_ss << "    if (strcmp(model_override, \"auto\") == 0) {\n";
+    main_ss << "        runtime_config.model = runtime_config.cartridge_supports_cgb ? GB_MODEL_CGB : GB_MODEL_DMG;\n";
+    main_ss << "        runtime_config.cgb_compatibility_mode = false;\n";
+    main_ss << "    } else if (strcmp(model_override, \"dmg\") == 0) {\n";
+    main_ss << "        if (runtime_config.cartridge_requires_cgb) {\n";
+    main_ss << "            fprintf(stderr, \"CGB-only ROMs cannot run with --model dmg\\n\");\n";
+    main_ss << "            return 1;\n";
+    main_ss << "        }\n";
+    main_ss << "        runtime_config.model = GB_MODEL_DMG;\n";
+    main_ss << "        runtime_config.cgb_compatibility_mode = false;\n";
+    main_ss << "    } else if (strcmp(model_override, \"cgb\") == 0) {\n";
+    main_ss << "        runtime_config.model = GB_MODEL_CGB;\n";
+    main_ss << "        runtime_config.cgb_compatibility_mode = !runtime_config.cartridge_supports_cgb;\n";
+    main_ss << "    } else {\n";
+    main_ss << "        fprintf(stderr, \"Unknown model '%s' (expected auto, dmg, or cgb)\\n\", model_override);\n";
+    main_ss << "        return 1;\n";
+    main_ss << "    }\n\n";
     main_ss << "    if (differential_mode && differential_frames > 0 && !differential_steps_explicit) {\n";
     main_ss << "        differential_steps = 0;\n";
     main_ss << "    }\n\n";
     main_ss << "    if (differential_mode) {\n";
-    main_ss << "        GBContext* generated_ctx = gb_context_create(NULL);\n";
-    main_ss << "        GBContext* interpreted_ctx = gb_context_create(NULL);\n";
+    main_ss << "        GBContext* generated_ctx = gb_context_create(&runtime_config);\n";
+    main_ss << "        GBContext* interpreted_ctx = gb_context_create(&runtime_config);\n";
     main_ss << "        if (!generated_ctx || !interpreted_ctx) {\n";
     main_ss << "            fprintf(stderr, \"Failed to create differential contexts\\n\");\n";
     main_ss << "            gb_context_destroy(generated_ctx);\n";
     main_ss << "            gb_context_destroy(interpreted_ctx);\n";
     main_ss << "            return 1;\n";
     main_ss << "        }\n";
+    main_ss << "        gb_context_set_save_id(generated_ctx, \"" << options.output_prefix << "\");\n";
+    main_ss << "        gb_context_set_save_id(interpreted_ctx, \"" << options.output_prefix << "\");\n";
     main_ss << "        " << options.output_prefix << "_init(generated_ctx);\n";
     main_ss << "        " << options.output_prefix << "_init(interpreted_ctx);\n";
     main_ss << "        GBDifferentialOptions diff_options = {\n";
@@ -3222,11 +3344,12 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        return matched ? 0 : 1;\n";
     main_ss << "    }\n";
     main_ss << "\n";
-    main_ss << "    GBContext* ctx = gb_context_create(NULL);\n";
+    main_ss << "    GBContext* ctx = gb_context_create(&runtime_config);\n";
     main_ss << "    if (!ctx) {\n";
     main_ss << "        fprintf(stderr, \"Failed to create context\\n\");\n";
     main_ss << "        return 1;\n";
     main_ss << "    }\n";
+    main_ss << "    gb_context_set_save_id(ctx, \"" << options.output_prefix << "\");\n";
     main_ss << "    gbrt_log_lcd_transitions = log_lcd_transitions;\n";
     main_ss << "    if (debug_audio) gb_audio_set_debug(true);\n";
     main_ss << "    gb_audio_set_debug_capture_seconds(debug_audio_seconds);\n";
@@ -3394,16 +3517,31 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "set(CMAKE_C_STANDARD_REQUIRED ON)\n\n";
         cmake_ss << "set(CMAKE_CXX_STANDARD 17)\n";
         cmake_ss << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
-        cmake_ss << "# Aggressive optimization flags\n";
-        cmake_ss << "if(NOT CMAKE_BUILD_TYPE)\n";
-        cmake_ss << "    set(CMAKE_BUILD_TYPE Release)\n";
+        cmake_ss << "# Migrate stale generated-project cache entries when the default profile changes.\n";
+        cmake_ss << "set(GBRECOMP_PROFILE_CACHE_VERSION \"2\")\n";
+        cmake_ss << "set(GBRECOMP_APPLIED_PROFILE_CACHE_VERSION \"0\" CACHE STRING \"Internal generated-project profile version\")\n";
+        cmake_ss << "if(NOT GBRECOMP_APPLIED_PROFILE_CACHE_VERSION STREQUAL GBRECOMP_PROFILE_CACHE_VERSION)\n";
+        cmake_ss << "    set(GBRECOMP_ENABLE_IPO OFF CACHE BOOL \"Enable interprocedural optimization/LTO for non-Debug builds\" FORCE)\n";
+        cmake_ss << "    set(GBRECOMP_ENABLE_STRIP ON CACHE BOOL \"Strip symbols from generated executables in non-Debug builds\" FORCE)\n";
+        cmake_ss << "    set(GBRECOMP_GENERATED_OPT_LEVEL \"1\" CACHE STRING \"Optimization level for the generated ROM source files\" FORCE)\n";
+        cmake_ss << "    set(GBRECOMP_APPLIED_PROFILE_CACHE_VERSION \"${GBRECOMP_PROFILE_CACHE_VERSION}\" CACHE STRING \"Internal generated-project profile version\" FORCE)\n";
+        cmake_ss << "endif()\n\n";
+        cmake_ss << "# Default to a smaller, iteration-friendly profile for generated projects.\n";
+        cmake_ss << "# Benchmark and release builds can still opt into Release/-O3/IPO explicitly.\n";
+        cmake_ss << "if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)\n";
+        cmake_ss << "    set(CMAKE_BUILD_TYPE MinSizeRel CACHE STRING \"Build type\" FORCE)\n";
         cmake_ss << "endif()\n";
         cmake_ss << "if(CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang\")\n";
         cmake_ss << "    if(CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
         cmake_ss << "        add_compile_options(-O0 -g)\n";
+        cmake_ss << "    elseif(CMAKE_BUILD_TYPE STREQUAL \"RelWithDebInfo\")\n";
+        cmake_ss << "        add_compile_options(-O2 -g)\n";
+        cmake_ss << "    elseif(CMAKE_BUILD_TYPE STREQUAL \"MinSizeRel\")\n";
+        cmake_ss << "        add_compile_options(-Os)\n";
         cmake_ss << "    else()\n";
         cmake_ss << "        add_compile_options(-O3)\n";
         cmake_ss << "    endif()\n";
+        cmake_ss << "    add_compile_options(-ffunction-sections -fdata-sections)\n";
         cmake_ss << "endif()\n\n";
         // Calculate relative path to runtime
         namespace fs = std::filesystem;
@@ -3485,17 +3623,27 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
         cmake_ss << "    " << options.output_prefix << "_rom.c\n";
         cmake_ss << ")\n\n";
-        cmake_ss << "# Generated ROM code defaults to the same release-first optimization profile as the runtime.\n";
-        cmake_ss << "# Lower GBRECOMP_GENERATED_OPT_LEVEL or disable GBRECOMP_ENABLE_IPO if you want faster edit/debug builds.\n";
-        cmake_ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"3\" CACHE STRING \"Optimization level for the generated ROM source file\")\n";
+        cmake_ss << "# Generated ROM code defaults to a smaller manual-testing profile.\n";
+        cmake_ss << "# Raise the optimization level or enable IPO/LTO explicitly for benchmark/release builds.\n";
+        cmake_ss << "set(GBRECOMP_GENERATED_OPT_LEVEL \"1\" CACHE STRING \"Optimization level for the generated ROM source files\")\n";
         cmake_ss << "set_property(CACHE GBRECOMP_GENERATED_OPT_LEVEL PROPERTY STRINGS 0 1 2 3)\n";
-        cmake_ss << "option(GBRECOMP_ENABLE_IPO \"Enable interprocedural optimization/LTO for non-Debug builds\" ON)\n";
+        cmake_ss << "option(GBRECOMP_ENABLE_IPO \"Enable interprocedural optimization/LTO for non-Debug builds\" OFF)\n";
+        cmake_ss << "option(GBRECOMP_ENABLE_STRIP \"Strip symbols from generated executables in non-Debug builds\" ON)\n";
         cmake_ss << "set(GBRECOMP_GENERATED_SOURCES\n";
         for (const auto& filename : generated_source_files) {
             cmake_ss << "    " << filename << "\n";
         }
         cmake_ss << ")\n";
         cmake_ss << "set_source_files_properties(${GBRECOMP_GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS \"-O${GBRECOMP_GENERATED_OPT_LEVEL}\")\n\n";
+        cmake_ss << "if(NOT MSVC AND NOT CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
+        cmake_ss << "    if(APPLE)\n";
+        cmake_ss << "        target_link_options(gbrt PRIVATE -Wl,-dead_strip)\n";
+        cmake_ss << "        target_link_options(" << options.output_prefix << " PRIVATE -Wl,-dead_strip)\n";
+        cmake_ss << "    else()\n";
+        cmake_ss << "        target_link_options(gbrt PRIVATE -Wl,--gc-sections)\n";
+        cmake_ss << "        target_link_options(" << options.output_prefix << " PRIVATE -Wl,--gc-sections)\n";
+        cmake_ss << "    endif()\n";
+        cmake_ss << "endif()\n\n";
         cmake_ss << "if(GBRECOMP_ENABLE_IPO AND NOT CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
         cmake_ss << "    check_ipo_supported(RESULT GBRECOMP_IPO_SUPPORTED OUTPUT GBRECOMP_IPO_ERROR)\n";
         cmake_ss << "    if(GBRECOMP_IPO_SUPPORTED)\n";
@@ -3506,6 +3654,17 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    endif()\n";
         cmake_ss << "endif()\n\n";
         cmake_ss << "target_link_libraries(" << options.output_prefix << " gbrt)\n";
+        cmake_ss << "if(GBRECOMP_ENABLE_STRIP AND NOT MSVC AND NOT CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
+        cmake_ss << "    if(APPLE)\n";
+        cmake_ss << "        add_custom_command(TARGET " << options.output_prefix << " POST_BUILD\n";
+        cmake_ss << "            COMMAND ${CMAKE_STRIP} -Sx $<TARGET_FILE:" << options.output_prefix << ">\n";
+        cmake_ss << "            VERBATIM)\n";
+        cmake_ss << "    elseif(CMAKE_STRIP)\n";
+        cmake_ss << "        add_custom_command(TARGET " << options.output_prefix << " POST_BUILD\n";
+        cmake_ss << "            COMMAND ${CMAKE_STRIP} --strip-debug $<TARGET_FILE:" << options.output_prefix << ">\n";
+        cmake_ss << "            VERBATIM)\n";
+        cmake_ss << "    endif()\n";
+        cmake_ss << "endif()\n";
         output.cmake_content = cmake_ss.str();
         output.cmake_file = "CMakeLists.txt";
     }

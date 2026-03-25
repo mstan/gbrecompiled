@@ -281,6 +281,39 @@ static const uint8_t DUTY_CYCLES[4][8] = {
 /* Noise Divisors: (Divider code) => (Divisor) */
 static const int NOISE_DIVISORS[8] = { 8, 16, 32, 48, 64, 80, 96, 112 };
 
+static uint8_t audio_channel1_pcm(const GBAudio* apu) {
+    if (!apu || !apu->ch1.enabled || !(apu->nr52 & 0x80)) return 0;
+    uint8_t duty = apu->ch1.nr11 >> 6;
+    return DUTY_CYCLES[duty][apu->ch1.wave_pos & 7] ? (uint8_t)(apu->ch1.volume & 0x0F) : 0;
+}
+
+static uint8_t audio_channel2_pcm(const GBAudio* apu) {
+    if (!apu || !apu->ch2.enabled || !(apu->nr52 & 0x80)) return 0;
+    uint8_t duty = apu->ch2.nr21 >> 6;
+    return DUTY_CYCLES[duty][apu->ch2.wave_pos & 7] ? (uint8_t)(apu->ch2.volume & 0x0F) : 0;
+}
+
+static uint8_t audio_channel3_pcm(const GBAudio* apu) {
+    if (!apu || !apu->ch3.enabled || !(apu->nr52 & 0x80)) return 0;
+
+    uint8_t byte = apu->ch3.wave_ram[(apu->ch3.wave_pos & 31) / 2];
+    uint8_t sample = (apu->ch3.wave_pos & 1) ? (byte & 0x0F) : (byte >> 4);
+
+    switch ((apu->ch3.nr32 >> 5) & 0x03) {
+        case 0: return 0;
+        case 1: return sample;
+        case 2: return (uint8_t)(sample >> 1);
+        case 3: return (uint8_t)(sample >> 2);
+    }
+
+    return 0;
+}
+
+static uint8_t audio_channel4_pcm(const GBAudio* apu) {
+    if (!apu || !apu->ch4.enabled || !(apu->nr52 & 0x80)) return 0;
+    return !(apu->ch4.lfsr & 1) ? (uint8_t)(apu->ch4.volume & 0x0F) : 0;
+}
+
 static uint16_t calc_sweep(Channel1* ch) {
     uint16_t new_freq = ch->shadow_freq;
     uint8_t shift = ch->nr10 & 0x07;
@@ -449,6 +482,16 @@ void gb_audio_get_samples(void* audio, int16_t* left, int16_t* right) {
     if (right) {
         *right = (apu != NULL) ? apu->last_output_right : 0;
     }
+}
+
+uint8_t gb_audio_read_pcm12(void* audio) {
+    const GBAudio* apu = (const GBAudio*)audio;
+    return (uint8_t)((audio_channel2_pcm(apu) << 4) | audio_channel1_pcm(apu));
+}
+
+uint8_t gb_audio_read_pcm34(void* audio) {
+    const GBAudio* apu = (const GBAudio*)audio;
+    return (uint8_t)((audio_channel4_pcm(apu) << 4) | audio_channel3_pcm(apu));
 }
 
 uint8_t gb_audio_read(GBContext* ctx, uint16_t addr) {
@@ -919,12 +962,12 @@ void gb_audio_step(GBContext* ctx, uint32_t cycles) {
     }
 }
 
-void gb_audio_div_tick(void* apu_ptr, uint16_t old_div, uint16_t new_div) {
+void gb_audio_div_tick(void* apu_ptr, uint16_t old_div, uint16_t new_div, bool double_speed) {
     if (!apu_ptr) return;
     GBAudio* apu = (GBAudio*)apu_ptr;
     if (!(apu->nr52 & 0x80)) return;
 
-    const uint16_t fs_mask = 1 << 12;
+    const uint16_t fs_mask = (uint16_t)(1 << (double_speed ? 13 : 12));
     uint16_t current = old_div;
     uint32_t cycles_left = (uint16_t)(new_div - old_div);
 
@@ -943,6 +986,6 @@ void gb_audio_div_tick(void* apu_ptr, uint16_t old_div, uint16_t new_div) {
     }
 }
 
-void gb_audio_div_reset(void* apu_ptr, uint16_t old_div) {
-    gb_audio_div_tick(apu_ptr, old_div, 0);
+void gb_audio_div_reset(void* apu_ptr, uint16_t old_div, bool double_speed) {
+    gb_audio_div_tick(apu_ptr, old_div, 0, double_speed);
 }

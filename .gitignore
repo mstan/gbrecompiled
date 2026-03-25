@@ -47,7 +47,7 @@ compile_commands.json
 tetris_test/
 *.log
 *.asm
-output/
+output/*
 logs/
 
 tools/mgbdis
@@ -56,3 +56,6 @@ imgui.ini
 # Python
 __pycache__/
 *.pyc
+
+tech_docs/
+SameBoy/

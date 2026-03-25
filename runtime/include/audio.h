@@ -51,13 +51,13 @@ void gb_audio_step(GBContext* ctx, uint32_t cycles);
  * @param old_div Divider value before the CPU step
  * @param new_div Divider value after the CPU step
  */
-void gb_audio_div_tick(void* apu, uint16_t old_div, uint16_t new_div);
+void gb_audio_div_tick(void* apu, uint16_t old_div, uint16_t new_div, bool double_speed);
 
 /**
  * @brief Handle a write to DIV, including any APU clock edge it causes
  * @param old_div Divider value before it was reset to 0
  */
-void gb_audio_div_reset(void* apu, uint16_t old_div);
+void gb_audio_div_reset(void* apu, uint16_t old_div, bool double_speed);
 
 /**
  * @brief Get current sample for left/right channels
@@ -66,6 +66,18 @@ void gb_audio_div_reset(void* apu, uint16_t old_div);
  * @param right Pointer to store right sample
  */
 void gb_audio_get_samples(void* apu, int16_t* left, int16_t* right);
+
+/**
+ * @brief Read CGB PCM12 digital output register
+ * @param apu Audio state
+ */
+uint8_t gb_audio_read_pcm12(void* apu);
+
+/**
+ * @brief Read CGB PCM34 digital output register
+ * @param apu Audio state
+ */
+uint8_t gb_audio_read_pcm34(void* apu);
 
 /**
  * @brief Enable/disable audio debug capture

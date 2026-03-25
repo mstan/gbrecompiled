@@ -108,7 +108,9 @@ def prepare_recompiled_binary(args: argparse.Namespace) -> Path:
         str(project_dir),
         "-B",
         str(build_dir),
+        "-DCMAKE_BUILD_TYPE=Release",
         f"-DGBRECOMP_GENERATED_OPT_LEVEL={args.recompiled_opt_level}",
+        "-DGBRECOMP_ENABLE_IPO=ON",
     ]
     ninja_argv = ["ninja", "-C", str(build_dir)]
 

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "gbrt_debug.h"
 
 /* ============================================================================
@@ -36,6 +37,20 @@ static uint64_t gbrt_ppu_trace_end_frame = 0;
 
 static inline void gb_sync(GBContext* ctx);
 static bool gb_context_try_load_battery_ram(GBContext* ctx);
+static bool gb_context_try_load_rtc(GBContext* ctx);
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t saved_unix_time;
+    uint64_t cycle_remainder;
+    uint8_t s, m, h, dl, dh;
+    uint8_t latched_s, latched_m, latched_h, latched_dl, latched_dh;
+    uint8_t latch_state;
+} GBRTCPersistedState;
+
+#define GBRTC_PERSIST_MAGIC 0x47525443u /* 'GRTC' */
+#define GBRTC_PERSIST_VERSION 1u
 
 static int gbrt_compare_hotspots_desc(const GBInterpreterHotspot* lhs,
                                       const GBInterpreterHotspot* rhs) {
@@ -247,6 +262,15 @@ static bool gb_cart_type_has_battery(uint8_t type) {
     return false;
 }
 
+static bool gb_cart_type_has_rtc(uint8_t type) {
+    switch (type) {
+        case 0x0F: /* MBC3+TIMER+BATTERY */
+        case 0x10: /* MBC3+TIMER+RAM+BATTERY */
+            return true;
+    }
+    return false;
+}
+
 static void gb_context_get_rom_title(const GBContext* ctx, char title[17]) {
     memset(title, 0, 17);
     if (!ctx || !ctx->rom || ctx->rom_size <= 0x143) {
@@ -265,6 +289,64 @@ static void gb_context_get_rom_title(const GBContext* ctx, char title[17]) {
     }
 }
 
+static void gb_context_get_save_id(const GBContext* ctx, char save_id[64]) {
+    if (!save_id) {
+        return;
+    }
+
+    memset(save_id, 0, 64);
+    if (ctx && ctx->save_id[0]) {
+        snprintf(save_id, 64, "%s", ctx->save_id);
+        return;
+    }
+
+    char title[17];
+    gb_context_get_rom_title(ctx, title);
+    snprintf(save_id, 64, "%s", title);
+}
+
+static bool gb_save_id_differs_from_legacy_title(const GBContext* ctx, const char* save_id) {
+    char legacy_title[17];
+    gb_context_get_rom_title(ctx, legacy_title);
+    return strcmp(save_id, legacy_title) != 0;
+}
+
+static void gb_rtc_refresh_latch(GBContext* ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    ctx->rtc.latched_s = ctx->rtc.s;
+    ctx->rtc.latched_m = ctx->rtc.m;
+    ctx->rtc.latched_h = ctx->rtc.h;
+    ctx->rtc.latched_dl = ctx->rtc.dl;
+    ctx->rtc.latched_dh = ctx->rtc.dh;
+}
+
+static void gb_rtc_advance_seconds(GBContext* ctx, uint64_t elapsed_seconds) {
+    if (!ctx || elapsed_seconds == 0) {
+        return;
+    }
+
+    uint64_t total = (uint64_t)ctx->rtc.s + elapsed_seconds;
+    ctx->rtc.s = (uint8_t)(total % 60u);
+    total = (uint64_t)ctx->rtc.m + (total / 60u);
+    ctx->rtc.m = (uint8_t)(total % 60u);
+    total = (uint64_t)ctx->rtc.h + (total / 60u);
+    ctx->rtc.h = (uint8_t)(total % 24u);
+
+    uint64_t days = (uint64_t)(ctx->rtc.dl | ((ctx->rtc.dh & 0x01u) << 8)) + (total / 24u);
+    uint8_t dh = (uint8_t)(ctx->rtc.dh & 0x40u);
+    if ((ctx->rtc.dh & 0x80u) || days > 0x1FFu) {
+        dh |= 0x80u;
+    }
+    days &= 0x1FFu;
+    ctx->rtc.dl = (uint8_t)(days & 0xFFu);
+    ctx->rtc.dh = (uint8_t)(dh | ((days >> 8) & 0x01u));
+    ctx->rtc.active = (ctx->rtc.dh & 0x40u) == 0;
+    gb_rtc_refresh_latch(ctx);
+}
+
 static bool gb_context_try_load_battery_ram(GBContext* ctx) {
     if (!ctx || !ctx->rom || ctx->rom_size <= 0x149 || !ctx->eram || !ctx->eram_size) {
         return false;
@@ -276,14 +358,177 @@ static bool gb_context_try_load_battery_ram(GBContext* ctx) {
         return false;
     }
 
-    char title[17];
-    gb_context_get_rom_title(ctx, title);
-    if (!ctx->callbacks.load_battery_ram(ctx, title, ctx->eram, ctx->eram_size)) {
+    char save_id[64];
+    gb_context_get_save_id(ctx, save_id);
+    if (ctx->callbacks.load_battery_ram(ctx, save_id, ctx->eram, ctx->eram_size)) {
+        printf("[GBRT] Loaded battery RAM for '%s'\n", save_id);
+        return true;
+    }
+
+    if (ctx->save_id[0] && gb_save_id_differs_from_legacy_title(ctx, save_id)) {
+        char legacy_title[17];
+        gb_context_get_rom_title(ctx, legacy_title);
+        if (ctx->callbacks.load_battery_ram(ctx, legacy_title, ctx->eram, ctx->eram_size)) {
+            printf("[GBRT] Loaded battery RAM for '%s' via legacy title fallback\n", legacy_title);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool gb_context_try_load_rtc(GBContext* ctx) {
+    if (!ctx || !ctx->rom || ctx->rom_size <= 0x149 || !ctx->callbacks.load_rtc_data) {
+        return false;
+    }
+    if (!gb_cart_type_has_rtc(ctx->rom[0x147])) {
         return false;
     }
 
-    printf("[GBRT] Loaded battery RAM for '%s'\n", title);
+    GBRTCPersistedState persisted;
+    memset(&persisted, 0, sizeof(persisted));
+
+    char save_id[64];
+    gb_context_get_save_id(ctx, save_id);
+    const char* loaded_id = save_id;
+    bool loaded = ctx->callbacks.load_rtc_data(ctx, save_id, &persisted, sizeof(persisted));
+    if (!loaded && ctx->save_id[0] && gb_save_id_differs_from_legacy_title(ctx, save_id)) {
+        char legacy_title[17];
+        gb_context_get_rom_title(ctx, legacy_title);
+        loaded = ctx->callbacks.load_rtc_data(ctx, legacy_title, &persisted, sizeof(persisted));
+        if (loaded) {
+            loaded_id = legacy_title;
+        }
+    }
+
+    if (!loaded || persisted.magic != GBRTC_PERSIST_MAGIC || persisted.version != GBRTC_PERSIST_VERSION) {
+        return false;
+    }
+
+    ctx->rtc.s = persisted.s;
+    ctx->rtc.m = persisted.m;
+    ctx->rtc.h = persisted.h;
+    ctx->rtc.dl = persisted.dl;
+    ctx->rtc.dh = persisted.dh;
+    ctx->rtc.latched_s = persisted.latched_s;
+    ctx->rtc.latched_m = persisted.latched_m;
+    ctx->rtc.latched_h = persisted.latched_h;
+    ctx->rtc.latched_dl = persisted.latched_dl;
+    ctx->rtc.latched_dh = persisted.latched_dh;
+    ctx->rtc.latch_state = persisted.latch_state;
+    ctx->rtc.last_time = persisted.cycle_remainder % 4194304u;
+    ctx->rtc.active = (ctx->rtc.dh & 0x40u) == 0;
+
+    time_t now = time(NULL);
+    if (ctx->rtc.active && persisted.saved_unix_time > 0 && now != (time_t)-1 && now > 0) {
+        uint64_t now_u64 = (uint64_t)now;
+        if (now_u64 > persisted.saved_unix_time) {
+            gb_rtc_advance_seconds(ctx, now_u64 - persisted.saved_unix_time);
+        }
+    }
+
+    if (loaded_id != save_id) {
+        printf("[GBRT] Loaded RTC data for '%s' via legacy title fallback\n", loaded_id);
+    } else {
+        printf("[GBRT] Loaded RTC data for '%s'\n", loaded_id);
+    }
     return true;
+}
+
+static bool gb_context_save_rtc(GBContext* ctx) {
+    if (!ctx || !ctx->rom || ctx->rom_size <= 0x149 || !ctx->callbacks.save_rtc_data) {
+        return false;
+    }
+    if (!gb_cart_type_has_rtc(ctx->rom[0x147])) {
+        return false;
+    }
+
+    GBRTCPersistedState persisted;
+    memset(&persisted, 0, sizeof(persisted));
+    persisted.magic = GBRTC_PERSIST_MAGIC;
+    persisted.version = GBRTC_PERSIST_VERSION;
+    time_t now = time(NULL);
+    persisted.saved_unix_time = (now == (time_t)-1 || now < 0) ? 0u : (uint64_t)now;
+    persisted.cycle_remainder = ctx->rtc.last_time;
+    persisted.s = ctx->rtc.s;
+    persisted.m = ctx->rtc.m;
+    persisted.h = ctx->rtc.h;
+    persisted.dl = ctx->rtc.dl;
+    persisted.dh = ctx->rtc.dh;
+    persisted.latched_s = ctx->rtc.latched_s;
+    persisted.latched_m = ctx->rtc.latched_m;
+    persisted.latched_h = ctx->rtc.latched_h;
+    persisted.latched_dl = ctx->rtc.latched_dl;
+    persisted.latched_dh = ctx->rtc.latched_dh;
+    persisted.latch_state = ctx->rtc.latch_state;
+
+    char save_id[64];
+    gb_context_get_save_id(ctx, save_id);
+    bool result = ctx->callbacks.save_rtc_data(ctx, save_id, &persisted, sizeof(persisted));
+    if (result) {
+        printf("[GBRT] Saved RTC data for '%s'\n", save_id);
+    } else {
+        printf("[GBRT] Failed to save RTC data for '%s'\n", save_id);
+    }
+    return result;
+}
+
+static GBConfig gb_default_config(void) {
+    GBConfig config;
+    memset(&config, 0, sizeof(config));
+    config.model = GB_MODEL_DMG;
+    config.enable_audio = true;
+    config.enable_serial = true;
+    config.speed_percent = 100;
+    return config;
+}
+
+static bool gb_is_cgb_hardware(const GBContext* ctx) {
+    return ctx && ctx->config.model == GB_MODEL_CGB;
+}
+
+static bool gb_is_cgb_mode(const GBContext* ctx) {
+    return gb_is_cgb_hardware(ctx) && !ctx->config.cgb_compatibility_mode;
+}
+
+static bool gb_is_cgb_compat_mode(const GBContext* ctx) {
+    return gb_is_cgb_hardware(ctx) && ctx->config.cgb_compatibility_mode;
+}
+
+static bool gb_cartridge_uses_nintendo_license(const GBContext* ctx) {
+    if (!ctx || !ctx->rom || ctx->rom_size <= 0x145) {
+        return false;
+    }
+
+    if (ctx->rom[0x14B] == 0x01) {
+        return true;
+    }
+
+    return ctx->rom[0x14B] == 0x33 &&
+           ctx->rom[0x144] == '0' &&
+           ctx->rom[0x145] == '1';
+}
+
+static uint8_t gb_compute_title_checksum(const GBContext* ctx) {
+    uint8_t checksum = 0;
+
+    if (!ctx || !ctx->rom || ctx->rom_size <= 0x143) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < 16; i++) {
+        checksum = (uint8_t)(checksum + ctx->rom[0x134 + i]);
+    }
+
+    return checksum;
+}
+
+static uint8_t gb_compute_cgb_compat_b(const GBContext* ctx) {
+    if (!gb_cartridge_uses_nintendo_license(ctx)) {
+        return 0;
+    }
+
+    return gb_compute_title_checksum(ctx);
 }
 
 GBContext* gb_context_create(const GBConfig* config) {
@@ -291,6 +536,11 @@ GBContext* gb_context_create(const GBConfig* config) {
 
     GBContext* ctx = (GBContext*)calloc(1, sizeof(GBContext));
     if (!ctx) return NULL;
+
+    ctx->config = config ? *config : gb_default_config();
+    if (!gb_is_cgb_hardware(ctx)) {
+        ctx->config.cgb_compatibility_mode = false;
+    }
     
     ctx->wram = (uint8_t*)calloc(1, WRAM_BANK_SIZE * 8);
     ctx->vram = (uint8_t*)calloc(1, VRAM_SIZE * 2);
@@ -312,7 +562,6 @@ GBContext* gb_context_create(const GBConfig* config) {
     ctx->apu = gb_audio_create();
     audio_stats_init();
     gb_context_reset(ctx, true);
-    (void)config;
 
     if (gbrt_trace_filename) {
         ctx->trace_file = fopen(gbrt_trace_filename, "w");
@@ -361,8 +610,16 @@ void gb_context_destroy(GBContext* ctx) {
 }
 
 void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
+    if (!ctx) {
+        return;
+    }
+
     if (ctx->apu) {
         gb_audio_reset(ctx->apu);
+    }
+
+    if (!gb_is_cgb_hardware(ctx)) {
+        ctx->config.cgb_compatibility_mode = false;
     }
 
     /* Reset DMA state */
@@ -372,6 +629,7 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->dma.progress = 0;
     ctx->dma.cycles_remaining = 0;
     ctx->dma.startup_delay = 0;
+    memset(&ctx->hdma, 0, sizeof(ctx->hdma));
     
     /* Reset HALT bug state */
     ctx->halt_bug = 0;
@@ -381,7 +639,10 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->ime_pending = 0;
     ctx->halted = 0;
     ctx->stopped = 0;
+    ctx->stop_mode_active = 0;
     ctx->single_step_mode = 0;
+    ctx->cgb_double_speed = 0;
+    memset(&ctx->serial_transfer, 0, sizeof(ctx->serial_transfer));
     ctx->last_joypad = 0xFF;
     ctx->used_dispatch_fallback = 0;
     ctx->dispatch_fallback_bank = 0;
@@ -435,33 +696,60 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->ram_enabled = 0;
     ctx->mbc_mode = 0;
     ctx->rom_bank_upper = 0;
+    ctx->rom_bank = 1;
+    ctx->ram_bank = 0;
+    ctx->wram_bank = 1;
+    ctx->vram_bank = 0;
+
+    memset(ctx->io, 0, IO_SIZE + 1);
     
     if (skip_bootrom) {
         ctx->pc = 0x0100;
         ctx->sp = 0xFFFE;
-        ctx->af = 0x01B0;
-        ctx->bc = 0x0013;
-        ctx->de = 0x00D8;
-        ctx->hl = 0x014D;
+
+        if (gb_is_cgb_mode(ctx)) {
+            ctx->af = 0x1180;
+            ctx->bc = 0x0000;
+            ctx->de = 0xFF56;
+            ctx->hl = 0x000D;
+            ctx->div_counter = 0x0000;
+        } else if (gb_is_cgb_compat_mode(ctx)) {
+            uint8_t compat_b = gb_compute_cgb_compat_b(ctx);
+            ctx->af = 0x1180;
+            ctx->bc = compat_b;
+            ctx->de = 0x0008;
+            ctx->hl = (compat_b == 0x43 || compat_b == 0x58) ? 0x991A : 0x007C;
+            ctx->div_counter = 0x0000;
+        } else {
+            ctx->af = 0x01B0;
+            ctx->bc = 0x0013;
+            ctx->de = 0x00D8;
+            ctx->hl = 0x014D;
+            ctx->div_counter = 0xABCC; /* Post-bootrom DIV internal counter value */
+        }
         gb_unpack_flags(ctx);
-        ctx->rom_bank = 1;
-        ctx->wram_bank = 1;
-        ctx->div_counter = 0xABCC; /* Post-bootrom DIV internal counter value */
-        
-        ctx->io[0x04] = 0xAB; /* DIV - post-bootrom value */
+
+        ctx->io[0x00] = 0xCF; /* JOYP */
+        ctx->io[0x01] = 0x00; /* SB */
+        ctx->io[0x02] = gb_is_cgb_hardware(ctx) ? 0x7F : 0x7E; /* SC */
+        ctx->io[0x04] = (uint8_t)(ctx->div_counter >> 8); /* DIV */
         ctx->io[0x05] = 0x00; /* TIMA */
         ctx->io[0x06] = 0x00; /* TMA */
-        ctx->io[0x07] = 0x00; /* TAC */
+        ctx->io[0x07] = 0xF8; /* TAC */
+        ctx->io[0x0F] = 0xE1; /* IF */
         ctx->io[0x10] = 0x80; /* NR10 */
         ctx->io[0x11] = 0xBF; /* NR11 */
         ctx->io[0x12] = 0xF3; /* NR12 */
+        ctx->io[0x13] = 0xFF; /* NR13 */
         ctx->io[0x14] = 0xBF; /* NR14 */
         ctx->io[0x16] = 0x3F; /* NR21 */
         ctx->io[0x17] = 0x00; /* NR22 */
+        ctx->io[0x18] = 0xFF; /* NR23 */
         ctx->io[0x19] = 0xBF; /* NR24 */
         ctx->io[0x1A] = 0x7F; /* NR30 */
         ctx->io[0x1B] = 0xFF; /* NR31 */
         ctx->io[0x1C] = 0x9F; /* NR32 */
+        ctx->io[0x1D] = 0xFF; /* NR33 */
         ctx->io[0x1E] = 0xBF; /* NR34 */
         ctx->io[0x20] = 0xFF; /* NR41 */
         ctx->io[0x21] = 0x00; /* NR42 */
@@ -470,18 +758,25 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
         ctx->io[0x24] = 0x77; /* NR50 */
         ctx->io[0x25] = 0xF3; /* NR51 */
         ctx->io[0x26] = 0xF1; /* NR52 */
-        ctx->io[0x40] = 0x91; /* LCDC */
-        ctx->io[0x41] = 0x01; /* STAT - mode 1 (VBlank) */
-        ctx->io[0x42] = 0x00; /* SCY */
-        ctx->io[0x43] = 0x00; /* SCX */
-        ctx->io[0x44] = 0x91; /* LY = 145 (post-bootrom VBlank) */
-        ctx->io[0x45] = 0x00; /* LYC */
-        ctx->io[0x47] = 0xFC; /* BGP */
-        ctx->io[0x48] = 0xFF; /* OBP0 */
-        ctx->io[0x49] = 0xFF; /* OBP1 */
-        ctx->io[0x4A] = 0x00; /* WY */
-        ctx->io[0x4B] = 0x00; /* WX */
+        ctx->io[0x46] = gb_is_cgb_hardware(ctx) ? 0x00 : 0xFF; /* DMA */
+        if (gb_is_cgb_hardware(ctx)) {
+            ctx->io[0x4D] = 0x7E; /* KEY1 */
+            ctx->io[0x4F] = 0xFE; /* VBK */
+            ctx->io[0x51] = 0xFF; /* HDMA1 */
+            ctx->io[0x52] = 0xFF; /* HDMA2 */
+            ctx->io[0x53] = 0xFF; /* HDMA3 */
+            ctx->io[0x54] = 0xFF; /* HDMA4 */
+            ctx->io[0x55] = 0xFF; /* HDMA5 */
+            ctx->io[0x56] = 0x3E; /* RP */
+            ctx->io[0x68] = 0xC0; /* BGPI */
+            ctx->io[0x6A] = 0xC0; /* OBPI */
+            ctx->io[0x70] = 0xF8; /* SVBK */
+        }
         ctx->io[0x80] = 0x00; /* IE */
+    }
+
+    if (ctx->ppu) {
+        ppu_reset((GBPPU*)ctx->ppu, ctx);
     }
 }
 
@@ -532,6 +827,7 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
                 /* Load Save Data if Battery Present */
                 if (has_battery) {
                     gb_context_try_load_battery_ram(ctx);
+                    gb_context_try_load_rtc(ctx);
                 }
             }
         }
@@ -545,17 +841,147 @@ bool gb_context_save_ram(GBContext* ctx) {
         return false;
     }
     
-    /* Get ROM title for filename */
-    char title[17];
-    gb_context_get_rom_title(ctx, title);
+    char save_id[64];
+    gb_context_get_save_id(ctx, save_id);
     
-    bool result = ctx->callbacks.save_battery_ram(ctx, title, ctx->eram, ctx->eram_size);
-    if (result) {
-        printf("[GBRT] Saved battery RAM for '%s'\n", title);
+    bool ram_result = ctx->callbacks.save_battery_ram(ctx, save_id, ctx->eram, ctx->eram_size);
+    if (ram_result) {
+        printf("[GBRT] Saved battery RAM for '%s'\n", save_id);
     } else {
-        printf("[GBRT] Failed to save battery RAM for '%s'\n", title);
+        printf("[GBRT] Failed to save battery RAM for '%s'\n", save_id);
     }
-    return result;
+
+    bool rtc_result = true;
+    if (gb_cart_type_has_rtc(ctx->rom[0x147])) {
+        rtc_result = gb_context_save_rtc(ctx);
+    }
+    return ram_result && rtc_result;
+}
+
+static uint8_t gb_direct_read_dma_source(GBContext* ctx, uint16_t addr) {
+    if (addr < 0x4000) {
+        return (addr < ctx->rom_size) ? ctx->rom[addr] : 0xFF;
+    }
+
+    if (addr < 0x8000) {
+        uint32_t rom_addr = ((uint32_t)ctx->rom_bank * 0x4000u) + (uint32_t)(addr - 0x4000);
+        return (rom_addr < ctx->rom_size) ? ctx->rom[rom_addr] : 0xFF;
+    }
+
+    if (addr >= 0xA000 && addr < 0xC000) {
+        if (!ctx->eram || !ctx->ram_enabled) {
+            return 0xFF;
+        }
+        uint32_t eram_addr = ((uint32_t)ctx->ram_bank * 0x2000u) + (uint32_t)(addr - 0xA000);
+        return (eram_addr < ctx->eram_size) ? ctx->eram[eram_addr] : 0xFF;
+    }
+
+    if (addr >= 0xC000 && addr < 0xD000) {
+        return ctx->wram[addr - 0xC000];
+    }
+
+    if (addr >= 0xD000 && addr < 0xE000) {
+        return ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)];
+    }
+
+    return 0xFF;
+}
+
+static void gb_hdma_refresh_registers(GBContext* ctx);
+
+static void gb_hdma_copy_block(GBContext* ctx) {
+    if (!ctx || !gb_is_cgb_mode(ctx) || !ctx->hdma.blocks_remaining) {
+        return;
+    }
+
+    for (uint16_t offset = 0; offset < 0x10; offset++) {
+        uint16_t src = (uint16_t)(ctx->hdma.source + offset);
+        uint16_t dest = (uint16_t)(ctx->hdma.dest + offset);
+        if (dest >= 0x8000 && dest < 0xA000) {
+            ctx->vram[(ctx->vram_bank * VRAM_SIZE) + (dest - 0x8000)] =
+                gb_direct_read_dma_source(ctx, src);
+        }
+    }
+
+    ctx->hdma.source = (uint16_t)(ctx->hdma.source + 0x10);
+    ctx->hdma.dest = (uint16_t)(ctx->hdma.dest + 0x10);
+
+    if (ctx->hdma.blocks_remaining > 0) {
+        ctx->hdma.blocks_remaining--;
+    }
+
+    if (ctx->hdma.blocks_remaining == 0 || ctx->hdma.dest >= 0xA000) {
+        ctx->hdma.active = 0;
+        ctx->hdma.hblank_mode = 0;
+        ctx->hdma.blocks_remaining = 0;
+    } else if (ctx->hdma.hblank_mode) {
+        ctx->hdma.active = 0;
+    }
+
+    gb_hdma_refresh_registers(ctx);
+}
+
+void gbrt_hdma_hblank(GBContext* ctx) {
+    if (!ctx || !gb_is_cgb_mode(ctx)) {
+        return;
+    }
+    if (!ctx->hdma.hblank_mode || ctx->hdma.active || ctx->halted || ctx->stop_mode_active) {
+        return;
+    }
+
+    ctx->hdma.active = 1;
+    gb_hdma_copy_block(ctx);
+    ctx->stopped = 1;
+}
+
+static uint8_t gb_hdma_status_read(const GBContext* ctx) {
+    if (!ctx || !gb_is_cgb_mode(ctx)) {
+        return 0xFF;
+    }
+
+    if (!ctx->hdma.active && !ctx->hdma.hblank_mode && ctx->hdma.blocks_remaining == 0) {
+        return 0xFF;
+    }
+
+    return (uint8_t)(((ctx->hdma.active || ctx->hdma.hblank_mode) ? 0x00 : 0x80) |
+                     ((ctx->hdma.blocks_remaining - 1) & 0x7F));
+}
+
+static void gb_hdma_refresh_registers(GBContext* ctx) {
+    ctx->io[0x51] = (uint8_t)(ctx->hdma.source >> 8);
+    ctx->io[0x52] = (uint8_t)(ctx->hdma.source & 0xF0);
+    ctx->io[0x53] = (uint8_t)(((ctx->hdma.dest - 0x8000) >> 8) & 0x1F);
+    ctx->io[0x54] = (uint8_t)(ctx->hdma.dest & 0xF0);
+    ctx->io[0x55] = gb_hdma_status_read(ctx);
+}
+
+static void gb_hdma_start(GBContext* ctx, uint8_t value) {
+    if (!ctx || !gb_is_cgb_mode(ctx)) {
+        return;
+    }
+
+    if (ctx->hdma.hblank_mode && (value & 0x80) == 0) {
+        ctx->hdma.active = 0;
+        ctx->hdma.hblank_mode = 0;
+        gb_hdma_refresh_registers(ctx);
+        return;
+    }
+
+    ctx->hdma.blocks_remaining = (uint8_t)((value & 0x7F) + 1);
+    ctx->hdma.source = (uint16_t)(((uint16_t)ctx->io[0x51] << 8) | (ctx->io[0x52] & 0xF0));
+    ctx->hdma.dest = (uint16_t)(0x8000 | (((uint16_t)ctx->io[0x53] & 0x1F) << 8) | (ctx->io[0x54] & 0xF0));
+    ctx->hdma.hblank_mode = (value & 0x80) != 0;
+    ctx->hdma.active = 1;
+
+    if (!ctx->hdma.hblank_mode) {
+        while (ctx->hdma.active || ctx->hdma.blocks_remaining > 0) {
+            gb_hdma_copy_block(ctx);
+        }
+    } else {
+        ctx->hdma.active = 0;
+    }
+
+    gb_hdma_refresh_registers(ctx);
 }
 
 /* ============================================================================
@@ -655,7 +1081,58 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
             return res;
         }
         if (addr == 0xFF04) return (uint8_t)(ctx->div_counter >> 8);
+        if (addr == 0xFF4D) {
+            if (!gb_is_cgb_mode(ctx)) return 0xFF;
+            return (uint8_t)((ctx->io[0x4D] & 0x01) | (ctx->cgb_double_speed ? 0xFE : 0x7E));
+        }
+        if (addr == 0xFF4F) {
+            if (!gb_is_cgb_mode(ctx)) return 0xFF;
+            return (uint8_t)(ctx->vram_bank | 0xFE);
+        }
+        if (addr >= 0xFF51 && addr <= 0xFF54) {
+            if (!gb_is_cgb_mode(ctx)) return 0xFF;
+            return ctx->io[addr - 0xFF00];
+        }
+        if (addr == 0xFF55) {
+            return gb_hdma_status_read(ctx);
+        }
+        if (addr == 0xFF56) {
+            if (!gb_is_cgb_mode(ctx)) return 0xFF;
+            return 0x3E;
+        }
+        if (addr == 0xFF6C) {
+            if (!gb_is_cgb_mode(ctx)) return 0xFF;
+            return (uint8_t)(0xFE | (((GBPPU*)ctx->ppu)->opri & 0x01));
+        }
+        if (addr == 0xFF72 || addr == 0xFF73) {
+            if (!gb_is_cgb_hardware(ctx)) return 0xFF;
+            return ctx->io[addr - 0xFF00];
+        }
+        if (addr == 0xFF74) {
+            if (!gb_is_cgb_mode(ctx)) return 0xFF;
+            return ctx->io[0x74];
+        }
+        if (addr == 0xFF75) {
+            if (!gb_is_cgb_hardware(ctx)) return 0xFF;
+            return (uint8_t)(ctx->io[0x75] | 0x8F);
+        }
+        if (addr == 0xFF76) {
+            if (!gb_is_cgb_hardware(ctx)) return 0xFF;
+            return gb_audio_read_pcm12(ctx->apu);
+        }
+        if (addr == 0xFF77) {
+            if (!gb_is_cgb_hardware(ctx)) return 0xFF;
+            return gb_audio_read_pcm34(ctx->apu);
+        }
+        if (addr == 0xFF70) {
+            if (!gb_is_cgb_mode(ctx)) return 0xFF;
+            return ctx->io[0x70];
+        }
         if (addr >= 0xFF40 && addr <= 0xFF4B) {
+            gb_sync(ctx);
+            return ppu_read_register((GBPPU*)ctx->ppu, addr);
+        }
+        if (addr >= 0xFF68 && addr <= 0xFF6B) {
             gb_sync(ctx);
             return ppu_read_register((GBPPU*)ctx->ppu, addr);
         }
@@ -884,13 +1361,124 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             ctx->dma.active = 0;  /* not yet blocking the bus */
             return;
         }
-        if (addr >= 0xFF40 && addr <= 0xFF4B) { ppu_write_register((GBPPU*)ctx->ppu, ctx, addr, value); return; }
+        if (addr == 0xFF02) {
+            uint8_t sc = (uint8_t)(0x7C | (value & 0x83));
+            if (!gb_is_cgb_hardware(ctx)) {
+                sc |= 0x02;
+            }
+            ctx->io[0x02] = sc;
+
+            ctx->serial_transfer.active = 0;
+            ctx->serial_transfer.fast_clock = 0;
+            ctx->serial_transfer.cycles_remaining = 0;
+
+            if ((sc & 0x80) && (sc & 0x01) && ctx->config.enable_serial) {
+                ctx->serial_transfer.active = 1;
+                ctx->serial_transfer.fast_clock =
+                    (uint8_t)((gb_is_cgb_mode(ctx) && (sc & 0x02)) ? 1 : 0);
+                ctx->serial_transfer.cycles_remaining =
+                    ctx->serial_transfer.fast_clock ? 128u : 4096u;
+            }
+            return;
+        }
+        if (addr == 0xFF4D) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->io[0x4D] = value & 0x01;
+            }
+            return;
+        }
+        if (addr == 0xFF4F) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->vram_bank = value & 0x01;
+                ctx->io[0x4F] = (uint8_t)(0xFE | ctx->vram_bank);
+            }
+            return;
+        }
+        if (addr == 0xFF51) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->io[0x51] = value;
+                ctx->hdma.source = (uint16_t)(((uint16_t)value << 8) | (ctx->hdma.source & 0x00F0));
+            }
+            return;
+        }
+        if (addr == 0xFF52) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->io[0x52] = value & 0xF0;
+                ctx->hdma.source = (uint16_t)((ctx->hdma.source & 0xFF00) | (value & 0xF0));
+            }
+            return;
+        }
+        if (addr == 0xFF53) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->io[0x53] = value & 0x1F;
+                ctx->hdma.dest = (uint16_t)(0x8000 | (((uint16_t)value & 0x1F) << 8) | (ctx->hdma.dest & 0x00F0));
+            }
+            return;
+        }
+        if (addr == 0xFF54) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->io[0x54] = value & 0xF0;
+                ctx->hdma.dest = (uint16_t)(0x8000 | (ctx->hdma.dest & 0x1F00) | (value & 0xF0));
+            }
+            return;
+        }
+        if (addr == 0xFF55) {
+            gb_sync(ctx);
+            gb_hdma_start(ctx, value);
+            return;
+        }
+        if (addr == 0xFF56) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->io[0x56] = (value & 0xC1) | 0x3E;
+            }
+            return;
+        }
+        if (addr == 0xFF6C) {
+            if (gb_is_cgb_mode(ctx) && ctx->ppu) {
+                ((GBPPU*)ctx->ppu)->opri = value & 0x01;
+                ctx->io[0x6C] = (uint8_t)(0xFE | (((GBPPU*)ctx->ppu)->opri & 0x01));
+            }
+            return;
+        }
+        if (addr == 0xFF72 || addr == 0xFF73) {
+            if (gb_is_cgb_hardware(ctx)) {
+                ctx->io[addr - 0xFF00] = value;
+            }
+            return;
+        }
+        if (addr == 0xFF74) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->io[0x74] = value;
+            }
+            return;
+        }
+        if (addr == 0xFF75) {
+            if (gb_is_cgb_hardware(ctx)) {
+                ctx->io[0x75] = (uint8_t)(value & 0x70);
+            }
+            return;
+        }
+        if (addr == 0xFF76 || addr == 0xFF77) {
+            return;
+        }
+        if (addr == 0xFF70) {
+            if (gb_is_cgb_mode(ctx)) {
+                ctx->wram_bank = value & 0x07;
+                if (ctx->wram_bank == 0) ctx->wram_bank = 1;
+                ctx->io[0x70] = (uint8_t)(0xF8 | ctx->wram_bank);
+            }
+            return;
+        }
+        if ((addr >= 0xFF40 && addr <= 0xFF4B) || (addr >= 0xFF68 && addr <= 0xFF6B)) {
+            ppu_write_register((GBPPU*)ctx->ppu, ctx, addr, value);
+            return;
+        }
         if (addr >= 0xFF10 && addr <= 0xFF3F) { gb_audio_write(ctx, addr, value); return; }
         if (addr == 0xFF04) { 
             uint16_t old_div = ctx->div_counter;
             ctx->div_counter = 0; 
             ctx->io[0x04] = 0; /* Update register view immediately */
-            if (ctx->apu) gb_audio_div_reset(ctx->apu, old_div);
+            if (ctx->apu) gb_audio_div_reset(ctx->apu, old_div, ctx->cgb_double_speed != 0);
             
             /* DIV Reset Glitch: 
              * If the selected bit for TIMA is 1 in old_div and becomes 0 (it does, since div is 0),
@@ -918,11 +1506,7 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
              }
             return; 
         }
-        if (addr == 0xFF02 && (value & 0x80)) {
-            printf("%c", ctx->io[0x01]); fflush(stdout);
-            ctx->io[0x0F] |= 0x08;
-        }
-        if (addr >= 0xFF40 && addr <= 0xFF4B) {
+        if ((addr >= 0xFF40 && addr <= 0xFF4B) || (addr >= 0xFF68 && addr <= 0xFF6B)) {
             gb_sync(ctx);
         }
         ctx->io[addr - 0xFF00] = value;
@@ -2095,8 +2679,44 @@ static void gb_dma_tick(GBContext* ctx, uint32_t cycles) {
     }
 }
 
+static void gb_serial_tick(GBContext* ctx, uint32_t cpu_cycles) {
+    if (!ctx->serial_transfer.active) {
+        return;
+    }
+
+    if (cpu_cycles >= ctx->serial_transfer.cycles_remaining) {
+        uint8_t outgoing = ctx->io[0x01];
+        ctx->serial_transfer.active = 0;
+        ctx->serial_transfer.cycles_remaining = 0;
+        ctx->io[0x02] &= (uint8_t)~0x80;
+        ctx->io[0x01] = 0xFF;
+        ctx->io[0x0F] |= 0x08;
+
+        if (ctx->callbacks.on_serial_byte) {
+            ctx->callbacks.on_serial_byte(ctx, outgoing);
+        }
+        return;
+    }
+
+    ctx->serial_transfer.cycles_remaining -= cpu_cycles;
+}
+
+static bool gb_stop_should_resume(GBContext* ctx) {
+    if (!ctx || !ctx->stop_mode_active) {
+        return false;
+    }
+
+    if (ctx->io[0x0F] & ctx->io[0x80] & 0x1F) {
+        return true;
+    }
+
+    return (gb_read8(ctx, 0xFF00) & 0x0F) != 0x0F;
+}
+
 void gb_tick(GBContext* ctx, uint32_t cycles) {
     static uint32_t last_log = 0;
+    uint32_t cpu_cycles = cycles;
+    uint32_t system_cycles = ctx->cgb_double_speed ? (cycles / 2) : cycles;
     
     // Check limit
     if (gbrt_instruction_limit > 0) {
@@ -2115,19 +2735,22 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
         fprintf(stderr, "[TICK] Cycles: %u, PC: 0x%04X, IME: %d, IF: 0x%02X, IE: 0x%02X\n", 
                 ctx->cycles, ctx->pc, ctx->ime, ctx->io[0x0F], ctx->io[0x80]);
     }
-    gb_add_cycles(ctx, cycles);
+    gb_add_cycles(ctx, system_cycles);
     
     /* RTC Tick */
-    gb_rtc_tick(ctx, cycles);
+    gb_rtc_tick(ctx, system_cycles);
     
     /* OAM DMA Tick */
-    gb_dma_tick(ctx, cycles);
+    gb_dma_tick(ctx, cpu_cycles);
+
+    /* Serial Tick */
+    gb_serial_tick(ctx, cpu_cycles);
 
     /* Update DIV and TIMA */
     uint16_t old_div = ctx->div_counter;
-    ctx->div_counter += (uint16_t)cycles;
+    ctx->div_counter += (uint16_t)cpu_cycles;
     ctx->io[0x04] = (uint8_t)(ctx->div_counter >> 8);
-    if (ctx->apu) gb_audio_div_tick(ctx->apu, old_div, ctx->div_counter);
+    if (ctx->apu) gb_audio_div_tick(ctx->apu, old_div, ctx->div_counter, ctx->cgb_double_speed != 0);
     
     uint8_t tac = ctx->io[0x07];
     if (tac & 0x04) { /* Timer Enabled */
@@ -2146,7 +2769,7 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
            We iterate to find all falling edges in the range. 
         */
         uint16_t current = old_div;
-        uint32_t cycles_left = cycles;
+        uint32_t cycles_left = cpu_cycles;
         
         /* Optimization: if cycles are small (common case), doing a loop is fine. */
         while (cycles_left > 0) {
@@ -2180,20 +2803,21 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
     
     /* Handle pending TIMA reload (4-cycle delay after overflow) */
     if (ctx->tima_reload_pending > 0) {
-        if (ctx->tima_reload_pending <= cycles) {
+        if (ctx->tima_reload_pending <= cpu_cycles) {
             ctx->tima_reload_pending = 0;
             ctx->io[0x05] = ctx->io[0x06]; /* Reload TMA */
             ctx->io[0x0F] |= 0x04;         /* Request Timer Interrupt */
         } else {
-            ctx->tima_reload_pending -= (uint8_t)cycles;
+            ctx->tima_reload_pending -= (uint8_t)cpu_cycles;
         }
     }
     
-    if ((ctx->cycles & 0xFF) < cycles || (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) {
+    if ((system_cycles > 0 && (ctx->cycles & 0xFF) < system_cycles) ||
+        (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) {
         gb_sync(ctx);
         if (ctx->frame_done || (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) ctx->stopped = 1;
     }
-    if (ctx->apu) gb_audio_step(ctx, cycles);
+    if (ctx->apu) gb_audio_step(ctx, system_cycles);
     if (ctx->ime_pending) { ctx->ime = 1; ctx->ime_pending = 0; }
 }
 
@@ -2203,7 +2827,7 @@ void gb_handle_interrupts(GBContext* ctx) {
     uint8_t ie_reg = ctx->io[0x80];
     uint8_t pending = if_reg & ie_reg & 0x1F;
     if (pending) {
-        ctx->ime = 0; ctx->halted = 0;
+        ctx->ime = 0; ctx->halted = 0; ctx->stop_mode_active = 0;
         uint16_t vec = 0; uint8_t bit = 0;
         const char* name = NULL;
         if (pending & 0x01) { vec = 0x0040; bit = 0x01; }
@@ -2273,6 +2897,15 @@ uint32_t gb_run_cycles(GBContext* ctx, uint32_t max_cycles) {
         }
         
         ctx->stopped = 0;
+        if (ctx->stop_mode_active) {
+            if (gb_stop_should_resume(ctx)) {
+                ctx->stop_mode_active = 0;
+            } else {
+                gb_tick(ctx, 4);
+                gb_sync(ctx);
+                continue;
+            }
+        }
         if (ctx->halted) gb_tick(ctx, 4);
         else gb_step(ctx);
         gb_sync(ctx);
@@ -2318,6 +2951,15 @@ uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
 
     ctx->stopped = 0;
 
+    if (ctx->stop_mode_active) {
+        if (gb_stop_should_resume(ctx)) {
+            ctx->stop_mode_active = 0;
+        } else {
+            gb_tick(ctx, 4);
+            return ctx->cycles - start;
+        }
+    }
+
     if (ctx->halted) {
         gb_tick(ctx, 4);
         return ctx->cycles - start;
@@ -2362,7 +3004,21 @@ const uint32_t* gb_get_framebuffer(GBContext* ctx) {
 }
 
 void gb_halt(GBContext* ctx) { ctx->halted = 1; }
-void gb_stop(GBContext* ctx) { ctx->stopped = 1; }
+void gb_stop(GBContext* ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    if (gb_is_cgb_mode(ctx) && (ctx->io[0x4D] & 0x01)) {
+        ctx->io[0x4D] &= (uint8_t)~0x01;
+        ctx->cgb_double_speed ^= 1;
+        ctx->stopped = 1;
+        return;
+    }
+
+    ctx->stop_mode_active = 1;
+    ctx->stopped = 1;
+}
 bool gb_frame_complete(GBContext* ctx) { return ctx->frame_done != 0; }
 
 void gb_set_platform_callbacks(GBContext* ctx, const GBPlatformCallbacks* c) {
@@ -2371,8 +3027,22 @@ void gb_set_platform_callbacks(GBContext* ctx, const GBPlatformCallbacks* c) {
         ctx->callbacks = *c;
         if (!had_load_battery_ram && ctx->callbacks.load_battery_ram) {
             gb_context_try_load_battery_ram(ctx);
+            gb_context_try_load_rtc(ctx);
         }
     }
+}
+
+void gb_context_set_save_id(GBContext* ctx, const char* save_id) {
+    if (!ctx) {
+        return;
+    }
+
+    memset(ctx->save_id, 0, sizeof(ctx->save_id));
+    if (!save_id || !save_id[0]) {
+        return;
+    }
+
+    snprintf(ctx->save_id, sizeof(ctx->save_id), "%s", save_id);
 }
 
 void gb_audio_callback(GBContext* ctx, int16_t l, int16_t r) {

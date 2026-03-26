@@ -67,6 +67,7 @@ struct Function {
     bool is_interrupt_handler = false;
     bool crosses_banks = false;         // Calls into other banks
     bool is_called_cross_bank = false;  // Called from other banks
+    bool may_switch_rom_bank = false;   // Contains a detected MBC bank write
 };
 
 /**

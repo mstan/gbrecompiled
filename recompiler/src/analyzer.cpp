@@ -1368,9 +1368,24 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         
         result.blocks[start] = block;
     }
+
+    // Populate predecessor lists now that the block graph is complete.
+    for (const auto& [block_addr, block] : result.blocks) {
+        for (uint32_t succ_addr : block.successors) {
+            auto succ_it = result.blocks.find(succ_addr);
+            if (succ_it == result.blocks.end()) {
+                continue;
+            }
+            succ_it->second.predecessors.push_back(block_addr);
+        }
+    }
     
     // Create functions from call targets with better merging logic
     std::set<uint32_t> processed_targets;
+    std::set<uint32_t> bank_switch_instruction_addrs;
+    for (const auto& sw : result.bank_tracker.switches()) {
+        bank_switch_instruction_addrs.insert(sw.addr);
+    }
     
     // Function size threshold for merging (in instructions)
     const int MIN_FUNCTION_SIZE = 3;
@@ -1413,6 +1428,18 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                     continue;
                 }
                 func.block_addresses.push_back(get_offset(block_addr));
+            }
+
+            for (size_t instr_index : blk->second.instruction_indices) {
+                if (instr_index >= result.instructions.size()) {
+                    continue;
+                }
+                const Instruction& block_instr = result.instructions[instr_index];
+                uint32_t full_instr_addr = make_address(block_instr.bank, block_instr.address);
+                if (bank_switch_instruction_addrs.count(full_instr_addr)) {
+                    func.may_switch_rom_bank = true;
+                    break;
+                }
             }
             
             // Mark all reachable (non-strong) call targets as processed to avoid

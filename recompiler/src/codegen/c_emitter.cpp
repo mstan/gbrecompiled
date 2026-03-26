@@ -895,21 +895,280 @@ static std::string format_io_offset_address(const ir::Program& program,
     return format_memory_address(program, static_cast<uint16_t>(0xFF00u + offset), source_bank);
 }
 
-static std::string format_block_label_for_address(const ir::Program& program,
-                                                  const std::string& current_func_name,
-                                                  uint16_t addr) {
-    auto func_it = program.functions.find(current_func_name);
-    if (func_it != program.functions.end()) {
-        const ir::Function& func = func_it->second;
-        for (uint32_t block_id : func.block_ids) {
-            auto block_it = program.blocks.find(block_id);
-            if (block_it != program.blocks.end() && block_it->second.start_address == addr) {
-                return block_it->second.label;
+struct EmittedBody {
+    std::string name;
+    uint8_t bank = 0;
+    uint16_t entry_address = 0;
+    std::vector<uint32_t> block_ids;
+    bool may_switch_rom_bank = false;
+};
+
+static uint32_t make_full_address(uint8_t bank, uint16_t addr) {
+    return (static_cast<uint32_t>(bank) << 16) | static_cast<uint32_t>(addr);
+}
+
+static const ir::BasicBlock* find_block_in_body(const ir::Program& program,
+                                                const EmittedBody* current_body,
+                                                uint8_t bank,
+                                                uint16_t addr) {
+    if (current_body == nullptr || current_body->bank != bank) {
+        return nullptr;
+    }
+
+    for (uint32_t block_id : current_body->block_ids) {
+        auto block_it = program.blocks.find(block_id);
+        if (block_it != program.blocks.end() && block_it->second.start_address == addr) {
+            return &block_it->second;
+        }
+    }
+
+    return nullptr;
+}
+
+static const ir::BasicBlock* find_safe_local_target_block(const ir::Program& program,
+                                                          const EmittedBody* current_body,
+                                                          uint8_t bank,
+                                                          uint16_t addr) {
+    if (current_body == nullptr || current_body->bank != bank || current_body->may_switch_rom_bank) {
+        return nullptr;
+    }
+
+    return find_block_in_body(program, current_body, bank, addr);
+}
+
+static bool block_has_external_predecessor(const ir::BasicBlock& block,
+                                           const std::set<uint32_t>& current_function_blocks) {
+    for (uint32_t pred_addr : block.predecessors) {
+        if (!current_function_blocks.count(pred_addr)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::set<uint16_t> collect_dispatchable_pcs_for_body(const ir::Program& program,
+                                                            const EmittedBody& body) {
+    std::set<uint16_t> dispatchable_pcs;
+    std::set<uint16_t> available_pcs;
+    std::set<uint32_t> current_body_blocks;
+
+    for (uint32_t block_id : body.block_ids) {
+        auto block_it = program.blocks.find(block_id);
+        if (block_it == program.blocks.end()) {
+            continue;
+        }
+
+        const ir::BasicBlock& block = block_it->second;
+        current_body_blocks.insert(make_full_address(block.bank, block.start_address));
+    }
+
+    for (uint32_t block_id : body.block_ids) {
+        auto block_it = program.blocks.find(block_id);
+        if (block_it == program.blocks.end()) {
+            continue;
+        }
+
+        const ir::BasicBlock& block = block_it->second;
+        available_pcs.insert(block.start_address);
+        if (body.may_switch_rom_bank) {
+            dispatchable_pcs.insert(block.start_address);
+        } else if (block.is_entry ||
+                   block_has_external_predecessor(block, current_body_blocks)) {
+            dispatchable_pcs.insert(block.start_address);
+        }
+        for (const auto& instr : block.instructions) {
+            if (instr.has_source_location) {
+                available_pcs.insert(instr.source_address);
             }
         }
-        return program.make_address_label(func.bank, addr);
     }
-    return "loc_" + hex_literal(addr, 4).substr(2);
+
+    dispatchable_pcs.insert(body.entry_address);
+
+    for (uint32_t block_id : body.block_ids) {
+        auto block_it = program.blocks.find(block_id);
+        if (block_it == program.blocks.end()) {
+            continue;
+        }
+
+        const ir::BasicBlock& block = block_it->second;
+        for (size_t instr_index = 0; instr_index < block.instructions.size(); ++instr_index) {
+            const auto& instr = block.instructions[instr_index];
+            if (!instr.has_source_location) {
+                continue;
+            }
+
+            uint16_t next_pc = 0;
+            if (instr_index + 1 < block.instructions.size()) {
+                const auto& next_instr = block.instructions[instr_index + 1];
+                if (next_instr.has_source_location) {
+                    next_pc = next_instr.source_address;
+                }
+            } else {
+                next_pc = block.end_address;
+            }
+
+            if (next_pc == 0) {
+                continue;
+            }
+            if (!available_pcs.count(next_pc) && next_pc != body.entry_address) {
+                continue;
+            }
+
+            switch (instr.opcode) {
+                case ir::Opcode::CALL:
+                case ir::Opcode::CALL_CC:
+                case ir::Opcode::RST:
+                case ir::Opcode::HALT:
+                case ir::Opcode::STOP:
+                    dispatchable_pcs.insert(next_pc);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    return dispatchable_pcs;
+}
+
+static std::vector<EmittedBody> build_emitted_bodies(
+    const ir::Program& program,
+    const std::vector<const ir::Function*>& sorted_functions,
+    std::map<std::string, std::vector<const ir::Function*>>& wrappers_by_body_name) {
+    struct DisjointSet {
+        std::map<uint32_t, uint32_t> parent;
+        std::map<uint32_t, size_t> size;
+
+        void add(uint32_t value) {
+            parent.emplace(value, value);
+            size.emplace(value, 1);
+        }
+
+        uint32_t find(uint32_t value) {
+            auto it = parent.find(value);
+            if (it == parent.end()) {
+                return value;
+            }
+            while (it->second != value) {
+                value = it->second;
+                it = parent.find(value);
+            }
+            return value;
+        }
+
+        void unite(uint32_t lhs, uint32_t rhs) {
+            lhs = find(lhs);
+            rhs = find(rhs);
+            if (lhs == rhs) {
+                return;
+            }
+            if (size[lhs] < size[rhs]) {
+                std::swap(lhs, rhs);
+            }
+            parent[rhs] = lhs;
+            size[lhs] += size[rhs];
+        }
+    };
+
+    std::map<uint32_t, uint32_t> representative_block_id_by_addr;
+    for (const auto& [block_id, block] : program.blocks) {
+        const uint32_t full_addr = make_full_address(block.bank, block.start_address);
+        representative_block_id_by_addr.emplace(full_addr, block_id);
+    }
+
+    DisjointSet dsu;
+    for (const auto& [full_addr, block_id] : representative_block_id_by_addr) {
+        (void)block_id;
+        dsu.add(full_addr);
+    }
+
+    for (const auto& [full_addr, block_id] : representative_block_id_by_addr) {
+        const ir::BasicBlock& block = program.blocks.at(block_id);
+        for (uint32_t succ_addr : block.successors) {
+            auto succ_it = representative_block_id_by_addr.find(succ_addr);
+            if (succ_it == representative_block_id_by_addr.end()) {
+                continue;
+            }
+            if ((succ_addr >> 16) != block.bank) {
+                continue;
+            }
+            dsu.unite(full_addr, succ_addr);
+        }
+    }
+
+    std::map<uint32_t, std::vector<uint32_t>> block_addrs_by_component;
+    for (const auto& [full_addr, block_id] : representative_block_id_by_addr) {
+        (void)block_id;
+        block_addrs_by_component[dsu.find(full_addr)].push_back(full_addr);
+    }
+
+    std::map<uint32_t, std::vector<const ir::Function*>> functions_by_component;
+    for (const ir::Function* func : sorted_functions) {
+        const uint32_t entry_addr = make_full_address(func->bank, func->entry_address);
+        auto block_it = representative_block_id_by_addr.find(entry_addr);
+        if (block_it == representative_block_id_by_addr.end()) {
+            continue;
+        }
+        functions_by_component[dsu.find(entry_addr)].push_back(func);
+    }
+
+    std::vector<EmittedBody> bodies;
+    bodies.reserve(functions_by_component.size());
+
+    for (const auto& [component_root, component_funcs] : functions_by_component) {
+        if (component_funcs.empty()) {
+            continue;
+        }
+
+        const ir::Function& primary_func = *component_funcs.front();
+
+        EmittedBody body;
+        std::ostringstream name_ss;
+        name_ss << "body_";
+        if (primary_func.bank > 0) {
+            name_ss << std::hex << std::setfill('0') << std::setw(2)
+                    << static_cast<int>(primary_func.bank) << "_";
+        }
+        name_ss << std::hex << std::setfill('0') << std::setw(4)
+                << primary_func.entry_address << std::dec;
+        body.name = name_ss.str();
+        body.bank = primary_func.bank;
+        body.entry_address = primary_func.entry_address;
+
+        auto blocks_it = block_addrs_by_component.find(component_root);
+        if (blocks_it != block_addrs_by_component.end()) {
+            std::vector<uint32_t> component_block_addrs = blocks_it->second;
+            std::sort(component_block_addrs.begin(), component_block_addrs.end());
+            for (uint32_t block_addr : component_block_addrs) {
+                auto rep_it = representative_block_id_by_addr.find(block_addr);
+                if (rep_it == representative_block_id_by_addr.end()) {
+                    continue;
+                }
+                body.block_ids.push_back(rep_it->second);
+            }
+        }
+
+        for (const ir::Function* func : component_funcs) {
+            wrappers_by_body_name[body.name].push_back(func);
+            body.may_switch_rom_bank = body.may_switch_rom_bank || func->may_switch_rom_bank;
+        }
+
+        bodies.push_back(std::move(body));
+    }
+
+    std::sort(bodies.begin(), bodies.end(),
+              [](const EmittedBody& lhs, const EmittedBody& rhs) {
+                  if (lhs.bank != rhs.bank) {
+                      return lhs.bank < rhs.bank;
+                  }
+                  if (lhs.entry_address != rhs.entry_address) {
+                      return lhs.entry_address < rhs.entry_address;
+                  }
+                  return lhs.name < rhs.name;
+              });
+
+    return bodies;
 }
 
 static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& instr, 
@@ -918,7 +1177,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                                 uint16_t next_pc_val,
                                 uint32_t group_cycles,
                                 bool is_last_in_group,
-                                const std::string& current_func_name,
+                                const EmittedBody* current_body,
                                 const std::set<std::string>& inlineable_functions);
 
 static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& instr, 
@@ -927,7 +1186,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                                 uint16_t next_pc_val,
                                 uint32_t group_cycles,
                                 bool is_last_in_group,
-                                const std::string& current_func_name = "",
+                                const EmittedBody* current_body = nullptr,
                                 const std::set<std::string>& inlineable_functions = {}) {
     auto emit_indent = [&out, indent]() {
         for (int i = 0; i < indent; i++) out << "    ";
@@ -1180,10 +1439,10 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                 } else {
                     std::string target_func = program.make_function_name(tbank, target);
                     bool func_exists = program.functions.find(target_func) != program.functions.end();
+                    const ir::BasicBlock* local_target_block =
+                        find_safe_local_target_block(program, current_body, tbank, target);
                     
-                    // If the target is a function entry, check if it's the current function
-                    if (func_exists && target_func == current_func_name) {
-                        // Same function: use goto
+                    if (local_target_block != nullptr) {
                         if (options.emit_cycle_counting && group_cycles > 0) {
                             out << "ctx->pc = 0x" << std::hex << target << std::dec << ";\n";
                             emit_indent();
@@ -1196,7 +1455,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                         emit_indent();
                         out << "if (ctx->single_step_mode) return;\n";
                         emit_indent();
-                        out << "goto " << format_block_label_for_address(program, current_func_name, target) << ";\n";
+                        out << "goto " << local_target_block->label << ";\n";
                     } else if (func_exists) {
                         // Different function or cross-bank: call and return
                         if (options.emit_cycle_counting && instr.cycles > 0) {
@@ -1221,7 +1480,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                             uint32_t inline_cycles = 0;
                             for (size_t k = 0; k < limit; k++) {
                                 inline_cycles += block.instructions[k].cycles;
-                                emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, "", inlineable_functions);
+                                emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, nullptr, inlineable_functions);
                             }
                             if (block.instructions.size() > limit) inline_cycles += block.instructions.back().cycles;
 
@@ -1292,8 +1551,10 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             } else {
                 std::string target_func = program.make_function_name(tbank, target);
                 bool func_exists = program.functions.find(target_func) != program.functions.end();
+                const ir::BasicBlock* local_target_block =
+                    find_safe_local_target_block(program, current_body, tbank, target);
 
-                if (func_exists && target_func == current_func_name) {
+                if (local_target_block != nullptr) {
                     out << "if (" << expr << ") {\n";
                     emit_indent(); out << "    ctx->pc = 0x" << std::hex << target << std::dec << ";\n";
                     if (options.emit_cycle_counting) {
@@ -1301,7 +1562,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                         emit_indent(); out << "    if (ctx->stopped) return;\n";
                     }
                     emit_indent(); out << "    if (ctx->single_step_mode) return;\n";
-                    emit_indent(); out << "    goto " << format_block_label_for_address(program, current_func_name, target) << ";\n";
+                    emit_indent(); out << "    goto " << local_target_block->label << ";\n";
                     emit_indent(); out << "} /* " << cond << " */\n";
                 } else if (func_exists) {
                     // Different function: call and return
@@ -1325,7 +1586,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                         uint32_t inline_cycles = 0;
                         for (size_t k = 0; k < limit; k++) {
                             inline_cycles += block.instructions[k].cycles;
-                            emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, "", inlineable_functions);
+                            emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, nullptr, inlineable_functions);
                         }
                         if (block.instructions.size() > limit) inline_cycles += block.instructions.back().cycles;
 
@@ -1410,7 +1671,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                         // Accumulate cycles but don't emit ticks per instruction (batching)
                         inline_cycles += block.instructions[k].cycles;
                         // Use 0 cycles for emission so it doesn't emit ticks
-                        emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, "", inlineable_functions);
+                        emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, nullptr, inlineable_functions);
                     }
                     // Accumulate RET cost too (usually 16) even though we don't emit it?
                     // The real CPU does RET. We model it as part of the cost.
@@ -1498,7 +1759,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                     uint32_t inline_cycles = 0;
                     for (size_t k = 0; k < limit; k++) {
                         inline_cycles += block.instructions[k].cycles;
-                        emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, "", inlineable_functions);
+                        emit_ir_instruction(out, block.instructions[k], program, indent + 1, options, 0, 0, false, nullptr, inlineable_functions);
                     }
                     if (block.instructions.size() > limit) inline_cycles += block.instructions.back().cycles;
  
@@ -1626,7 +1887,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                                             0,
                                             0,
                                             false,
-                                            "",
+                                            nullptr,
                                             inlineable_functions);
                     }
                     if (block.instructions.size() > limit) {
@@ -2293,8 +2554,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     
     auto collect_dispatchable_pcs = [&](const ir::Function& func) {
         std::set<uint16_t> dispatchable_pcs;
-        std::set<uint16_t> resumable_block_starts;
         std::set<uint16_t> available_pcs;
+        std::set<uint32_t> current_function_blocks;
 
         for (uint32_t block_id : func.block_ids) {
             auto block_it = program.blocks.find(block_id);
@@ -2303,8 +2564,24 @@ GeneratedOutput generate_output(const ir::Program& program,
             }
 
             const ir::BasicBlock& block = block_it->second;
-            resumable_block_starts.insert(block.start_address);
+            current_function_blocks.insert((static_cast<uint32_t>(block.bank) << 16) |
+                                           static_cast<uint32_t>(block.start_address));
+        }
+
+        for (uint32_t block_id : func.block_ids) {
+            auto block_it = program.blocks.find(block_id);
+            if (block_it == program.blocks.end()) {
+                continue;
+            }
+
+            const ir::BasicBlock& block = block_it->second;
             available_pcs.insert(block.start_address);
+            if (func.may_switch_rom_bank) {
+                dispatchable_pcs.insert(block.start_address);
+            } else if (block.is_entry ||
+                       block_has_external_predecessor(block, current_function_blocks)) {
+                dispatchable_pcs.insert(block.start_address);
+            }
             for (const auto& instr : block.instructions) {
                 if (instr.has_source_location) {
                     available_pcs.insert(instr.source_address);
@@ -2313,9 +2590,6 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
 
         dispatchable_pcs.insert(func.entry_address);
-        for (uint16_t block_start : resumable_block_starts) {
-            dispatchable_pcs.insert(block_start);
-        }
 
         for (uint32_t block_id : func.block_ids) {
             auto block_it = program.blocks.find(block_id);
@@ -2453,11 +2727,13 @@ GeneratedOutput generate_output(const ir::Program& program,
         resolved_funcs.reserve(funcs.size());
         for (const auto& entry : funcs) {
             if (!resolved_funcs.empty() && resolved_funcs.back().bank == entry.bank) {
-                std::cerr << "[CODEGEN] Dispatch collision at "
-                          << std::hex << std::setfill('0') << std::setw(2) << (int)entry.bank
-                          << ":" << std::setw(4) << addr
-                          << std::dec << " resolved to " << resolved_funcs.back().name
-                          << " over " << entry.name << "\n";
+                if (options.debug_mode) {
+                    std::cerr << "[CODEGEN] Dispatch collision at "
+                              << std::hex << std::setfill('0') << std::setw(2) << (int)entry.bank
+                              << ":" << std::setw(4) << addr
+                              << std::dec << " resolved to " << resolved_funcs.back().name
+                              << " over " << entry.name << "\n";
+                }
                 continue;
             }
             resolved_funcs.push_back(entry);
@@ -2492,7 +2768,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                 uint32_t inline_cycles = 0;
                 for (size_t k = 0; k < limit; k++) {
                     inline_cycles += block.instructions[k].cycles;
-                    emit_ir_instruction(page_ss, block.instructions[k], program, 3, options, 0, 0, false, "", inlineable_functions);
+                    emit_ir_instruction(page_ss, block.instructions[k], program, 3, options, 0, 0, false, nullptr, inlineable_functions);
                 }
                 if (block.instructions.size() > limit) inline_cycles += block.instructions.back().cycles;
 
@@ -2523,7 +2799,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                     uint32_t inline_cycles = 0;
                     for (size_t k = 0; k < limit; k++) {
                         inline_cycles += block.instructions[k].cycles;
-                        emit_ir_instruction(page_ss, block.instructions[k], program, 5, options, 0, 0, false, "", inlineable_functions);
+                        emit_ir_instruction(page_ss, block.instructions[k], program, 5, options, 0, 0, false, nullptr, inlineable_functions);
                     }
                     if (block.instructions.size() > limit) inline_cycles += block.instructions.back().cycles;
 
@@ -2706,16 +2982,28 @@ GeneratedOutput generate_output(const ir::Program& program,
         current_chunk = chunk_preamble;
     };
 
-    auto emit_function_source = [&](const ir::Function& func) {
-        std::ostringstream func_ss;
-        func_ss << "/* Function at ";
-        if (func.bank > 0) {
-            func_ss << std::hex << std::setfill('0') << std::setw(2) << (int)func.bank << ":";
+    std::map<std::string, std::vector<const ir::Function*>> wrappers_by_body_name;
+    std::vector<EmittedBody> emitted_bodies = build_emitted_bodies(
+        program, sorted_functions, wrappers_by_body_name);
+    std::map<std::string, std::set<uint16_t>> wrapper_dispatchable_pcs_by_body_name;
+    for (const auto& [body_name, wrappers] : wrappers_by_body_name) {
+        std::set<uint16_t>& pcs = wrapper_dispatchable_pcs_by_body_name[body_name];
+        for (const ir::Function* wrapper_func : wrappers) {
+            std::set<uint16_t> wrapper_pcs = collect_dispatchable_pcs(*wrapper_func);
+            pcs.insert(wrapper_pcs.begin(), wrapper_pcs.end());
         }
-        func_ss << std::hex << std::setfill('0') << std::setw(4) << func.entry_address << std::dec << " */\n";
-        func_ss << "void " << emitted_function_name(options, func.name) << "(GBContext* ctx) {\n";
+    }
 
-        std::vector<uint32_t> sorted_block_ids = func.block_ids;
+    auto emit_body_source = [&](const EmittedBody& body) {
+        std::ostringstream func_ss;
+        func_ss << "/* Shared body at ";
+        if (body.bank > 0) {
+            func_ss << std::hex << std::setfill('0') << std::setw(2) << (int)body.bank << ":";
+        }
+        func_ss << std::hex << std::setfill('0') << std::setw(4) << body.entry_address << std::dec << " */\n";
+        func_ss << "static void " << emitted_function_name(options, body.name) << "(GBContext* ctx) {\n";
+
+        std::vector<uint32_t> sorted_block_ids = body.block_ids;
         std::sort(sorted_block_ids.begin(), sorted_block_ids.end(),
             [&program](uint32_t a, uint32_t b) {
                 auto it_a = program.blocks.find(a);
@@ -2731,9 +3019,13 @@ GeneratedOutput generate_output(const ir::Program& program,
             if (it == program.blocks.end()) continue;
             block_labels_by_addr[it->second.start_address] = it->second.label;
         }
-        std::set<uint16_t> dispatchable_pcs = collect_dispatchable_pcs(func);
+        std::set<uint16_t> dispatchable_pcs = collect_dispatchable_pcs_for_body(program, body);
+        auto wrapper_pcs_it = wrapper_dispatchable_pcs_by_body_name.find(body.name);
+        if (wrapper_pcs_it != wrapper_dispatchable_pcs_by_body_name.end()) {
+            dispatchable_pcs.insert(wrapper_pcs_it->second.begin(), wrapper_pcs_it->second.end());
+        }
         const bool entry_only_resume =
-            dispatchable_pcs.size() == 1 && *dispatchable_pcs.begin() == func.entry_address;
+            dispatchable_pcs.size() == 1 && *dispatchable_pcs.begin() == body.entry_address;
 
         if (!entry_only_resume) {
             func_ss << "    switch (ctx->pc) {\n";
@@ -2798,7 +3090,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                                     next_pc,
                                     ir_instr.cycles,
                                     is_last_in_group,
-                                    func.name,
+                                    &body,
                                     inlineable_functions);
             }
 
@@ -2823,38 +3115,29 @@ GeneratedOutput generate_output(const ir::Program& program,
             }
 
             if (falls_through && !next_is_fallthrough) {
-                if (func.name == "func_27eb") {
-                    std::cerr << "DEBUG: found func_27eb falling through to 0x"
-                              << std::hex << fallthrough_addr << std::dec << "\n";
-                }
-
-                bool fallthrough_exists_in_function = false;
+                bool fallthrough_exists_in_body = false;
                 for (uint32_t fn_block_id : sorted_block_ids) {
                     auto fn_block_it = program.blocks.find(fn_block_id);
                     if (fn_block_it != program.blocks.end() &&
                         fn_block_it->second.start_address == fallthrough_addr) {
-                        fallthrough_exists_in_function = true;
+                        fallthrough_exists_in_body = true;
                         break;
                     }
                 }
 
-                if (fallthrough_exists_in_function) {
+                if (fallthrough_exists_in_body) {
                     auto label_it = block_labels_by_addr.find(fallthrough_addr);
                     if (label_it != block_labels_by_addr.end()) {
                         func_ss << "    goto " << label_it->second << "; /* fallthrough */\n";
                     } else {
-                        func_ss << "    goto " << program.make_address_label(func.bank, fallthrough_addr)
+                        func_ss << "    goto " << program.make_address_label(body.bank, fallthrough_addr)
                                 << "; /* fallthrough */\n";
                     }
                 } else {
-                    if (func.name == "func_27eb") {
-                        std::cerr << "DEBUG: func_27eb fallthrough not in function. Searching targets...\n";
-                    }
-
                     bool found_target_func = false;
                     for (const auto& kv : program.functions) {
                         const ir::Function& target_func = kv.second;
-                        if (target_func.bank == func.bank &&
+                        if (target_func.bank == body.bank &&
                             target_func.entry_address == fallthrough_addr) {
                             func_ss << "    /* fallthrough to function */\n";
 
@@ -2878,7 +3161,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                                                         0,
                                                         0,
                                                         false,
-                                                        "",
+                                                        nullptr,
                                                         inlineable_functions);
                                 }
                                 if (block.instructions.size() > limit) {
@@ -2898,21 +3181,14 @@ GeneratedOutput generate_output(const ir::Program& program,
                             }
                             func_ss << "    return;\n";
                             found_target_func = true;
-                            if (func.name == "func_27eb") {
-                                std::cerr << "DEBUG: Found target: " << target_func.name << "\n";
-                            }
                             break;
                         }
                     }
 
                     if (!found_target_func) {
-                        if (func.name == "func_27eb") {
-                            std::cerr << "DEBUG: No target function found for 0x"
-                                      << std::hex << fallthrough_addr << std::dec << "\n";
-                        }
                         func_ss << "    /* warning: fallthrough to unanalyzed code at 0x"
                                 << std::hex << fallthrough_addr << std::dec
-                                << " in bank " << (int)func.bank << " */\n";
+                                << " in bank " << (int)body.bank << " */\n";
                         func_ss << "    return;\n";
                     }
                 }
@@ -2920,25 +3196,37 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
 
         func_ss << "}\n\n";
+
+        auto wrappers_it = wrappers_by_body_name.find(body.name);
+        if (wrappers_it != wrappers_by_body_name.end()) {
+            for (const ir::Function* wrapper_func : wrappers_it->second) {
+                func_ss << "void " << emitted_function_name(options, wrapper_func->name)
+                        << "(GBContext* ctx) {\n";
+                func_ss << "    " << emitted_function_name(options, body.name) << "(ctx);\n";
+                func_ss << "}\n\n";
+            }
+        }
+
         return func_ss.str();
     };
 
-    std::vector<const ir::Function*> emitted_functions;
-    emitted_functions.reserve(sorted_functions.size());
-    for (const ir::Function* func : sorted_functions) {
-        if (inlineable_functions.count(func->name)) {
+    std::vector<const EmittedBody*> emitted_body_sources;
+    emitted_body_sources.reserve(emitted_bodies.size());
+    for (const EmittedBody& body : emitted_bodies) {
+        auto wrappers_it = wrappers_by_body_name.find(body.name);
+        if (wrappers_it == wrappers_by_body_name.end() || wrappers_it->second.empty()) {
             continue;
         }
-        emitted_functions.push_back(func);
+        emitted_body_sources.push_back(&body);
     }
 
-    std::vector<std::string> emitted_function_sources(emitted_functions.size());
+    std::vector<std::string> emitted_function_sources(emitted_body_sources.size());
     const size_t function_jobs = resolve_parallel_job_count(
-        options.parallel_codegen_jobs, emitted_functions.size());
+        options.parallel_codegen_jobs, emitted_body_sources.size());
 
     if (function_jobs <= 1) {
-        for (size_t i = 0; i < emitted_functions.size(); ++i) {
-            emitted_function_sources[i] = emit_function_source(*emitted_functions[i]);
+        for (size_t i = 0; i < emitted_body_sources.size(); ++i) {
+            emitted_function_sources[i] = emit_body_source(*emitted_body_sources[i]);
         }
     } else {
         std::atomic<size_t> next_function_index{0};
@@ -2951,11 +3239,11 @@ GeneratedOutput generate_output(const ir::Program& program,
             try {
                 for (;;) {
                     const size_t function_index = next_function_index.fetch_add(1);
-                    if (function_index >= emitted_functions.size()) {
+                    if (function_index >= emitted_body_sources.size()) {
                         return;
                     }
                     emitted_function_sources[function_index] =
-                        emit_function_source(*emitted_functions[function_index]);
+                        emit_body_source(*emitted_body_sources[function_index]);
                 }
             } catch (...) {
                 std::lock_guard<std::mutex> lock(worker_error_mutex);

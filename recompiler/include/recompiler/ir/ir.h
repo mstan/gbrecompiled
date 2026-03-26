@@ -279,6 +279,7 @@ struct Function {
     bool is_interrupt_handler = false;
     bool is_entry_point = false;
     bool crosses_banks = false;
+    bool may_switch_rom_bank = false;
 };
 
 struct AddressSymbol {

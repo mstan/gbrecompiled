@@ -366,6 +366,7 @@ Program IRBuilder::build(const AnalysisResult& analysis, const std::string& rom_
         ir_func.bank = func.bank;
         ir_func.entry_address = func.entry_address;
         ir_func.is_interrupt_handler = func.is_interrupt_handler;
+        ir_func.may_switch_rom_bank = func.may_switch_rom_bank;
         
         // Create a block for each block address in this function
         for (uint16_t block_addr : func.block_addresses) {
@@ -385,6 +386,8 @@ Program IRBuilder::build(const AnalysisResult& analysis, const std::string& rom_
             dst_block.is_entry = src_block.is_function_entry;
             dst_block.is_interrupt_handler = src_block.is_interrupt_entry;
             dst_block.is_reachable = src_block.is_reachable;
+            dst_block.successors = src_block.successors;
+            dst_block.predecessors = src_block.predecessors;
             
             // Lower each instruction in the block
             for (size_t idx : src_block.instruction_indices) {

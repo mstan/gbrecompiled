@@ -41,6 +41,7 @@ private:
     std::unordered_map<uint32_t, Symbol> symbols_;
 };
 
+std::vector<AnalysisAnnotation> build_analysis_annotations(const SymbolTable& symbols);
 void apply_symbols_to_analysis(const SymbolTable& symbols, AnalysisResult& analysis);
 
 } // namespace gbrecomp

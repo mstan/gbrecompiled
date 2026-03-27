@@ -81,6 +81,18 @@ struct AddressSymbolMetadata {
     std::string comment;
 };
 
+enum class AnalysisAnnotationKind {
+    FUNCTION,
+    LABEL,
+    DATA,
+};
+
+struct AnalysisAnnotation {
+    uint32_t addr = 0;
+    uint32_t size = 1;
+    AnalysisAnnotationKind kind = AnalysisAnnotationKind::LABEL;
+};
+
 /* ============================================================================
  * Analysis Result
  * ========================================================================== */
@@ -202,6 +214,8 @@ struct AnalyzerOptions {
     // Feature flags
     bool aggressive_scan = true;        // Scan for unreferenced code (ON by default)
     std::string trace_file_path;        // Path to entry points trace file
+    std::vector<AnalysisAnnotation> annotations;
+    bool add_builtin_rom_annotations = true;
 };
 
 /**

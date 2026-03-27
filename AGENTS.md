@@ -126,6 +126,8 @@ If analysis hangs, misses code, or produces obviously bad output:
 
 If you are working with imported symbols or generated names, remember that generated projects can emit `*_metadata.json` sidecars. Prefer using those instead of scraping generated C when a sidecar already answers the question.
 
+`--symbols` is no longer just a post-analysis naming feature. Imported function symbols now seed trusted analyzer entry points before scanning, and the analyzer also treats the Nintendo logo/header region as built-in ROM data.
+
 ## Performance Workflow
 Do not benchmark normal interactive/windowed runs. Use benchmark mode.
 

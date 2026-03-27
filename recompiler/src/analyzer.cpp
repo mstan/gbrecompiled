@@ -32,6 +32,81 @@ static uint16_t get_offset(uint32_t addr) {
     return static_cast<uint16_t>(addr & 0xFFFF);
 }
 
+struct AnnotationDataRange {
+    uint8_t bank;
+    uint16_t start;
+    uint32_t end;
+};
+
+struct AnnotationIndex {
+    std::set<uint32_t> function_entries;
+    std::vector<AnnotationDataRange> data_ranges;
+
+    bool has_function(uint8_t bank, uint16_t addr) const {
+        return function_entries.count(make_address(bank, addr)) > 0;
+    }
+
+    bool contains_data(uint8_t bank, uint16_t addr) const {
+        for (const AnnotationDataRange& range : data_ranges) {
+            if (range.bank == bank && addr >= range.start && addr < range.end) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+static void add_annotation_data_range(AnnotationIndex& annotations,
+                                      uint8_t bank,
+                                      uint16_t start,
+                                      uint16_t size) {
+    if (size == 0) {
+        return;
+    }
+
+    const uint32_t end32 = std::min<uint32_t>(0x10000u, static_cast<uint32_t>(start) + size);
+    if (end32 <= start) {
+        return;
+    }
+
+    annotations.data_ranges.push_back({
+        bank,
+        start,
+        end32,
+    });
+}
+
+static AnnotationIndex build_annotation_index(const ROM& rom, const AnalyzerOptions& options) {
+    AnnotationIndex annotations;
+
+    if (options.add_builtin_rom_annotations && rom.size() >= 0x150) {
+        add_annotation_data_range(annotations, 0, 0x0104, 0x30);
+        add_annotation_data_range(annotations, 0, 0x0134, 0x1c);
+    }
+
+    for (const AnalysisAnnotation& annotation : options.annotations) {
+        const uint8_t bank = get_bank(annotation.addr);
+        const uint16_t addr = get_offset(annotation.addr);
+        switch (annotation.kind) {
+            case AnalysisAnnotationKind::FUNCTION:
+                annotations.function_entries.insert(annotation.addr);
+                break;
+            case AnalysisAnnotationKind::DATA:
+                add_annotation_data_range(
+                    annotations,
+                    bank,
+                    addr,
+                    static_cast<uint16_t>(std::min<uint32_t>(annotation.size, 0xffffu)));
+                break;
+            case AnalysisAnnotationKind::LABEL:
+            default:
+                break;
+        }
+    }
+
+    return annotations;
+}
+
 /* ============================================================================
  * AnalysisResult Implementation
  * ========================================================================== */
@@ -528,9 +603,16 @@ static bool is_bank_entry_stub(const ROM& rom, uint8_t bank, uint16_t addr) {
 /**
  * @brief Scan for 16-bit pointers that likely lead to code
  */
-static void find_pointer_entry_points(const ROM& rom, AnalysisResult& result, std::queue<AnalysisState>& work_queue) {
+static void find_pointer_entry_points(const ROM& rom,
+                                      AnalysisResult& result,
+                                      std::queue<AnalysisState>& work_queue,
+                                      const AnnotationIndex& annotations) {
     auto seed_pointer_target = [&](uint8_t target_bank, uint16_t target) {
-        if (!is_likely_direct_branch_target(rom, target_bank, target)) {
+        if (annotations.contains_data(target_bank, target)) {
+            return;
+        }
+        if (!annotations.has_function(target_bank, target) &&
+            !is_likely_direct_branch_target(rom, target_bank, target)) {
             return;
         }
 
@@ -621,6 +703,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     AnalysisResult result;
     result.rom = &rom;
     result.entry_point = 0x100;
+    const AnnotationIndex annotations = build_annotation_index(rom, options);
     
     // Add standard GameBoy entry points
     result.interrupt_vectors = {0x40, 0x48, 0x50, 0x58, 0x60};  // Interrupt vectors
@@ -633,7 +716,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     std::queue<AnalysisState> work_queue;
     std::set<uint32_t> visited;
     // Pointer scanning pass
-    find_pointer_entry_points(rom, result, work_queue);
+    find_pointer_entry_points(rom, result, work_queue, annotations);
     
     // Entry point is always a function (bank 0)
     result.call_targets.insert(make_address(0, 0x100));
@@ -657,6 +740,14 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     // Load from trace if provided
     load_trace_entry_points(options.trace_file_path, result.call_targets, result.strong_call_targets);
 
+    for (const AnalysisAnnotation& annotation : options.annotations) {
+        if (annotation.kind != AnalysisAnnotationKind::FUNCTION) {
+            continue;
+        }
+        result.call_targets.insert(annotation.addr);
+        result.strong_call_targets.insert(annotation.addr);
+    }
+
     // Initial work queue seeding
     for (uint32_t target : result.call_targets) {
         uint8_t bank = get_bank(target);
@@ -679,7 +770,6 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         for (uint8_t bank : known_banks) {
             if (bank == 0) continue;
 
-            Decoder bank_entry_decoder(rom);
             auto seed_bank_target = [&](uint16_t addr) {
                 uint32_t target = make_address(bank, addr);
                 if (result.call_targets.insert(target).second) {
@@ -691,23 +781,27 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             };
 
             bool seeded_bank = false;
-            Instruction bank_start = bank_entry_decoder.decode(0x4000, bank);
-            if (!is_uniform_padding(rom, bank, 0x4000, 0x00, 8) &&
-                !is_uniform_padding(rom, bank, 0x4000, 0xFF, 8) &&
-                bank_start.type != InstructionType::UNDEFINED &&
-                bank_start.type != InstructionType::INVALID) {
+            // Do not assume every switchable bank starts with code. Many games
+            // place tables or compressed assets right at 0x4000, and merely
+            // being decodable as opcodes is far too permissive.
+            if (annotations.has_function(bank, 0x4000) ||
+                (!annotations.contains_data(bank, 0x4000) &&
+                 (is_likely_direct_branch_target(rom, bank, 0x4000) ||
+                  is_likely_valid_code(rom, bank, 0x4000) > 0))) {
                 seed_bank_target(0x4000);
                 seeded_bank = true;
             }
 
             for (uint16_t addr = 0x4000; addr < 0x4008; addr++) {
-                if (!is_bank_entry_stub(rom, bank, addr)) continue;
+                if (annotations.contains_data(bank, addr) || !is_bank_entry_stub(rom, bank, addr)) continue;
 
                 seed_bank_target(addr);
                 seeded_bank = true;
             }
 
-            if (!seeded_bank && is_likely_valid_code(rom, bank, 0x4001)) {
+            if (!seeded_bank &&
+                !annotations.contains_data(bank, 0x4001) &&
+                is_likely_valid_code(rom, bank, 0x4001)) {
                 seed_bank_target(0x4001);
             }
         }
@@ -779,6 +873,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             if (visited.count(addr)) continue;
         } else if (overlay) {
              if (visited.count(addr)) continue;
+        }
+
+        if (!overlay &&
+            annotations.contains_data(bank, offset) &&
+            !annotations.has_function(bank, offset)) {
+            continue;
         }
         
         if (bank > 0) current_switchable_bank = bank;
@@ -1025,7 +1125,9 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                     uint8_t tbank = (target < 0x4000) ? 0 : bank;
                     if (tbank == 0 && target >= 0x4000) tbank = 1;
 
-                    if (is_likely_direct_branch_target(rom, tbank, target)) {
+                    if (!annotations.contains_data(tbank, target) &&
+                        (annotations.has_function(tbank, target) ||
+                         is_likely_direct_branch_target(rom, tbank, target))) {
                         uint32_t full_target = make_address(tbank, target);
                         result.call_targets.insert(full_target);
                         result.branch_entry_targets.insert(full_target);
@@ -1044,7 +1146,11 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             instr.resolved_target_bank = tbank;
 
             bool target_valid = true;
-            if (tbank > 0 && tbank != bank) {
+            if (annotations.contains_data(tbank, target)) {
+                target_valid = false;
+            } else if (annotations.has_function(tbank, target)) {
+                target_valid = true;
+            } else if (tbank > 0 && tbank != bank) {
                 target_valid = is_likely_direct_branch_target(rom, tbank, target);
             }
 
@@ -1069,8 +1175,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 instr.resolved_target_bank = tbank;
 
                 bool target_valid = true;
-                if (target >= 0x4000 && target <= 0x7FFF &&
-                    tbank > 0 && tbank != bank) {
+                if (annotations.contains_data(tbank, target)) {
+                    target_valid = false;
+                } else if (annotations.has_function(tbank, target)) {
+                    target_valid = true;
+                } else if (target >= 0x4000 && target <= 0x7FFF &&
+                           tbank > 0 && tbank != bank) {
                     target_valid = is_likely_direct_branch_target(rom, tbank, target);
                 }
 
@@ -1116,7 +1226,13 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                     bool target_valid = false;
 
                     if (return_target < 0x8000) {
-                        target_valid = is_likely_direct_branch_target(rom, return_bank, return_target);
+                        if (annotations.contains_data(return_bank, return_target)) {
+                            target_valid = false;
+                        } else if (annotations.has_function(return_bank, return_target)) {
+                            target_valid = true;
+                        } else {
+                            target_valid = is_likely_direct_branch_target(rom, return_bank, return_target);
+                        }
                     } else {
                         for (const auto& ov : options.ram_overlays) {
                             if (return_target >= ov.ram_addr &&
@@ -1148,12 +1264,14 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                     uint16_t target = (uint16_t)combined_hl;
                     uint8_t tbank = target_bank(target);
                     std::cout << "[ANALYSIS] Resolved static JP HL at " << std::hex << (int)bank << ":" << offset << " -> " << (int)tbank << ":" << target << std::dec << "\n";
-                    uint32_t full_target = make_address(tbank, target);
-                    result.call_targets.insert(full_target);
-                    result.branch_entry_targets.insert(full_target);
-                    result.computed_jump_targets.insert(full_target);
-                    result.label_addresses.insert(full_target);
-                    work_queue.push({full_target, known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, tbank});
+                    if (!annotations.contains_data(tbank, target)) {
+                        uint32_t full_target = make_address(tbank, target);
+                        result.call_targets.insert(full_target);
+                        result.branch_entry_targets.insert(full_target);
+                        result.computed_jump_targets.insert(full_target);
+                        result.label_addresses.insert(full_target);
+                        work_queue.push({full_target, known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, tbank});
+                    }
                 } else {
                     // Backtracking Jump Table Heuristic
                     bool found_table = false;
@@ -1172,7 +1290,9 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                                 uint16_t target = lo | (hi << 8);
                                 if (target >= 0x0100 && target < 0x8000) {
                                     uint8_t tbank = target_bank(target);
-                                    if (is_likely_valid_code(rom, tbank, target)) {
+                                    if (!annotations.contains_data(tbank, target) &&
+                                        (annotations.has_function(tbank, target) ||
+                                         is_likely_valid_code(rom, tbank, target))) {
                                         uint32_t full_target = make_address(tbank, target);
                                         result.call_targets.insert(full_target);
                                         result.branch_entry_targets.insert(full_target);
@@ -1238,6 +1358,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 
                 // Alignment heuristic: most functions start on some boundary? No.
                 // But we can skip obvious padding (0xFF or 0x00)
+                if (annotations.contains_data(bank, static_cast<uint16_t>(addr)) &&
+                    !annotations.has_function(bank, static_cast<uint16_t>(addr))) {
+                    addr++;
+                    continue;
+                }
+
                 uint8_t byte = rom.read_banked(bank, addr);
                 if (byte == 0xFF || byte == 0x00) {
                     addr++;

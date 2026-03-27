@@ -226,6 +226,33 @@ size_t SymbolTable::size() const {
     return symbols_.size();
 }
 
+std::vector<AnalysisAnnotation> build_analysis_annotations(const SymbolTable& symbols) {
+    std::vector<AnalysisAnnotation> annotations;
+    annotations.reserve(symbols.symbols().size());
+
+    for (const auto& [addr, symbol] : symbols.symbols()) {
+        AnalysisAnnotation annotation;
+        annotation.addr = addr;
+        annotation.size = 1;
+        switch (symbol.type) {
+            case SymbolType::FUNCTION:
+                annotation.kind = AnalysisAnnotationKind::FUNCTION;
+                break;
+            case SymbolType::DATA:
+                annotation.kind = AnalysisAnnotationKind::DATA;
+                break;
+            case SymbolType::LABEL:
+            case SymbolType::UNKNOWN:
+            default:
+                annotation.kind = AnalysisAnnotationKind::LABEL;
+                break;
+        }
+        annotations.push_back(annotation);
+    }
+
+    return annotations;
+}
+
 void apply_symbols_to_analysis(const SymbolTable& symbols, AnalysisResult& analysis) {
     for (const auto& [addr, symbol] : symbols.symbols()) {
         AddressSymbolMetadata metadata;

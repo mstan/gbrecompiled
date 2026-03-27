@@ -1429,6 +1429,7 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     analyze_opts.entry_points = options.manual_entry_points;
     analyze_opts.aggressive_scan = options.aggressive_scan;
     analyze_opts.trace_file_path = options.trace_file_path;
+    analyze_opts.annotations = gbrecomp::build_analysis_annotations(symbol_table);
 
     const std::vector<gbrecomp::AnalyzerOptions::RamOverlay> dma_overlays =
         detect_oam_dma_overlays(rom);
@@ -1831,6 +1832,7 @@ int main(int argc, char* argv[]) {
     analyze_opts.entry_points = manual_entry_points;
     analyze_opts.aggressive_scan = aggressive_scan;
     analyze_opts.trace_file_path = trace_file_path;
+    analyze_opts.annotations = gbrecomp::build_analysis_annotations(symbol_table);
 
     const std::vector<gbrecomp::AnalyzerOptions::RamOverlay> dma_overlays =
         detect_oam_dma_overlays(rom);

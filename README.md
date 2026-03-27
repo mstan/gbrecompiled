@@ -265,7 +265,7 @@ If you run the launcher without `--game`, it opens the graphical launcher. The C
 | `--jobs <N>` | Override the auto-selected parallel worker count for codegen and directory-mode batch generation |
 | `--add-entry-point b:addr` | Manually specified entry point (e.g. `1:4000`) |
 | `--no-scan` | Disable aggressive code scanning (enabled by default) |
-| `--symbols <file>` | Load a `.sym` symbol file and use those names for generated functions and internal labels |
+| `--symbols <file>` | Load a `.sym` symbol file, use those names in generated output, and trust imported function entries during analysis |
 | `--verbose` | Show detailed analysis statistics |
 | `--use-trace <file>` | Use runtime trace to seed entry points |
 | `--android` | Also emit an Android project scaffold for single-ROM output |
@@ -325,6 +325,8 @@ For the Pokémon Blue validation work in this repo, we used:
 If your ROM hash differs, imported symbol names may not line up with the same code locations.
 
 Imported names are sanitized into valid C identifiers and emitted with a `sym_` prefix, so labels like `EnterMap`, `DisableLCD`, or `OverworldLoopLessDelay.checkIfStartIsPressed` become safe generated names such as `sym_EnterMap` and `sym_OverworldLoopLessDelay_checkIfStartIsPressed`. Imported RAM/HRAM/data labels are also lifted into generated address constants like `GB_ADDR_wSoundID` and `GB_ADDR_hJoyHeld`. Imported ROM data labels are lifted into `GB_ROM_ADDR_*` address constants and `GB_ROM_PTR_*` pointers into the generated `rom_data[]` blob.
+
+Imported function symbols are now also fed into the analyzer before scanning, so trusted function entry points from a `.sym` file are no longer just post-analysis renames. The analyzer also treats the Nintendo logo (`0x0104-0x0133`) and cartridge header (`0x0134-0x014f`) as built-in ROM data, which helps avoid turning those bytes into code during aggressive scanning.
 
 When `--symbols` is enabled, the generated output also includes:
 

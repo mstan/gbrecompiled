@@ -1,14 +1,14 @@
 ## General
 - [x] Rendering modes for runtime (how we scale the viewport, how do we handle aspect ratio and window resizing?)
-- [ ] Audio output (how do we handle audio timing and buffering?)
-- [ ] Save data handling (how do we read/write save data, and how do we handle save states?)
+- [x] Audio output (how do we handle audio timing and buffering?)
+- [x] Save data handling (how do we read/write save data, and how do we handle save states?)
 - [ ] Script callbacks (how do we allow custom code to hook into gameplay events without modifying generated code directly?)
-- [ ] Performance optimizations (what are the hotspots in the generated code, and how can we optimize them without sacrificing readability or modifiability?)
+- [x] Performance optimizations (what are the hotspots in the generated code, and how can we optimize them without sacrificing readability or modifiability?)
 - [ ] Consider if Imgui still the best scenario for UI
 - [x] Multi-rom support, they share the same runtime but have different generated code and metadata, we add a launcher to select which one to run
 - [x] Graphical launcher for multi-rom support
 - [ ] Per game configurations on multi-rom mode
-- [ ] Benchmark performance and memory usage against emulators
+- [x] Benchmark performance and memory usage against emulators
 - [x] Improve interpreter fallback performance and coverage, and add a way to detect and report when it's being used. Gather feedback from interpreter hotspots to guide recompiler improvements.
 - [x] Add support for parallel recompilation on multi-core machines to speed up the initial generation process. Ideally for multi-rom batch generation as well.
 - [x] Remove mgbdis from repo
@@ -24,14 +24,14 @@
 - [x] Python script to summarize interpreter .log files, showing which functions are hotspots for interpreter fallback and which instructions are causing it
 - [x] Revisit more aggressive compiler optimizations
 - [ ] Support shaders
-- [ ] Input remapping for controllers
+- [x] Input remapping for controllers and keyboard
 - [ ] Clean README and add a cool logo, more screenshots
 
 ## GBC
 - [x] GBC modes is not loading the save file
-- [ ] Improve binary size for GBC games (pokemon crystal is ~130mb)
-- [ ] Symbol-guided recompilation for GBC
-- [~] Builds are taking too long, especially linking
+- [x] Improve binary size for GBC games (pokemon crystal is ~130mb)
+- [x] Symbol-guided recompilation for GBC
+- [x] Builds are taking too long, especially linking
 
 ## Android
 - [ ] Support remapping controller inputs on Android

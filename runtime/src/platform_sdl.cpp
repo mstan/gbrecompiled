@@ -15,6 +15,7 @@
 #include <cctype>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
@@ -75,11 +76,48 @@ typedef enum GBControllerLabelProfile {
     GB_CONTROLLER_LABEL_PLAYSTATION = 2,
     GB_CONTROLLER_LABEL_NINTENDO = 3,
 } GBControllerLabelProfile;
+typedef enum GBInputAction {
+    GB_INPUT_ACTION_RIGHT = 0,
+    GB_INPUT_ACTION_LEFT = 1,
+    GB_INPUT_ACTION_UP = 2,
+    GB_INPUT_ACTION_DOWN = 3,
+    GB_INPUT_ACTION_A = 4,
+    GB_INPUT_ACTION_B = 5,
+    GB_INPUT_ACTION_SELECT = 6,
+    GB_INPUT_ACTION_START = 7,
+    GB_INPUT_ACTION_COUNT = 8,
+} GBInputAction;
+typedef enum GBInputBindingKind {
+    GB_INPUT_BINDING_NONE = 0,
+    GB_INPUT_BINDING_KEY = 1,
+    GB_INPUT_BINDING_CONTROLLER_BUTTON = 2,
+    GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE = 3,
+    GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE = 4,
+} GBInputBindingKind;
+typedef enum GBBindingCaptureDevice {
+    GB_CAPTURE_DEVICE_NONE = 0,
+    GB_CAPTURE_DEVICE_KEYBOARD = 1,
+    GB_CAPTURE_DEVICE_CONTROLLER = 2,
+} GBBindingCaptureDevice;
+typedef struct GBInputBinding {
+    GBInputBindingKind kind;
+    int16_t code;
+} GBInputBinding;
 static GBRenderScalingMode g_render_scaling_mode = GB_RENDER_SCALING_PIXEL_PERFECT;
 static GBRenderFilterMode g_render_filter_mode = GB_RENDER_FILTER_NEAREST;
 static SDL_GameControllerType g_controller_type = SDL_CONTROLLER_TYPE_UNKNOWN;
 static GBControllerLabelProfile g_controller_label_profile = GB_CONTROLLER_LABEL_GENERIC;
 static std::string g_controller_name;
+static bool g_audio_output_enabled = true;
+static bool g_audio_muted = false;
+static uint32_t g_audio_latency_ms = 80;
+static uint32_t g_audio_volume_percent = 100;
+static uint32_t g_audio_low_watermark = 0;
+static uint32_t g_audio_device_sample_rate = 44100;
+static uint32_t g_audio_device_buffer_samples = 0;
+static std::vector<std::string> g_audio_output_devices;
+static std::string g_audio_target_device_name;
+static std::string g_audio_active_device_name;
 static const char* g_render_scaling_mode_names[] = {
     "Pixel Perfect",
     "Aspect Fit",
@@ -101,6 +139,26 @@ static bool g_lcd_off_framebuffer_initialized = false;
 static bool g_last_guest_framebuffer_valid = false;
 static uint64_t g_present_count = 0;
 static GBContext* g_registered_ctx = NULL;
+static GBInputBinding g_keyboard_bindings[GB_INPUT_ACTION_COUNT][2] = {};
+static GBInputBinding g_controller_bindings[GB_INPUT_ACTION_COUNT][2] = {};
+static bool g_keyboard_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
+static bool g_controller_button_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
+static bool g_controller_axis_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
+static Sint16 g_controller_axis_values[SDL_CONTROLLER_AXIS_MAX] = {};
+static bool g_binding_capture_active = false;
+static GBBindingCaptureDevice g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
+static GBInputAction g_binding_capture_action = GB_INPUT_ACTION_RIGHT;
+static int g_binding_capture_slot = 0;
+static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
+    "Right",
+    "Left",
+    "Up",
+    "Down",
+    "Game Boy A",
+    "Game Boy B",
+    "Select",
+    "Start",
+};
 
 static bool has_interpreter_activity(const GBContext* ctx) {
     return ctx != NULL &&
@@ -114,6 +172,19 @@ static uint32_t current_audio_underruns(void);
 static uint32_t current_audio_ring_fill_samples(void);
 static uint32_t current_audio_ring_capacity(void);
 static uint32_t audio_ring_fill_samples(void);
+static void sdl_audio_callback(void* userdata, Uint8* stream, int len);
+static void refresh_audio_output_devices(void);
+static const char* current_audio_output_device_label(void);
+static bool current_audio_output_device_available(void);
+static void close_audio_output_device(void);
+static bool reopen_audio_output_device(bool preserve_stats);
+static void update_controller_axis_binding_state(void);
+static void recompute_audio_targets(void);
+static void refresh_audio_device_pause_state(void);
+static void reset_audio_output_buffer(bool preserve_stats);
+static char* trim_ascii(char* text);
+static void update_effective_joypad_state(void);
+static void save_runtime_preferences(void);
 
 /* Joypad state - exported for gbrt.c to access */
 uint8_t g_joypad_buttons = 0xFF;  /* Active low: Start, Select, B, A */
@@ -385,14 +456,120 @@ static const char* controller_guide_label(void) {
     }
 }
 
+static const char* controller_button_label(SDL_GameControllerButton button) {
+    switch (button) {
+        case SDL_CONTROLLER_BUTTON_A: return controller_face_south_label();
+        case SDL_CONTROLLER_BUTTON_B: return controller_face_east_label();
+        case SDL_CONTROLLER_BUTTON_X: return "West Face";
+        case SDL_CONTROLLER_BUTTON_Y: return "North Face";
+        case SDL_CONTROLLER_BUTTON_BACK: return controller_back_label();
+        case SDL_CONTROLLER_BUTTON_GUIDE: return controller_guide_label();
+        case SDL_CONTROLLER_BUTTON_START: return controller_start_label();
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return controller_left_shoulder_label();
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return controller_right_shoulder_label();
+        case SDL_CONTROLLER_BUTTON_DPAD_UP: return "D-Pad Up";
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return "D-Pad Down";
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return "D-Pad Left";
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return "D-Pad Right";
+        case SDL_CONTROLLER_BUTTON_LEFTSTICK: return "Left Stick Click";
+        case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return "Right Stick Click";
+        default:
+            return "Controller Button";
+    }
+}
+
+static const char* controller_axis_label(SDL_GameControllerAxis axis, bool positive_direction) {
+    switch (axis) {
+        case SDL_CONTROLLER_AXIS_LEFTX: return positive_direction ? "Left Stick Right" : "Left Stick Left";
+        case SDL_CONTROLLER_AXIS_LEFTY: return positive_direction ? "Left Stick Down" : "Left Stick Up";
+        case SDL_CONTROLLER_AXIS_RIGHTX: return positive_direction ? "Right Stick Right" : "Right Stick Left";
+        case SDL_CONTROLLER_AXIS_RIGHTY: return positive_direction ? "Right Stick Down" : "Right Stick Up";
+        case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return "Left Trigger";
+        case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return "Right Trigger";
+        default:
+            return positive_direction ? "Axis +" : "Axis -";
+    }
+}
+
+static std::string binding_display_label(const GBInputBinding& binding) {
+    switch (binding.kind) {
+        case GB_INPUT_BINDING_KEY: {
+            const char* name = SDL_GetScancodeName((SDL_Scancode)binding.code);
+            return (name && name[0]) ? std::string(name) : ("Scancode " + std::to_string((int)binding.code));
+        }
+
+        case GB_INPUT_BINDING_CONTROLLER_BUTTON:
+            return controller_button_label((SDL_GameControllerButton)binding.code);
+
+        case GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE:
+            return controller_axis_label((SDL_GameControllerAxis)binding.code, true);
+
+        case GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE:
+            return controller_axis_label((SDL_GameControllerAxis)binding.code, false);
+
+        case GB_INPUT_BINDING_NONE:
+        default:
+            return "Unbound";
+    }
+}
+
+static void start_binding_capture(GBBindingCaptureDevice device, GBInputAction action, int slot) {
+    g_binding_capture_active = true;
+    g_binding_capture_device = device;
+    g_binding_capture_action = action;
+    g_binding_capture_slot = slot;
+}
+
+static void cancel_binding_capture(void) {
+    g_binding_capture_active = false;
+    g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
+    g_binding_capture_slot = 0;
+}
+
+static void assign_binding_slot(GBBindingCaptureDevice device,
+                                GBInputAction action,
+                                int slot,
+                                const GBInputBinding& binding) {
+    if (slot < 0 || slot >= 2) {
+        return;
+    }
+
+    if (device == GB_CAPTURE_DEVICE_KEYBOARD) {
+        g_keyboard_bindings[action][slot] = binding;
+        g_keyboard_binding_pressed[action][slot] = false;
+    } else if (device == GB_CAPTURE_DEVICE_CONTROLLER) {
+        g_controller_bindings[action][slot] = binding;
+        g_controller_button_binding_pressed[action][slot] = false;
+        g_controller_axis_binding_pressed[action][slot] = false;
+        update_controller_axis_binding_state();
+    }
+
+    update_effective_joypad_state();
+    save_runtime_preferences();
+}
+
+static void commit_binding_capture(const GBInputBinding& binding) {
+    if (!g_binding_capture_active || g_binding_capture_slot < 0 || g_binding_capture_slot >= 2) {
+        cancel_binding_capture();
+        return;
+    }
+
+    assign_binding_slot(g_binding_capture_device, g_binding_capture_action, g_binding_capture_slot, binding);
+    cancel_binding_capture();
+}
+
 static void clear_controller_state(void) {
     if (g_controller) {
         SDL_GameControllerClose(g_controller);
         g_controller = NULL;
     }
+    memset(g_controller_button_binding_pressed, 0, sizeof(g_controller_button_binding_pressed));
+    memset(g_controller_axis_binding_pressed, 0, sizeof(g_controller_axis_binding_pressed));
+    memset(g_controller_axis_values, 0, sizeof(g_controller_axis_values));
     g_controller_type = SDL_CONTROLLER_TYPE_UNKNOWN;
     g_controller_label_profile = detect_controller_label_profile(NULL);
     g_controller_name.clear();
+    update_effective_joypad_state();
 }
 
 static void refresh_controller_profile(void) {
@@ -508,6 +685,335 @@ static std::string resolve_writable_path(const char* requested_path, const char*
     return resolved.lexically_normal().string();
 }
 
+static GBInputBinding make_binding(GBInputBindingKind kind, int code) {
+    GBInputBinding binding = {};
+    binding.kind = kind;
+    binding.code = (int16_t)code;
+    return binding;
+}
+
+static const char* input_action_config_name(GBInputAction action) {
+    switch (action) {
+        case GB_INPUT_ACTION_RIGHT: return "right";
+        case GB_INPUT_ACTION_LEFT: return "left";
+        case GB_INPUT_ACTION_UP: return "up";
+        case GB_INPUT_ACTION_DOWN: return "down";
+        case GB_INPUT_ACTION_A: return "a";
+        case GB_INPUT_ACTION_B: return "b";
+        case GB_INPUT_ACTION_SELECT: return "select";
+        case GB_INPUT_ACTION_START: return "start";
+        case GB_INPUT_ACTION_COUNT:
+        default:
+            return "unknown";
+    }
+}
+
+static bool parse_input_action_name(const char* text, GBInputAction* out_action) {
+    if (!text || !out_action) {
+        return false;
+    }
+
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        if (strcmp(text, input_action_config_name((GBInputAction)action)) == 0) {
+            *out_action = (GBInputAction)action;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void clear_all_binding_pressed_state(void) {
+    memset(g_keyboard_binding_pressed, 0, sizeof(g_keyboard_binding_pressed));
+    memset(g_controller_button_binding_pressed, 0, sizeof(g_controller_button_binding_pressed));
+    memset(g_controller_axis_binding_pressed, 0, sizeof(g_controller_axis_binding_pressed));
+    memset(g_controller_axis_values, 0, sizeof(g_controller_axis_values));
+}
+
+static bool binding_is_valid(const GBInputBinding& binding) {
+    switch (binding.kind) {
+        case GB_INPUT_BINDING_KEY:
+            return binding.code > SDL_SCANCODE_UNKNOWN && binding.code < SDL_NUM_SCANCODES;
+
+        case GB_INPUT_BINDING_CONTROLLER_BUTTON:
+            return binding.code >= 0 && binding.code < SDL_CONTROLLER_BUTTON_MAX;
+
+        case GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE:
+        case GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE:
+            return binding.code >= 0 && binding.code < SDL_CONTROLLER_AXIS_MAX;
+
+        case GB_INPUT_BINDING_NONE:
+        default:
+            return false;
+    }
+}
+
+static bool binding_matches_scancode(const GBInputBinding& binding, SDL_Scancode scancode) {
+    return binding.kind == GB_INPUT_BINDING_KEY && binding.code == (int)scancode;
+}
+
+static bool binding_matches_controller_button(const GBInputBinding& binding, uint8_t button) {
+    return binding.kind == GB_INPUT_BINDING_CONTROLLER_BUTTON && binding.code == (int)button;
+}
+
+static bool binding_active_for_axis_value(const GBInputBinding& binding, Sint16 value) {
+    const Sint16 threshold = 16000;
+    if (binding.kind == GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE) {
+        return value >= threshold;
+    }
+    if (binding.kind == GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE) {
+        return value <= -threshold;
+    }
+    return false;
+}
+
+static void set_default_audio_preferences(void) {
+    g_audio_output_enabled = true;
+    g_audio_muted = false;
+    g_audio_latency_ms = 80;
+    g_audio_volume_percent = 100;
+    g_audio_target_device_name.clear();
+}
+
+static void set_default_input_bindings(void) {
+    memset(g_keyboard_bindings, 0, sizeof(g_keyboard_bindings));
+    memset(g_controller_bindings, 0, sizeof(g_controller_bindings));
+
+    g_keyboard_bindings[GB_INPUT_ACTION_UP][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_UP);
+    g_keyboard_bindings[GB_INPUT_ACTION_UP][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_W);
+    g_keyboard_bindings[GB_INPUT_ACTION_DOWN][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_DOWN);
+    g_keyboard_bindings[GB_INPUT_ACTION_DOWN][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_S);
+    g_keyboard_bindings[GB_INPUT_ACTION_LEFT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_LEFT);
+    g_keyboard_bindings[GB_INPUT_ACTION_LEFT][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_A);
+    g_keyboard_bindings[GB_INPUT_ACTION_RIGHT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_RIGHT);
+    g_keyboard_bindings[GB_INPUT_ACTION_RIGHT][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_D);
+    g_keyboard_bindings[GB_INPUT_ACTION_A][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_Z);
+    g_keyboard_bindings[GB_INPUT_ACTION_A][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_J);
+    g_keyboard_bindings[GB_INPUT_ACTION_B][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_X);
+    g_keyboard_bindings[GB_INPUT_ACTION_B][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_K);
+    g_keyboard_bindings[GB_INPUT_ACTION_SELECT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_BACKSPACE);
+    g_keyboard_bindings[GB_INPUT_ACTION_SELECT][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_RSHIFT);
+    g_keyboard_bindings[GB_INPUT_ACTION_START][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_RETURN);
+
+    g_controller_bindings[GB_INPUT_ACTION_UP][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_UP);
+    g_controller_bindings[GB_INPUT_ACTION_UP][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE, SDL_CONTROLLER_AXIS_LEFTY);
+    g_controller_bindings[GB_INPUT_ACTION_DOWN][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    g_controller_bindings[GB_INPUT_ACTION_DOWN][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE, SDL_CONTROLLER_AXIS_LEFTY);
+    g_controller_bindings[GB_INPUT_ACTION_LEFT][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    g_controller_bindings[GB_INPUT_ACTION_LEFT][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE, SDL_CONTROLLER_AXIS_LEFTX);
+    g_controller_bindings[GB_INPUT_ACTION_RIGHT][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    g_controller_bindings[GB_INPUT_ACTION_RIGHT][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE, SDL_CONTROLLER_AXIS_LEFTX);
+    g_controller_bindings[GB_INPUT_ACTION_A][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_B);
+    g_controller_bindings[GB_INPUT_ACTION_A][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    g_controller_bindings[GB_INPUT_ACTION_B][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_A);
+    g_controller_bindings[GB_INPUT_ACTION_B][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    g_controller_bindings[GB_INPUT_ACTION_SELECT][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_BACK);
+    g_controller_bindings[GB_INPUT_ACTION_START][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_START);
+
+    clear_all_binding_pressed_state();
+}
+
+static std::string runtime_preferences_path(void) {
+    const std::string pref_dir = make_pref_storage_dir("runtime");
+    if (!pref_dir.empty()) {
+        fs::path resolved = fs::path(pref_dir) / "runtime_prefs.ini";
+        ensure_parent_directory(resolved);
+        return resolved.lexically_normal().string();
+    }
+    return fs::path("runtime_prefs.ini").lexically_normal().string();
+}
+
+static void load_runtime_preferences(void) {
+    set_default_audio_preferences();
+    set_default_input_bindings();
+
+    const std::string path = runtime_preferences_path();
+    if (!path.empty()) {
+        FILE* file = fopen(path.c_str(), "r");
+        if (file) {
+            char line[256];
+            while (fgets(line, sizeof(line), file)) {
+                char* text = trim_ascii(line);
+                if (!text || !text[0] || text[0] == '#') {
+                    continue;
+                }
+
+                char* equals = strchr(text, '=');
+                if (!equals) {
+                    continue;
+                }
+
+                *equals = '\0';
+                char* key = trim_ascii(text);
+                char* value = trim_ascii(equals + 1);
+                if (!key || !value || !key[0]) {
+                    continue;
+                }
+
+                if (strcmp(key, "audio.enabled") == 0) {
+                    g_audio_output_enabled = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "audio.muted") == 0) {
+                    g_audio_muted = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "audio.latency_ms") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed > 0) {
+                        g_audio_latency_ms = (uint32_t)parsed;
+                    }
+                    continue;
+                }
+                if (strcmp(key, "audio.volume_percent") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0) {
+                        if (parsed > 200) parsed = 200;
+                        g_audio_volume_percent = (uint32_t)parsed;
+                    }
+                    continue;
+                }
+                if (strcmp(key, "audio.device_name") == 0) {
+                    g_audio_target_device_name = value;
+                    continue;
+                }
+
+                bool is_keyboard = strncmp(key, "keyboard.", 9) == 0;
+                bool is_controller = strncmp(key, "controller.", 11) == 0;
+                if (!is_keyboard && !is_controller) {
+                    continue;
+                }
+
+                char* section = key + (is_keyboard ? 9 : 11);
+                char* dot = strrchr(section, '.');
+                if (!dot) {
+                    continue;
+                }
+                *dot = '\0';
+                char* slot_text = dot + 1;
+                long slot = strtol(slot_text, NULL, 10);
+                if (slot < 0 || slot >= 2) {
+                    continue;
+                }
+
+                GBInputAction action = GB_INPUT_ACTION_RIGHT;
+                if (!parse_input_action_name(section, &action)) {
+                    continue;
+                }
+
+                GBInputBinding binding = {};
+                if (strcmp(value, "none") == 0) {
+                    binding = make_binding(GB_INPUT_BINDING_NONE, 0);
+                } else if (is_keyboard) {
+                    if (strncmp(value, "key:", 4) != 0) {
+                        continue;
+                    }
+                    long code = strtol(value + 4, NULL, 10);
+                    binding = make_binding(GB_INPUT_BINDING_KEY, (int)code);
+                } else if (strncmp(value, "button:", 7) == 0) {
+                    long code = strtol(value + 7, NULL, 10);
+                    binding = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, (int)code);
+                } else if (strncmp(value, "axis:", 5) == 0) {
+                    char* value_copy = strdup(value + 5);
+                    if (!value_copy) {
+                        continue;
+                    }
+                    char* axis_text = strtok(value_copy, ":");
+                    char* direction_text = strtok(NULL, ":");
+                    if (axis_text && direction_text) {
+                        long axis = strtol(axis_text, NULL, 10);
+                        binding = make_binding(
+                            (strcmp(direction_text, "+") == 0) ? GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE
+                                                                 : GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE,
+                            (int)axis);
+                    }
+                    free(value_copy);
+                } else {
+                    continue;
+                }
+
+                if (!binding_is_valid(binding) && binding.kind != GB_INPUT_BINDING_NONE) {
+                    continue;
+                }
+
+                if (is_keyboard) {
+                    g_keyboard_bindings[action][slot] = binding;
+                } else {
+                    g_controller_bindings[action][slot] = binding;
+                }
+            }
+            fclose(file);
+        }
+    }
+    update_effective_joypad_state();
+}
+
+static void binding_to_config_value(const GBInputBinding& binding, char* out, size_t out_size) {
+    if (!out || out_size == 0) {
+        return;
+    }
+
+    switch (binding.kind) {
+        case GB_INPUT_BINDING_KEY:
+            snprintf(out, out_size, "key:%d", (int)binding.code);
+            break;
+
+        case GB_INPUT_BINDING_CONTROLLER_BUTTON:
+            snprintf(out, out_size, "button:%d", (int)binding.code);
+            break;
+
+        case GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE:
+            snprintf(out, out_size, "axis:%d:+", (int)binding.code);
+            break;
+
+        case GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE:
+            snprintf(out, out_size, "axis:%d:-", (int)binding.code);
+            break;
+
+        case GB_INPUT_BINDING_NONE:
+        default:
+            snprintf(out, out_size, "none");
+            break;
+    }
+}
+
+static void save_runtime_preferences(void) {
+    const std::string path = runtime_preferences_path();
+    if (path.empty()) {
+        return;
+    }
+
+    FILE* file = fopen(path.c_str(), "w");
+    if (!file) {
+        fprintf(stderr, "[SDL] Failed to save runtime prefs to %s\n", path.c_str());
+        return;
+    }
+
+    fprintf(file, "audio.enabled=%d\n", g_audio_output_enabled ? 1 : 0);
+    fprintf(file, "audio.muted=%d\n", g_audio_muted ? 1 : 0);
+    fprintf(file, "audio.latency_ms=%u\n", g_audio_latency_ms);
+    fprintf(file, "audio.volume_percent=%u\n", g_audio_volume_percent);
+    fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
+
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        for (int slot = 0; slot < 2; slot++) {
+            char value[64];
+            binding_to_config_value(g_keyboard_bindings[action][slot], value, sizeof(value));
+            fprintf(file, "keyboard.%s.%d=%s\n", input_action_config_name((GBInputAction)action), slot, value);
+        }
+    }
+
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        for (int slot = 0; slot < 2; slot++) {
+            char value[64];
+            binding_to_config_value(g_controller_bindings[action][slot], value, sizeof(value));
+            fprintf(file, "controller.%s.%d=%s\n", input_action_config_name((GBInputAction)action), slot, value);
+        }
+    }
+
+    fclose(file);
+}
+
 static bool recreate_streaming_texture(void);
 static void set_app_suspended(bool suspended);
 
@@ -535,7 +1041,33 @@ static void parse_buttons(const char* btn_str, uint8_t* dpad, uint8_t* buttons) 
     if (strchr(btn_str, 'T')) *buttons &= ~0x04; /* Select (T for selecT) */
 }
 
+static bool input_action_is_pressed(GBInputAction action) {
+    for (int slot = 0; slot < 2; slot++) {
+        if (g_keyboard_binding_pressed[action][slot] ||
+            g_controller_button_binding_pressed[action][slot] ||
+            g_controller_axis_binding_pressed[action][slot]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void rebuild_manual_joypad_state_from_bindings(void) {
+    g_manual_joypad_dpad = 0xFF;
+    g_manual_joypad_buttons = 0xFF;
+
+    if (input_action_is_pressed(GB_INPUT_ACTION_RIGHT)) g_manual_joypad_dpad &= (uint8_t)~0x01;
+    if (input_action_is_pressed(GB_INPUT_ACTION_LEFT)) g_manual_joypad_dpad &= (uint8_t)~0x02;
+    if (input_action_is_pressed(GB_INPUT_ACTION_UP)) g_manual_joypad_dpad &= (uint8_t)~0x04;
+    if (input_action_is_pressed(GB_INPUT_ACTION_DOWN)) g_manual_joypad_dpad &= (uint8_t)~0x08;
+    if (input_action_is_pressed(GB_INPUT_ACTION_A)) g_manual_joypad_buttons &= (uint8_t)~0x01;
+    if (input_action_is_pressed(GB_INPUT_ACTION_B)) g_manual_joypad_buttons &= (uint8_t)~0x02;
+    if (input_action_is_pressed(GB_INPUT_ACTION_SELECT)) g_manual_joypad_buttons &= (uint8_t)~0x04;
+    if (input_action_is_pressed(GB_INPUT_ACTION_START)) g_manual_joypad_buttons &= (uint8_t)~0x08;
+}
+
 static void update_effective_joypad_state(void) {
+    rebuild_manual_joypad_state_from_bindings();
     g_joypad_dpad = g_manual_joypad_dpad & g_script_joypad_dpad;
     g_joypad_buttons = g_manual_joypad_buttons & g_script_joypad_buttons;
 }
@@ -972,9 +1504,7 @@ static void set_app_suspended(bool suspended) {
     }
 
     g_app_suspended = suspended;
-    if (g_audio_device) {
-        SDL_PauseAudioDevice(g_audio_device, suspended ? 1 : (g_audio_started ? 0 : 1));
-    }
+    refresh_audio_device_pause_state();
 
     if (!suspended) {
         g_last_frame_time = SDL_GetTicks();
@@ -1012,6 +1542,92 @@ static void reset_runtime_display_defaults(void) {
         }
     } else {
         g_fullscreen = want_fullscreen;
+    }
+
+    reset_audio_output_buffer(true);
+}
+
+static void reset_runtime_audio_defaults(void) {
+    set_default_audio_preferences();
+    refresh_audio_output_devices();
+    reopen_audio_output_device(true);
+    save_runtime_preferences();
+}
+
+static void reset_runtime_control_defaults(void) {
+    set_default_input_bindings();
+    update_effective_joypad_state();
+    save_runtime_preferences();
+}
+
+static void update_controller_axis_binding_state(void) {
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        for (int slot = 0; slot < 2; slot++) {
+            const GBInputBinding& binding = g_controller_bindings[action][slot];
+            if (binding.kind == GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE ||
+                binding.kind == GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE) {
+                Sint16 value = 0;
+                if (binding.code >= 0 && binding.code < SDL_CONTROLLER_AXIS_MAX) {
+                    value = g_controller_axis_values[binding.code];
+                }
+                g_controller_axis_binding_pressed[action][slot] = binding_active_for_axis_value(binding, value);
+            } else {
+                g_controller_axis_binding_pressed[action][slot] = false;
+            }
+        }
+    }
+}
+
+static bool input_transition_creates_press(uint8_t previous_dpad,
+                                           uint8_t previous_buttons,
+                                           uint8_t next_dpad,
+                                           uint8_t next_buttons,
+                                           bool dpad_selected,
+                                           bool buttons_selected) {
+    if (dpad_selected && ((previous_dpad & ~next_dpad) != 0)) {
+        return true;
+    }
+    if (buttons_selected && ((previous_buttons & ~next_buttons) != 0)) {
+        return true;
+    }
+    return false;
+}
+
+static void render_binding_editor(const char* section_label,
+                                  GBBindingCaptureDevice device,
+                                  GBInputBinding bindings[GB_INPUT_ACTION_COUNT][2]) {
+    ImGui::TextDisabled("%s", section_label);
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        ImGui::PushID(section_label);
+        ImGui::PushID(action);
+        ImGui::Text("%s", g_input_action_names[action]);
+        ImGui::SameLine(150.0f);
+        for (int slot = 0; slot < 2; slot++) {
+            std::string label;
+            if (g_binding_capture_active &&
+                g_binding_capture_device == device &&
+                g_binding_capture_action == (GBInputAction)action &&
+                g_binding_capture_slot == slot) {
+                label = "Press Input...";
+            } else {
+                label = binding_display_label(bindings[action][slot]);
+            }
+
+            ImGui::PushID(slot);
+            if (ImGui::Button(label.c_str(), ImVec2(150.0f, 0.0f))) {
+                start_binding_capture(device, (GBInputAction)action, slot);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear")) {
+                assign_binding_slot(device, (GBInputAction)action, slot, make_binding(GB_INPUT_BINDING_NONE, 0));
+            }
+            ImGui::PopID();
+            if (slot == 0) {
+                ImGui::SameLine();
+            }
+        }
+        ImGui::PopID();
+        ImGui::PopID();
     }
 }
 
@@ -1215,9 +1831,88 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
         ImGui::Checkbox("Show Overlay (F1)", &g_show_overlay);
         ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
-        ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500);
-        if (ImGui::Button("Reset Speed")) g_speed_percent = 100;
+        if (ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500)) {
+            reset_audio_output_buffer(true);
+        }
+        if (ImGui::Button("Reset Speed")) {
+            g_speed_percent = 100;
+            reset_audio_output_buffer(true);
+        }
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Audio");
+        if (ImGui::Checkbox("Enable Audio Output", &g_audio_output_enabled)) {
+            reset_audio_output_buffer(true);
+            save_runtime_preferences();
+        }
+        if (ImGui::Checkbox("Mute", &g_audio_muted)) {
+            save_runtime_preferences();
+        }
+        int audio_volume_percent = (int)g_audio_volume_percent;
+        if (ImGui::SliderInt("Master Volume (%)", &audio_volume_percent, 0, 200)) {
+            g_audio_volume_percent = (uint32_t)audio_volume_percent;
+            save_runtime_preferences();
+        }
+        if (ImGui::BeginCombo("Output Device", current_audio_output_device_label())) {
+            bool selected_default = g_audio_target_device_name.empty();
+            if (ImGui::Selectable("System Default", selected_default)) {
+                g_audio_target_device_name.clear();
+                save_runtime_preferences();
+                reopen_audio_output_device(true);
+            }
+            if (selected_default) {
+                ImGui::SetItemDefaultFocus();
+            }
+
+            for (size_t i = 0; i < g_audio_output_devices.size(); i++) {
+                const bool selected = g_audio_output_devices[i] == g_audio_target_device_name;
+                if (ImGui::Selectable(g_audio_output_devices[i].c_str(), selected)) {
+                    g_audio_target_device_name = g_audio_output_devices[i];
+                    save_runtime_preferences();
+                    reopen_audio_output_device(true);
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        int audio_latency_ms = (int)g_audio_latency_ms;
+        if (ImGui::SliderInt("Target Audio Latency (ms)", &audio_latency_ms, 20, 250)) {
+            g_audio_latency_ms = (uint32_t)audio_latency_ms;
+            recompute_audio_targets();
+            reset_audio_output_buffer(true);
+            save_runtime_preferences();
+        }
+        if (ImGui::Button("Refresh Devices")) {
+            refresh_audio_output_devices();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reconnect Audio")) {
+            reopen_audio_output_device(true);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Audio Buffer")) {
+            reset_audio_output_buffer(true);
+        }
+        ImGui::Text("Requested Output: %s", current_audio_output_device_label());
+        ImGui::Text("Active Output: %s", g_audio_active_device_name.empty() ? "Unavailable" : g_audio_active_device_name.c_str());
+        if (!current_audio_output_device_available()) {
+            ImGui::TextDisabled("Requested device is unavailable. Using the default output when possible.");
+        }
+        ImGui::Text("Ring Buffer: %u / %u samples", current_audio_ring_fill_samples(), current_audio_ring_capacity());
+        ImGui::Text("Device: %u Hz, device buffer %u, start %u, low-water %u",
+                    g_audio_device_sample_rate,
+                    g_audio_device_buffer_samples,
+                    g_audio_start_threshold,
+                    g_audio_low_watermark);
+        if (g_speed_percent != 100) {
+            ImGui::TextDisabled("Audio output pauses while Speed %% is not 100.");
+        }
+        if (ImGui::Button("Reset Audio")) {
+            reset_runtime_audio_defaults();
+        }
 
         ImGui::Separator();
         ImGui::TextDisabled("Controls");
@@ -1226,23 +1921,27 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("Profile: %s", controller_type_name(g_controller_type));
         } else {
 #if defined(__ANDROID__)
-            ImGui::TextDisabled("No controller detected. Showing the default handheld layout.");
+            ImGui::TextDisabled("No controller detected. Controller mappings will apply when one is connected.");
 #else
             ImGui::TextDisabled("No controller detected.");
-            ImGui::BulletText("Arrows / WASD: Move");
-            ImGui::BulletText("Z/J: Game Boy A");
-            ImGui::BulletText("X/K: Game Boy B");
-            ImGui::BulletText("Backspace: Select");
-            ImGui::BulletText("Enter: Start");
 #endif
         }
-        ImGui::BulletText("D-Pad / Left Stick: Move");
-        ImGui::BulletText("%s: Game Boy B", controller_face_south_label());
-        ImGui::BulletText("%s: Game Boy A", controller_face_east_label());
-        ImGui::BulletText("%s: Game Boy B (alt)", controller_left_shoulder_label());
-        ImGui::BulletText("%s: Game Boy A (alt)", controller_right_shoulder_label());
-        ImGui::BulletText("%s: Select", controller_back_label());
-        ImGui::BulletText("%s: Start", controller_start_label());
+        render_binding_editor("Keyboard", GB_CAPTURE_DEVICE_KEYBOARD, g_keyboard_bindings);
+        ImGui::Spacing();
+        render_binding_editor("Controller", GB_CAPTURE_DEVICE_CONTROLLER, g_controller_bindings);
+        if (g_binding_capture_active) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Waiting for %s input for %s slot %d",
+                                g_binding_capture_device == GB_CAPTURE_DEVICE_KEYBOARD ? "keyboard" : "controller",
+                                g_input_action_names[g_binding_capture_action],
+                                g_binding_capture_slot + 1);
+            if (ImGui::Button("Cancel Capture")) {
+                cancel_binding_capture();
+            }
+        }
+        if (ImGui::Button("Reset Controls")) {
+            reset_runtime_control_defaults();
+        }
         ImGui::BulletText("%s: Settings Menu", controller_guide_label());
 #if defined(__ANDROID__)
         ImGui::BulletText("Android Back / Escape: Settings Menu");
@@ -1280,7 +1979,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
 
-        if (ImGui::Button("Reset to Defaults")) {
+        if (ImGui::Button("Reset Display")) {
             reset_runtime_display_defaults();
         }
 
@@ -1363,15 +2062,12 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
 void gb_platform_shutdown(void) {
     close_input_record_file();
-
-    if (g_audio_device) {
-        SDL_CloseAudioDevice(g_audio_device);
-        g_audio_device = 0;
-    }
+    close_audio_output_device();
+    g_audio_output_devices.clear();
 
     clear_controller_state();
-    g_audio_started = false;
-    g_audio_start_threshold = 0;
+    g_binding_capture_active = false;
+    g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
     
     if (ImGui::GetCurrentContext() != NULL) {
         ImGui_ImplSDLRenderer2_Shutdown();
@@ -1425,11 +2121,124 @@ GBPlatformExitAction gb_platform_get_exit_action(void) {
 static int16_t g_audio_ring[AUDIO_RING_SIZE * 2];  /* Stereo */
 static std::atomic<uint32_t> g_audio_write_pos{0};
 static std::atomic<uint32_t> g_audio_read_pos{0};
-static uint32_t g_audio_device_sample_rate = AUDIO_SAMPLE_RATE;
 
 /* Debug counters */
 static uint32_t g_audio_samples_written = 0;
 static uint32_t g_audio_underruns = 0;
+
+static bool audio_subsystem_available(void) {
+    return (SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) != 0;
+}
+
+static void refresh_audio_output_devices(void) {
+    g_audio_output_devices.clear();
+    if (!audio_subsystem_available()) {
+        return;
+    }
+
+    const int count = SDL_GetNumAudioDevices(0);
+    for (int i = 0; i < count; i++) {
+        const char* name = SDL_GetAudioDeviceName(i, 0);
+        if (name && name[0]) {
+            g_audio_output_devices.emplace_back(name);
+        }
+    }
+}
+
+static int current_audio_output_device_index(void) {
+    if (g_audio_target_device_name.empty()) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < g_audio_output_devices.size(); i++) {
+        if (g_audio_output_devices[i] == g_audio_target_device_name) {
+            return (int)i + 1;
+        }
+    }
+
+    return 0;
+}
+
+static const char* current_audio_output_device_label(void) {
+    if (!g_audio_target_device_name.empty()) {
+        return g_audio_target_device_name.c_str();
+    }
+    return "System Default";
+}
+
+static bool current_audio_output_device_available(void) {
+    return g_audio_target_device_name.empty() || current_audio_output_device_index() != 0;
+}
+
+static void close_audio_output_device(void) {
+    if (g_audio_device) {
+        SDL_CloseAudioDevice(g_audio_device);
+        g_audio_device = 0;
+    }
+    g_audio_started = false;
+    g_audio_start_threshold = 0;
+    g_audio_low_watermark = 0;
+    g_audio_device_sample_rate = AUDIO_SAMPLE_RATE;
+    g_audio_device_buffer_samples = 0;
+    g_audio_active_device_name.clear();
+}
+
+static bool open_audio_output_device(const char* device_name, bool preserve_stats) {
+    SDL_AudioSpec want, have;
+    memset(&want, 0, sizeof(want));
+    want.freq = AUDIO_SAMPLE_RATE;
+    want.format = AUDIO_S16LSB;
+    want.channels = 2;
+    want.samples = 2048;
+    want.callback = sdl_audio_callback;
+    want.userdata = NULL;
+
+    g_audio_device = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
+    if (g_audio_device == 0) {
+        return false;
+    }
+
+    g_audio_device_sample_rate = (uint32_t)have.freq;
+    g_audio_device_buffer_samples = (uint32_t)have.samples;
+    g_audio_active_device_name = (device_name && device_name[0]) ? device_name : "System Default";
+    recompute_audio_targets();
+    reset_audio_output_buffer(preserve_stats);
+    fprintf(stderr,
+            "[SDL] Audio initialized: %d Hz, %d channels, device '%s', buffer %d samples, target latency %u ms\n",
+            have.freq,
+            have.channels,
+            g_audio_active_device_name.c_str(),
+            have.samples,
+            g_audio_latency_ms);
+    return true;
+}
+
+static bool reopen_audio_output_device(bool preserve_stats) {
+    if (!audio_subsystem_available()) {
+        return false;
+    }
+
+    const std::string requested_device = g_audio_target_device_name;
+    close_audio_output_device();
+
+    if (!requested_device.empty() && open_audio_output_device(requested_device.c_str(), preserve_stats)) {
+        return true;
+    }
+
+    if (!requested_device.empty()) {
+        fprintf(stderr,
+                "[SDL] Failed to open requested audio device '%s': %s. Falling back to default output.\n",
+                requested_device.c_str(),
+                SDL_GetError());
+    }
+
+    if (open_audio_output_device(NULL, preserve_stats)) {
+        return true;
+    }
+
+    fprintf(stderr, "[SDL] Failed to open audio: %s\n", SDL_GetError());
+    return false;
+}
 
 static uint32_t current_audio_underruns(void) {
     return g_audio_underruns;
@@ -1443,6 +2252,14 @@ static uint32_t current_audio_ring_capacity(void) {
     return AUDIO_RING_SIZE;
 }
 
+static bool audio_output_should_run(void) {
+    return g_audio_device != 0 &&
+           g_audio_output_enabled &&
+           !g_benchmark_mode &&
+           !g_app_suspended &&
+           g_speed_percent == 100;
+}
+
 static uint32_t audio_ring_fill_samples(void) {
     uint32_t write_pos = g_audio_write_pos.load(std::memory_order_acquire);
     uint32_t read_pos = g_audio_read_pos.load(std::memory_order_acquire);
@@ -1451,6 +2268,61 @@ static uint32_t audio_ring_fill_samples(void) {
 
 static void update_audio_stats_from_ring(void) {
     audio_stats_update_buffer(audio_ring_fill_samples(), AUDIO_RING_SIZE, g_audio_device_sample_rate);
+}
+
+static void recompute_audio_targets(void) {
+    const uint32_t sample_rate = g_audio_device_sample_rate ? g_audio_device_sample_rate : AUDIO_SAMPLE_RATE;
+    const uint32_t device_buffer = g_audio_device_buffer_samples ? g_audio_device_buffer_samples : 512u;
+    uint32_t target = (uint32_t)(((uint64_t)sample_rate * (uint64_t)g_audio_latency_ms + 999ull) / 1000ull);
+
+    if (target < device_buffer) {
+        target = device_buffer;
+    }
+    if (target == 0) {
+        target = 1;
+    }
+    if (target > (AUDIO_RING_SIZE / 2)) {
+        target = AUDIO_RING_SIZE / 2;
+    }
+
+    g_audio_start_threshold = target;
+    g_audio_low_watermark = target / 2;
+    if (g_audio_low_watermark == 0) {
+        g_audio_low_watermark = 1;
+    }
+}
+
+static void clear_audio_ring_buffer_locked(void) {
+    g_audio_write_pos.store(0, std::memory_order_relaxed);
+    g_audio_read_pos.store(0, std::memory_order_relaxed);
+    memset(g_audio_ring, 0, sizeof(g_audio_ring));
+    g_audio_started = false;
+    update_audio_stats_from_ring();
+}
+
+static void refresh_audio_device_pause_state(void) {
+    if (!g_audio_device) {
+        return;
+    }
+
+    const bool paused = !audio_output_should_run() || !g_audio_started;
+    SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0);
+}
+
+static void reset_audio_output_buffer(bool preserve_stats) {
+    if (g_audio_device) {
+        SDL_LockAudioDevice(g_audio_device);
+        clear_audio_ring_buffer_locked();
+        refresh_audio_device_pause_state();
+        SDL_UnlockAudioDevice(g_audio_device);
+    } else {
+        clear_audio_ring_buffer_locked();
+    }
+
+    if (!preserve_stats) {
+        g_audio_underruns = 0;
+        g_audio_samples_written = 0;
+    }
 }
 
 /* SDL callback - pulls samples from ring buffer */
@@ -1465,8 +2337,21 @@ static void sdl_audio_callback(void* userdata, Uint8* stream, int len) {
     for (int i = 0; i < samples_needed; i++) {
         if (read_pos != write_pos) {
             /* Have data - copy it */
-            out[i * 2] = g_audio_ring[read_pos * 2];
-            out[i * 2 + 1] = g_audio_ring[read_pos * 2 + 1];
+            int32_t left = g_audio_ring[read_pos * 2];
+            int32_t right = g_audio_ring[read_pos * 2 + 1];
+            if (g_audio_muted || g_audio_volume_percent == 0) {
+                left = 0;
+                right = 0;
+            } else if (g_audio_volume_percent != 100) {
+                left = (left * (int32_t)g_audio_volume_percent) / 100;
+                right = (right * (int32_t)g_audio_volume_percent) / 100;
+                if (left < -32768) left = -32768;
+                if (left > 32767) left = 32767;
+                if (right < -32768) right = -32768;
+                if (right > 32767) right = 32767;
+            }
+            out[i * 2] = (int16_t)left;
+            out[i * 2 + 1] = (int16_t)right;
             read_pos = (read_pos + 1) % AUDIO_RING_SIZE;
         } else {
             /* Underrun - output silence */
@@ -1482,7 +2367,7 @@ static void sdl_audio_callback(void* userdata, Uint8* stream, int len) {
 
 static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
     (void)ctx;
-    if (g_audio_device == 0) return;
+    if (!audio_output_should_run()) return;
     
     uint32_t write_pos = g_audio_write_pos.load(std::memory_order_relaxed);
     uint32_t next_write = (write_pos + 1) % AUDIO_RING_SIZE;
@@ -1500,8 +2385,8 @@ static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
     audio_stats_samples_queued(1);
 
     if (!g_audio_started && audio_ring_fill_samples() >= g_audio_start_threshold) {
-        SDL_PauseAudioDevice(g_audio_device, 0);
         g_audio_started = true;
+        refresh_audio_device_pause_state();
     }
 }
 
@@ -1523,6 +2408,8 @@ bool gb_platform_init(int scale) {
     g_app_suspended = false;
     g_renderer_reset_pending = false;
     g_show_overlay = false;
+    g_binding_capture_active = false;
+    g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
     update_effective_joypad_state();
     g_last_guest_framebuffer_valid = false;
     g_present_count = 0;
@@ -1539,6 +2426,7 @@ bool gb_platform_init(int scale) {
             fprintf(stderr, "[SDL] SDL_Init failed in benchmark mode: %s\n", SDL_GetError());
             return false;
         }
+        load_runtime_preferences();
         g_last_frame_time = SDL_GetTicks();
         return true;
     }
@@ -1552,6 +2440,7 @@ bool gb_platform_init(int scale) {
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
+    load_runtime_preferences();
     fprintf(stderr, "[SDL] SDL initialized.\n");
 
 #if defined(__ANDROID__)
@@ -1560,34 +2449,9 @@ bool gb_platform_init(int scale) {
 
     clear_controller_state();
     open_first_available_controller();
+    refresh_audio_output_devices();
     
-    /* Initialize Audio - Callback Mode with large buffer */
-    SDL_AudioSpec want, have;
-    memset(&want, 0, sizeof(want));
-    want.freq = AUDIO_SAMPLE_RATE;
-    want.format = AUDIO_S16LSB;
-    want.channels = 2;
-    want.samples = 2048;  /* Larger buffer for smooth playback */
-    want.callback = sdl_audio_callback;
-    want.userdata = NULL;
-    
-    g_audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-    if (g_audio_device == 0) {
-        fprintf(stderr, "[SDL] Failed to open audio: %s\n", SDL_GetError());
-    } else {
-        g_audio_write_pos.store(0, std::memory_order_relaxed);
-        g_audio_read_pos.store(0, std::memory_order_relaxed);
-        g_audio_started = false;
-        g_audio_device_sample_rate = (uint32_t)have.freq;
-        g_audio_start_threshold = (uint32_t)have.samples;
-        if (g_audio_start_threshold == 0) g_audio_start_threshold = 1;
-        if (g_audio_start_threshold > AUDIO_RING_SIZE / 2) {
-            g_audio_start_threshold = AUDIO_RING_SIZE / 2;
-        }
-        fprintf(stderr, "[SDL] Audio initialized: %d Hz, %d channels, buffer %d samples (Callback Mode)\n", 
-                have.freq, have.channels, have.samples);
-        update_audio_stats_from_ring();
-    }
+    reopen_audio_output_device(false);
     
     fprintf(stderr, "[SDL] Creating window...\n");
     g_window = SDL_CreateWindow(
@@ -1656,6 +2520,58 @@ bool gb_platform_init(int scale) {
     return true;
 }
 
+static bool handle_binding_capture_event(const SDL_Event* event) {
+    if (!g_binding_capture_active || !event) {
+        return false;
+    }
+
+    switch (event->type) {
+        case SDL_KEYDOWN:
+            if (g_binding_capture_device != GB_CAPTURE_DEVICE_KEYBOARD || event->key.repeat != 0) {
+                return true;
+            }
+            if (event->key.keysym.scancode == SDL_SCANCODE_ESCAPE ||
+                event->key.keysym.scancode == SDL_SCANCODE_AC_BACK) {
+                cancel_binding_capture();
+                return true;
+            }
+            if (event->key.keysym.scancode == SDL_SCANCODE_F1) {
+                return true;
+            }
+            commit_binding_capture(make_binding(GB_INPUT_BINDING_KEY, event->key.keysym.scancode));
+            return true;
+
+        case SDL_CONTROLLERBUTTONDOWN:
+            if (g_binding_capture_device != GB_CAPTURE_DEVICE_CONTROLLER) {
+                return true;
+            }
+            if (event->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
+                cancel_binding_capture();
+                return true;
+            }
+            commit_binding_capture(make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, event->cbutton.button));
+            return true;
+
+        case SDL_CONTROLLERAXISMOTION:
+            if (g_binding_capture_device != GB_CAPTURE_DEVICE_CONTROLLER) {
+                return true;
+            }
+            if (event->caxis.value >= 16000) {
+                commit_binding_capture(make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE, event->caxis.axis));
+            } else if (event->caxis.value <= -16000) {
+                commit_binding_capture(make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE, event->caxis.axis));
+            }
+            return true;
+
+        case SDL_KEYUP:
+        case SDL_CONTROLLERBUTTONUP:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
 static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
     if (!event) {
         return true;
@@ -1672,6 +2588,9 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
         event->window.event == SDL_WINDOWEVENT_CLOSE &&
         (!g_window || event->window.windowID == SDL_GetWindowID(g_window))) {
         return false;
+    }
+    if (handle_binding_capture_event(event)) {
+        return true;
     }
 
     switch (event->type) {
@@ -1708,33 +2627,38 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
             }
             break;
 
-        case SDL_CONTROLLERAXISMOTION: {
-            const int deadzone = 8000;
+        case SDL_AUDIODEVICEADDED:
+            if (!event->adevice.iscapture) {
+                refresh_audio_output_devices();
+            }
+            break;
 
-            if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
-                if (event->caxis.value > deadzone) {
-                    g_manual_joypad_dpad &= ~0x01;
-                    g_manual_joypad_dpad |= 0x02;
-                } else if (event->caxis.value < -deadzone) {
-                    g_manual_joypad_dpad &= ~0x02;
-                    g_manual_joypad_dpad |= 0x01;
-                } else {
-                    g_manual_joypad_dpad |= 0x01;
-                    g_manual_joypad_dpad |= 0x02;
+        case SDL_AUDIODEVICEREMOVED:
+            if (!event->adevice.iscapture) {
+                refresh_audio_output_devices();
+                if (g_audio_device != 0 && event->adevice.which == g_audio_device) {
+                    reopen_audio_output_device(true);
                 }
             }
+            break;
 
-            if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
-                if (event->caxis.value > deadzone) {
-                    g_manual_joypad_dpad &= ~0x08;
-                    g_manual_joypad_dpad |= 0x04;
-                } else if (event->caxis.value < -deadzone) {
-                    g_manual_joypad_dpad &= ~0x04;
-                    g_manual_joypad_dpad |= 0x08;
-                } else {
-                    g_manual_joypad_dpad |= 0x04;
-                    g_manual_joypad_dpad |= 0x08;
-                }
+        case SDL_CONTROLLERAXISMOTION: {
+            uint8_t previous_dpad = g_joypad_dpad;
+            uint8_t previous_buttons = g_joypad_buttons;
+
+            if (event->caxis.axis >= 0 && event->caxis.axis < SDL_CONTROLLER_AXIS_MAX) {
+                g_controller_axis_values[event->caxis.axis] = event->caxis.value;
+            }
+            update_controller_axis_binding_state();
+            update_effective_joypad_state();
+            if (ctx &&
+                input_transition_creates_press(previous_dpad,
+                                              previous_buttons,
+                                              g_joypad_dpad,
+                                              g_joypad_buttons,
+                                              dpad_selected,
+                                              buttons_selected)) {
+                request_joypad_interrupt(ctx);
             }
             break;
         }
@@ -1742,70 +2666,33 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
         case SDL_CONTROLLERBUTTONDOWN:
         case SDL_CONTROLLERBUTTONUP: {
             const bool pressed = (event->type == SDL_CONTROLLERBUTTONDOWN);
-            bool trigger = false;
+            uint8_t previous_dpad = g_joypad_dpad;
+            uint8_t previous_buttons = g_joypad_buttons;
 
-            switch (event->cbutton.button) {
-                case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x04;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x08;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x02;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x01;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_A:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x02;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_B:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x01;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x02;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x01;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_START:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x08;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_BACK:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x04;
-                    break;
-
-                case SDL_CONTROLLER_BUTTON_GUIDE:
-                    if (pressed) {
-                        g_show_menu = !g_show_menu;
-                    }
-                    return true;
-
-                default:
-                    break;
+            if (event->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
+                if (pressed) {
+                    g_show_menu = !g_show_menu;
+                }
+                return true;
             }
 
-            if (trigger && ctx && pressed) {
+            for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+                for (int slot = 0; slot < 2; slot++) {
+                    if (binding_matches_controller_button(g_controller_bindings[action][slot], event->cbutton.button)) {
+                        g_controller_button_binding_pressed[action][slot] = pressed;
+                    }
+                }
+            }
+
+            update_effective_joypad_state();
+            if (ctx &&
+                pressed &&
+                input_transition_creates_press(previous_dpad,
+                                              previous_buttons,
+                                              g_joypad_dpad,
+                                              g_joypad_buttons,
+                                              dpad_selected,
+                                              buttons_selected)) {
                 request_joypad_interrupt(ctx);
             }
             break;
@@ -1814,50 +2701,10 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
         case SDL_KEYDOWN:
         case SDL_KEYUP: {
             const bool pressed = (event->type == SDL_KEYDOWN);
-            bool trigger = false;
+            uint8_t previous_dpad = g_joypad_dpad;
+            uint8_t previous_buttons = g_joypad_buttons;
 
             switch (event->key.keysym.scancode) {
-                case SDL_SCANCODE_UP:
-                case SDL_SCANCODE_W:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x04;
-                    break;
-                case SDL_SCANCODE_DOWN:
-                case SDL_SCANCODE_S:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x08;
-                    break;
-                case SDL_SCANCODE_LEFT:
-                case SDL_SCANCODE_A:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x02;
-                    break;
-                case SDL_SCANCODE_RIGHT:
-                case SDL_SCANCODE_D:
-                    if (pressed) { g_manual_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
-                    else g_manual_joypad_dpad |= 0x01;
-                    break;
-
-                case SDL_SCANCODE_Z:
-                case SDL_SCANCODE_J:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x01;
-                    break;
-                case SDL_SCANCODE_X:
-                case SDL_SCANCODE_K:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x02;
-                    break;
-                case SDL_SCANCODE_RSHIFT:
-                case SDL_SCANCODE_BACKSPACE:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x04;
-                    break;
-                case SDL_SCANCODE_RETURN:
-                    if (pressed) { g_manual_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; }
-                    else g_manual_joypad_buttons |= 0x08;
-                    break;
-
                 case SDL_SCANCODE_ESCAPE:
                 case SDL_SCANCODE_AC_BACK:
                     if (pressed && event->key.repeat == 0) {
@@ -1875,7 +2722,24 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
                     break;
             }
 
-            if (trigger && ctx && pressed && event->key.repeat == 0) {
+            for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+                for (int slot = 0; slot < 2; slot++) {
+                    if (binding_matches_scancode(g_keyboard_bindings[action][slot], event->key.keysym.scancode)) {
+                        g_keyboard_binding_pressed[action][slot] = pressed;
+                    }
+                }
+            }
+
+            update_effective_joypad_state();
+            if (ctx &&
+                pressed &&
+                event->key.repeat == 0 &&
+                input_transition_creates_press(previous_dpad,
+                                              previous_buttons,
+                                              g_joypad_dpad,
+                                              g_joypad_buttons,
+                                              dpad_selected,
+                                              buttons_selected)) {
                 request_joypad_interrupt(ctx);
             }
             break;
@@ -2031,7 +2895,7 @@ void gb_platform_vsync(uint32_t frame_cycles) {
     uint64_t target_frame_time = next_frame_time;
 
     uint32_t audio_fill = audio_ring_fill_samples();
-    bool audio_starved = g_audio_started && audio_fill < (g_audio_start_threshold / 2);
+    bool audio_starved = audio_output_should_run() && g_audio_started && audio_fill < g_audio_low_watermark;
 
     if (!audio_starved && now < target_frame_time) {
         for (;;) {

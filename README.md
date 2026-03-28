@@ -92,6 +92,8 @@ Default Android controller mapping is position-based so it feels natural on Xbox
 - Back / View / Share: `Select`
 - Guide / Home or Android Back: open the runtime settings menu
 
+Those defaults are now remappable at runtime from the SDL settings menu, and the mapping is persisted through SDL's per-app preference storage.
+
 See [ANDROID.md](ANDROID.md) for the full end-to-end workflow, including prerequisites, APK builds, `adb` install commands, and Android-specific notes.
 
 ### Recompiling Multiple ROMs Into One Launcher
@@ -392,6 +394,14 @@ Example:
 ```bash
 ./output/game/build/game --differential 500000 --differential-log 100000
 ```
+
+### Runtime Settings Menu
+
+Press `Escape` on desktop, `Android Back` on Android, or the controller guide/home button to open the runtime settings menu.
+
+- The `Controls` section lets you remap keyboard and controller bindings for `D-pad`, `A`, `B`, `Select`, and `Start`. Bindings are saved in the runtime preferences file so they persist across launches.
+- The `Audio` section exposes host audio enable/disable, mute, master volume, output-device selection, reconnect/buffer reset controls, and a target latency slider. Audio output uses an SDL callback-backed ring buffer, waits for a configurable prefill before unpausing the device, and the wall-clock pacing path eases off sleeping when the audio fill drops below the low-water mark.
+- Audio output is intended for real-time play. When `Speed %` is not `100`, the runtime pauses host audio output instead of letting the buffer drift badly out of sync.
 
 Model-selection notes:
 

@@ -494,6 +494,28 @@ uint8_t gb_audio_read_pcm34(void* audio) {
     return (uint8_t)((audio_channel4_pcm(apu) << 4) | audio_channel3_pcm(apu));
 }
 
+size_t gb_audio_state_size(void) {
+    return sizeof(GBAudio);
+}
+
+bool gb_audio_save_state(const void* apu, void* out_data, size_t size) {
+    if (!apu || !out_data || size != sizeof(GBAudio)) {
+        return false;
+    }
+
+    memcpy(out_data, apu, sizeof(GBAudio));
+    return true;
+}
+
+bool gb_audio_load_state(void* apu, const void* data, size_t size) {
+    if (!apu || !data || size != sizeof(GBAudio)) {
+        return false;
+    }
+
+    memcpy(apu, data, sizeof(GBAudio));
+    return true;
+}
+
 uint8_t gb_audio_read(GBContext* ctx, uint16_t addr) {
     GBAudio* apu = (GBAudio*)ctx->apu;
     if (!apu) return 0xFF;

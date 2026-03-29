@@ -90,7 +90,7 @@ Default Android controller mapping is position-based so it feels natural on Xbox
 - Right shoulder: Game Boy `A`
 - Start / Menu: `Start`
 - Back / View / Share: `Select`
-- Guide / Home or Android Back: open the runtime settings menu
+- Guide / Home, or on Android `Guide`, `L3`, `R3`, or Android Back: open the runtime settings menu
 
 Those defaults are now remappable at runtime from the SDL settings menu, and the mapping is persisted through SDL's per-app preference storage.
 
@@ -397,11 +397,14 @@ Example:
 
 ### Runtime Settings Menu
 
-Press `Escape` on desktop, `Android Back` on Android, or the controller guide/home button to open the runtime settings menu.
+Press `Escape` on desktop, or on Android use `Android Back`, `Guide`, `L3`, or `R3` to open the runtime settings menu.
 
-- The `Controls` section lets you remap keyboard and controller bindings for `D-pad`, `A`, `B`, `Select`, and `Start`. Bindings are saved in the runtime preferences file so they persist across launches.
+- The `Controls` section lets you remap both gameplay inputs (`D-pad`, `A`, `B`, `Select`, `Start`) and runtime shortcuts such as fast forward, max-speed toggle, save/load state, slot cycling, overlay toggle, mute, and menu toggle. Bindings are saved in the runtime preferences file so they persist across launches.
 - The `Audio` section exposes host audio enable/disable, mute, master volume, output-device selection, reconnect/buffer reset controls, and a target latency slider. Audio output uses an SDL callback-backed ring buffer, waits for a configurable prefill before unpausing the device, and the wall-clock pacing path eases off sleeping when the audio fill drops below the low-water mark.
 - Audio output is intended for real-time play. When `Speed %` is not `100`, the runtime pauses host audio output instead of letting the buffer drift badly out of sync.
+- The `Savestates` section gives you 10 persistent slots per game, with quick-save on `F5`, quick-load on `F8`, and delete support from the menu. Savestates are versioned, validated against the loaded ROM, and stored next to the normal `.sav`/`.rtc` files as `.state1` through `.state10`.
+- Savestates currently target the same runtime/game build family. Loading a state from the wrong ROM or an incompatible runtime version fails cleanly instead of trying to continue with mismatched memory layouts.
+- The settings UI is rendered as a full-screen responsive panel so it remains usable on Android handhelds, phones, tablets, and desktop displays with very different resolutions.
 
 Model-selection notes:
 

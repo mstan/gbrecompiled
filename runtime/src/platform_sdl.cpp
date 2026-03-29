@@ -85,7 +85,16 @@ typedef enum GBInputAction {
     GB_INPUT_ACTION_B = 5,
     GB_INPUT_ACTION_SELECT = 6,
     GB_INPUT_ACTION_START = 7,
-    GB_INPUT_ACTION_COUNT = 8,
+    GB_INPUT_ACTION_FAST_FORWARD = 8,
+    GB_INPUT_ACTION_TOGGLE_MAX_SPEED = 9,
+    GB_INPUT_ACTION_SAVE_STATE = 10,
+    GB_INPUT_ACTION_LOAD_STATE = 11,
+    GB_INPUT_ACTION_PREVIOUS_STATE_SLOT = 12,
+    GB_INPUT_ACTION_NEXT_STATE_SLOT = 13,
+    GB_INPUT_ACTION_TOGGLE_OVERLAY = 14,
+    GB_INPUT_ACTION_TOGGLE_MUTE = 15,
+    GB_INPUT_ACTION_TOGGLE_MENU = 16,
+    GB_INPUT_ACTION_COUNT = 17,
 } GBInputAction;
 typedef enum GBInputBindingKind {
     GB_INPUT_BINDING_NONE = 0,
@@ -118,6 +127,12 @@ static uint32_t g_audio_device_buffer_samples = 0;
 static std::vector<std::string> g_audio_output_devices;
 static std::string g_audio_target_device_name;
 static std::string g_audio_active_device_name;
+static constexpr int GB_SAVESTATE_SLOT_COUNT = 10;
+static constexpr int GB_JOYPAD_ACTION_COUNT = 8;
+static constexpr int GB_FAST_FORWARD_SPEED_PERCENT = 250;
+static constexpr int GB_MAX_SHORTCUT_SPEED_PERCENT = 500;
+static int g_savestate_slot = 0;
+static std::string g_savestate_status;
 static const char* g_render_scaling_mode_names[] = {
     "Pixel Perfect",
     "Aspect Fit",
@@ -144,11 +159,14 @@ static GBInputBinding g_controller_bindings[GB_INPUT_ACTION_COUNT][2] = {};
 static bool g_keyboard_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
 static bool g_controller_button_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
 static bool g_controller_axis_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
+static bool g_runtime_action_pressed[GB_INPUT_ACTION_COUNT] = {};
 static Sint16 g_controller_axis_values[SDL_CONTROLLER_AXIS_MAX] = {};
 static bool g_binding_capture_active = false;
 static GBBindingCaptureDevice g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
 static GBInputAction g_binding_capture_action = GB_INPUT_ACTION_RIGHT;
 static int g_binding_capture_slot = 0;
+static bool g_fast_forward_active = false;
+static bool g_max_speed_mode = false;
 static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Right",
     "Left",
@@ -158,6 +176,15 @@ static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Game Boy B",
     "Select",
     "Start",
+    "Fast Forward (Hold)",
+    "Toggle Max Speed",
+    "Save State",
+    "Load State",
+    "Previous State Slot",
+    "Next State Slot",
+    "Toggle Overlay",
+    "Toggle Mute",
+    "Toggle Menu",
 };
 
 static bool has_interpreter_activity(const GBContext* ctx) {
@@ -185,6 +212,15 @@ static void reset_audio_output_buffer(bool preserve_stats);
 static char* trim_ascii(char* text);
 static void update_effective_joypad_state(void);
 static void save_runtime_preferences(void);
+static bool save_savestate_slot(GBContext* ctx, int slot);
+static bool load_savestate_slot(GBContext* ctx, int slot);
+static bool delete_savestate_slot(GBContext* ctx, int slot);
+static bool savestate_slot_exists(const GBContext* ctx, int slot, std::string* out_path);
+static float settings_ui_scale_for_size(const ImVec2& display_size);
+static const char* controller_menu_hint_text(void);
+static bool input_action_is_runtime(GBInputAction action);
+static int effective_speed_percent(void);
+static void update_runtime_action_state(GBContext* ctx);
 
 /* Joypad state - exported for gbrt.c to access */
 uint8_t g_joypad_buttons = 0xFF;  /* Active low: Start, Select, B, A */
@@ -266,17 +302,59 @@ static bool platform_uses_app_storage_for_relative_paths(void) {
 
 static const char* overlay_menu_hint_text(void) {
 #if defined(__ANDROID__)
-    return "Press Back for Menu";
+    return "Press Back, L3, or R3 for Menu";
 #else
     return "Press ESC for Menu";
 #endif
 }
 
+static float settings_ui_scale_for_size(const ImVec2& display_size) {
+    float min_dimension = display_size.x < display_size.y ? display_size.x : display_size.y;
+    if (min_dimension <= 0.0f) {
+        return 1.0f;
+    }
+
+#if defined(__ANDROID__)
+    float scale = min_dimension / 520.0f;
+    if (scale < 1.0f) scale = 1.0f;
+    if (scale > 1.65f) scale = 1.65f;
+#else
+    float scale = min_dimension / 720.0f;
+    if (scale < 0.95f) scale = 0.95f;
+    if (scale > 1.25f) scale = 1.25f;
+#endif
+
+    return scale;
+}
+
+static const char* controller_menu_hint_text(void) {
+#if defined(__ANDROID__)
+    return "Guide, L3, or R3: Settings Menu";
+#else
+    return "Guide / Home: Settings Menu";
+#endif
+}
+
+static bool input_action_is_runtime(GBInputAction action) {
+    return action >= GB_JOYPAD_ACTION_COUNT && action < GB_INPUT_ACTION_COUNT;
+}
+
+static int effective_speed_percent(void) {
+    int speed_percent = (g_speed_percent > 0) ? g_speed_percent : 100;
+    if (g_max_speed_mode) {
+        return GB_MAX_SHORTCUT_SPEED_PERCENT;
+    }
+    if (g_fast_forward_active && speed_percent < GB_FAST_FORWARD_SPEED_PERCENT) {
+        return GB_FAST_FORWARD_SPEED_PERCENT;
+    }
+    return speed_percent;
+}
+
 static const char* overlay_visibility_hint_text(void) {
 #if defined(__ANDROID__)
-    return "Use the settings menu to toggle the overlay";
+    return "Use the settings menu or a shortcut binding to toggle the overlay";
 #else
-    return "Press F1 for Overlay";
+    return "Use F1 or a shortcut binding for Overlay";
 #endif
 }
 
@@ -702,6 +780,15 @@ static const char* input_action_config_name(GBInputAction action) {
         case GB_INPUT_ACTION_B: return "b";
         case GB_INPUT_ACTION_SELECT: return "select";
         case GB_INPUT_ACTION_START: return "start";
+        case GB_INPUT_ACTION_FAST_FORWARD: return "fast_forward";
+        case GB_INPUT_ACTION_TOGGLE_MAX_SPEED: return "toggle_max_speed";
+        case GB_INPUT_ACTION_SAVE_STATE: return "save_state";
+        case GB_INPUT_ACTION_LOAD_STATE: return "load_state";
+        case GB_INPUT_ACTION_PREVIOUS_STATE_SLOT: return "previous_state_slot";
+        case GB_INPUT_ACTION_NEXT_STATE_SLOT: return "next_state_slot";
+        case GB_INPUT_ACTION_TOGGLE_OVERLAY: return "toggle_overlay";
+        case GB_INPUT_ACTION_TOGGLE_MUTE: return "toggle_mute";
+        case GB_INPUT_ACTION_TOGGLE_MENU: return "toggle_menu";
         case GB_INPUT_ACTION_COUNT:
         default:
             return "unknown";
@@ -727,7 +814,9 @@ static void clear_all_binding_pressed_state(void) {
     memset(g_keyboard_binding_pressed, 0, sizeof(g_keyboard_binding_pressed));
     memset(g_controller_button_binding_pressed, 0, sizeof(g_controller_button_binding_pressed));
     memset(g_controller_axis_binding_pressed, 0, sizeof(g_controller_axis_binding_pressed));
+    memset(g_runtime_action_pressed, 0, sizeof(g_runtime_action_pressed));
     memset(g_controller_axis_values, 0, sizeof(g_controller_axis_values));
+    g_fast_forward_active = false;
 }
 
 static bool binding_is_valid(const GBInputBinding& binding) {
@@ -794,6 +883,15 @@ static void set_default_input_bindings(void) {
     g_keyboard_bindings[GB_INPUT_ACTION_SELECT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_BACKSPACE);
     g_keyboard_bindings[GB_INPUT_ACTION_SELECT][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_RSHIFT);
     g_keyboard_bindings[GB_INPUT_ACTION_START][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_RETURN);
+    g_keyboard_bindings[GB_INPUT_ACTION_FAST_FORWARD][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_TAB);
+    g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MAX_SPEED][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_GRAVE);
+    g_keyboard_bindings[GB_INPUT_ACTION_SAVE_STATE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F5);
+    g_keyboard_bindings[GB_INPUT_ACTION_LOAD_STATE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F8);
+    g_keyboard_bindings[GB_INPUT_ACTION_PREVIOUS_STATE_SLOT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F6);
+    g_keyboard_bindings[GB_INPUT_ACTION_NEXT_STATE_SLOT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F7);
+    g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_OVERLAY][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F1);
+    g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MUTE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_M);
+    g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MENU][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F10);
 
     g_controller_bindings[GB_INPUT_ACTION_UP][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_UP);
     g_controller_bindings[GB_INPUT_ACTION_UP][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE, SDL_CONTROLLER_AXIS_LEFTY);
@@ -809,6 +907,12 @@ static void set_default_input_bindings(void) {
     g_controller_bindings[GB_INPUT_ACTION_B][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
     g_controller_bindings[GB_INPUT_ACTION_SELECT][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_BACK);
     g_controller_bindings[GB_INPUT_ACTION_START][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_START);
+    g_controller_bindings[GB_INPUT_ACTION_FAST_FORWARD][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    g_controller_bindings[GB_INPUT_ACTION_TOGGLE_MAX_SPEED][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_POSITIVE, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    g_controller_bindings[GB_INPUT_ACTION_SAVE_STATE][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_X);
+    g_controller_bindings[GB_INPUT_ACTION_LOAD_STATE][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_Y);
+    g_controller_bindings[GB_INPUT_ACTION_TOGGLE_MENU][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_LEFTSTICK);
+    g_controller_bindings[GB_INPUT_ACTION_TOGGLE_MENU][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
 
     clear_all_binding_pressed_state();
 }
@@ -826,6 +930,9 @@ static std::string runtime_preferences_path(void) {
 static void load_runtime_preferences(void) {
     set_default_audio_preferences();
     set_default_input_bindings();
+    g_savestate_slot = 0;
+    g_savestate_status.clear();
+    g_max_speed_mode = false;
 
     const std::string path = runtime_preferences_path();
     if (!path.empty()) {
@@ -875,6 +982,13 @@ static void load_runtime_preferences(void) {
                 }
                 if (strcmp(key, "audio.device_name") == 0) {
                     g_audio_target_device_name = value;
+                    continue;
+                }
+                if (strcmp(key, "savestate.slot") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0 && parsed < GB_SAVESTATE_SLOT_COUNT) {
+                        g_savestate_slot = (int)parsed;
+                    }
                     continue;
                 }
 
@@ -994,6 +1108,7 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.latency_ms=%u\n", g_audio_latency_ms);
     fprintf(file, "audio.volume_percent=%u\n", g_audio_volume_percent);
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
+    fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
 
     for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
         for (int slot = 0; slot < 2; slot++) {
@@ -1012,6 +1127,19 @@ static void save_runtime_preferences(void) {
     }
 
     fclose(file);
+}
+
+static void set_savestate_status(const char* action, int slot, bool success, const char* detail) {
+    char message[512];
+    snprintf(message,
+             sizeof(message),
+             "%s slot %d %s%s%s",
+             action ? action : "Savestate",
+             slot + 1,
+             success ? "succeeded" : "failed",
+             (detail && detail[0]) ? ": " : "",
+             (detail && detail[0]) ? detail : "");
+    g_savestate_status = message;
 }
 
 static bool recreate_streaming_texture(void);
@@ -1050,6 +1178,80 @@ static bool input_action_is_pressed(GBInputAction action) {
         }
     }
     return false;
+}
+
+static void update_runtime_action_state(GBContext* ctx) {
+    const int previous_effective_speed = effective_speed_percent();
+
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        if (!input_action_is_runtime((GBInputAction)action)) {
+            continue;
+        }
+
+        const bool pressed = input_action_is_pressed((GBInputAction)action);
+        const bool was_pressed = g_runtime_action_pressed[action];
+        if (pressed && !was_pressed) {
+            switch ((GBInputAction)action) {
+                case GB_INPUT_ACTION_TOGGLE_MAX_SPEED:
+                    g_max_speed_mode = !g_max_speed_mode;
+                    break;
+
+                case GB_INPUT_ACTION_SAVE_STATE:
+                    save_savestate_slot(ctx, g_savestate_slot);
+                    break;
+
+                case GB_INPUT_ACTION_LOAD_STATE:
+                    load_savestate_slot(ctx, g_savestate_slot);
+                    break;
+
+                case GB_INPUT_ACTION_PREVIOUS_STATE_SLOT:
+                    g_savestate_slot = (g_savestate_slot + GB_SAVESTATE_SLOT_COUNT - 1) % GB_SAVESTATE_SLOT_COUNT;
+                    g_savestate_status = "Selected slot " + std::to_string(g_savestate_slot + 1);
+                    save_runtime_preferences();
+                    break;
+
+                case GB_INPUT_ACTION_NEXT_STATE_SLOT:
+                    g_savestate_slot = (g_savestate_slot + 1) % GB_SAVESTATE_SLOT_COUNT;
+                    g_savestate_status = "Selected slot " + std::to_string(g_savestate_slot + 1);
+                    save_runtime_preferences();
+                    break;
+
+                case GB_INPUT_ACTION_TOGGLE_OVERLAY:
+                    g_show_overlay = !g_show_overlay;
+                    break;
+
+                case GB_INPUT_ACTION_TOGGLE_MUTE:
+                    g_audio_muted = !g_audio_muted;
+                    save_runtime_preferences();
+                    break;
+
+                case GB_INPUT_ACTION_TOGGLE_MENU:
+                    g_show_menu = !g_show_menu;
+                    break;
+
+                case GB_INPUT_ACTION_FAST_FORWARD:
+                case GB_INPUT_ACTION_RIGHT:
+                case GB_INPUT_ACTION_LEFT:
+                case GB_INPUT_ACTION_UP:
+                case GB_INPUT_ACTION_DOWN:
+                case GB_INPUT_ACTION_A:
+                case GB_INPUT_ACTION_B:
+                case GB_INPUT_ACTION_SELECT:
+                case GB_INPUT_ACTION_START:
+                case GB_INPUT_ACTION_COUNT:
+                default:
+                    break;
+            }
+        }
+
+        g_runtime_action_pressed[action] = pressed;
+    }
+
+    g_fast_forward_active = g_runtime_action_pressed[GB_INPUT_ACTION_FAST_FORWARD];
+
+    if (effective_speed_percent() != previous_effective_speed) {
+        reset_audio_output_buffer(true);
+    }
 }
 
 static void rebuild_manual_joypad_state_from_bindings(void) {
@@ -1522,6 +1724,7 @@ static void reset_runtime_display_defaults(void) {
     g_smooth_lcd_transitions = true;
     g_vsync = false;
     g_show_overlay = false;
+    g_max_speed_mode = false;
     g_render_scaling_mode = GB_RENDER_SCALING_PIXEL_PERFECT;
     g_render_filter_mode = GB_RENDER_FILTER_NEAREST;
     update_render_filter();
@@ -1595,35 +1798,78 @@ static bool input_transition_creates_press(uint8_t previous_dpad,
 
 static void render_binding_editor(const char* section_label,
                                   GBBindingCaptureDevice device,
-                                  GBInputBinding bindings[GB_INPUT_ACTION_COUNT][2]) {
+                                  GBInputBinding bindings[GB_INPUT_ACTION_COUNT][2],
+                                  GBInputAction action_begin,
+                                  GBInputAction action_end) {
     ImGui::TextDisabled("%s", section_label);
-    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float content_width = ImGui::GetContentRegionAvail().x;
+    const bool compact_layout = content_width < 720.0f;
+
+    for (int action = (int)action_begin; action < (int)action_end; action++) {
         ImGui::PushID(section_label);
         ImGui::PushID(action);
         ImGui::Text("%s", g_input_action_names[action]);
-        ImGui::SameLine(150.0f);
-        for (int slot = 0; slot < 2; slot++) {
-            std::string label;
-            if (g_binding_capture_active &&
-                g_binding_capture_device == device &&
-                g_binding_capture_action == (GBInputAction)action &&
-                g_binding_capture_slot == slot) {
-                label = "Press Input...";
-            } else {
-                label = binding_display_label(bindings[action][slot]);
-            }
 
-            ImGui::PushID(slot);
-            if (ImGui::Button(label.c_str(), ImVec2(150.0f, 0.0f))) {
-                start_binding_capture(device, (GBInputAction)action, slot);
+        const float clear_width = ImGui::CalcTextSize("Clear").x + style.FramePadding.x * 2.0f + 12.0f;
+        if (!compact_layout) {
+            const float action_column_width = content_width * 0.26f;
+            float binding_width =
+                (content_width - action_column_width - clear_width * 2.0f - style.ItemSpacing.x * 4.0f) / 2.0f;
+            if (binding_width < 120.0f) {
+                binding_width = 120.0f;
             }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Clear")) {
-                assign_binding_slot(device, (GBInputAction)action, slot, make_binding(GB_INPUT_BINDING_NONE, 0));
-            }
-            ImGui::PopID();
-            if (slot == 0) {
+            ImGui::SameLine(action_column_width);
+
+            for (int slot = 0; slot < 2; slot++) {
+                std::string label;
+                if (g_binding_capture_active &&
+                    g_binding_capture_device == device &&
+                    g_binding_capture_action == (GBInputAction)action &&
+                    g_binding_capture_slot == slot) {
+                    label = "Press Input...";
+                } else {
+                    label = binding_display_label(bindings[action][slot]);
+                }
+
+                ImGui::PushID(slot);
+                if (ImGui::Button(label.c_str(), ImVec2(binding_width, 0.0f))) {
+                    start_binding_capture(device, (GBInputAction)action, slot);
+                }
                 ImGui::SameLine();
+                if (ImGui::Button("Clear", ImVec2(clear_width, 0.0f))) {
+                    assign_binding_slot(device, (GBInputAction)action, slot, make_binding(GB_INPUT_BINDING_NONE, 0));
+                }
+                ImGui::PopID();
+                if (slot == 0) {
+                    ImGui::SameLine();
+                }
+            }
+        } else {
+            float compact_button_width = content_width - clear_width - style.ItemSpacing.x;
+            if (compact_button_width < 120.0f) {
+                compact_button_width = 120.0f;
+            }
+            for (int slot = 0; slot < 2; slot++) {
+                std::string label;
+                if (g_binding_capture_active &&
+                    g_binding_capture_device == device &&
+                    g_binding_capture_action == (GBInputAction)action &&
+                    g_binding_capture_slot == slot) {
+                    label = "Press Input...";
+                } else {
+                    label = binding_display_label(bindings[action][slot]);
+                }
+
+                ImGui::PushID(slot);
+                if (ImGui::Button(label.c_str(), ImVec2(compact_button_width, 0.0f))) {
+                    start_binding_capture(device, (GBInputAction)action, slot);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear", ImVec2(clear_width, 0.0f))) {
+                    assign_binding_slot(device, (GBInputAction)action, slot, make_binding(GB_INPUT_BINDING_NONE, 0));
+                }
+                ImGui::PopID();
             }
         }
         ImGui::PopID();
@@ -1770,9 +2016,45 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+    ImGuiIO& imgui_io = ImGui::GetIO();
+    imgui_io.FontGlobalScale = settings_ui_scale_for_size(imgui_io.DisplaySize);
 
     if (g_show_menu) {
-        ImGui::Begin("GameBoy Recompiled", &g_show_menu);
+        const float ui_scale = imgui_io.FontGlobalScale;
+        const float footer_height = ImGui::GetFrameHeightWithSpacing() *
+                                    (g_launcher_return_enabled ? 3.8f : 3.0f);
+
+        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(imgui_io.DisplaySize, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.96f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * ui_scale, 16.0f * ui_scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f * ui_scale, 10.0f * ui_scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f * ui_scale, 10.0f * ui_scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 18.0f * ui_scale);
+        ImGui::Begin("GameBoy Recompiled",
+                     &g_show_menu,
+                     ImGuiWindowFlags_NoDecoration |
+                         ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoCollapse);
+        ImGui::Text("GameBoy Recompiled");
+        ImGui::TextDisabled("Settings");
+        ImGui::SameLine();
+        if (ImGui::Button("Resume")) {
+            g_show_menu = false;
+        }
+        ImGui::Separator();
+        ImGui::TextWrapped("Toggle menu: %s", controller_menu_hint_text());
+#if defined(__ANDROID__)
+        ImGui::TextWrapped("Android Back / Escape also opens or closes the menu.");
+#else
+        ImGui::TextWrapped("Escape also opens or closes the menu.");
+#endif
+        ImGui::Separator();
+        ImGui::BeginChild("SettingsScroll", ImVec2(0.0f, -footer_height), false);
         ImGui::Text("Performance: %.1f FPS", ImGui::GetIO().Framerate);
 
         int window_w = 0;
@@ -1829,14 +2111,21 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             SDL_RenderSetVSync(g_renderer, g_vsync ? 1 : 0);
         }
 
-        ImGui::Checkbox("Show Overlay (F1)", &g_show_overlay);
+        ImGui::Checkbox("Show Overlay", &g_show_overlay);
         ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
         if (ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500)) {
             reset_audio_output_buffer(true);
         }
         if (ImGui::Button("Reset Speed")) {
             g_speed_percent = 100;
+            g_max_speed_mode = false;
             reset_audio_output_buffer(true);
+        }
+        ImGui::Text("Effective Speed: %d%%", effective_speed_percent());
+        if (g_fast_forward_active) {
+            ImGui::TextDisabled("Fast forward shortcut is active.");
+        } else if (g_max_speed_mode) {
+            ImGui::TextDisabled("Max speed shortcut is active.");
         }
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
 
@@ -1907,11 +2196,39 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     g_audio_device_buffer_samples,
                     g_audio_start_threshold,
                     g_audio_low_watermark);
-        if (g_speed_percent != 100) {
+        if (effective_speed_percent() != 100) {
             ImGui::TextDisabled("Audio output pauses while Speed %% is not 100.");
         }
         if (ImGui::Button("Reset Audio")) {
             reset_runtime_audio_defaults();
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Savestates");
+        int savestate_slot = g_savestate_slot + 1;
+        if (ImGui::SliderInt("Active Slot", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT)) {
+            g_savestate_slot = savestate_slot - 1;
+            save_runtime_preferences();
+        }
+        if (ImGui::Button("Save State (F5)")) {
+            save_savestate_slot(g_registered_ctx, g_savestate_slot);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load State (F8)")) {
+            load_savestate_slot(g_registered_ctx, g_savestate_slot);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete Slot")) {
+            delete_savestate_slot(g_registered_ctx, g_savestate_slot);
+        }
+        {
+            std::string savestate_path;
+            const bool slot_exists = savestate_slot_exists(g_registered_ctx, g_savestate_slot, &savestate_path);
+            ImGui::Text("Slot File: %s", savestate_path.empty() ? "(unavailable)" : savestate_path.c_str());
+            ImGui::Text("Slot Status: %s", slot_exists ? "Present" : "Empty");
+        }
+        if (!g_savestate_status.empty()) {
+            ImGui::TextWrapped("%s", g_savestate_status.c_str());
         }
 
         ImGui::Separator();
@@ -1926,9 +2243,29 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("No controller detected.");
 #endif
         }
-        render_binding_editor("Keyboard", GB_CAPTURE_DEVICE_KEYBOARD, g_keyboard_bindings);
+        render_binding_editor("Keyboard Gameplay",
+                              GB_CAPTURE_DEVICE_KEYBOARD,
+                              g_keyboard_bindings,
+                              GB_INPUT_ACTION_RIGHT,
+                              GB_INPUT_ACTION_FAST_FORWARD);
         ImGui::Spacing();
-        render_binding_editor("Controller", GB_CAPTURE_DEVICE_CONTROLLER, g_controller_bindings);
+        render_binding_editor("Controller Gameplay",
+                              GB_CAPTURE_DEVICE_CONTROLLER,
+                              g_controller_bindings,
+                              GB_INPUT_ACTION_RIGHT,
+                              GB_INPUT_ACTION_FAST_FORWARD);
+        ImGui::Spacing();
+        render_binding_editor("Keyboard Shortcuts",
+                              GB_CAPTURE_DEVICE_KEYBOARD,
+                              g_keyboard_bindings,
+                              GB_INPUT_ACTION_FAST_FORWARD,
+                              GB_INPUT_ACTION_COUNT);
+        ImGui::Spacing();
+        render_binding_editor("Controller Shortcuts",
+                              GB_CAPTURE_DEVICE_CONTROLLER,
+                              g_controller_bindings,
+                              GB_INPUT_ACTION_FAST_FORWARD,
+                              GB_INPUT_ACTION_COUNT);
         if (g_binding_capture_active) {
             ImGui::Separator();
             ImGui::TextDisabled("Waiting for %s input for %s slot %d",
@@ -1942,7 +2279,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (ImGui::Button("Reset Controls")) {
             reset_runtime_control_defaults();
         }
-        ImGui::BulletText("%s: Settings Menu", controller_guide_label());
+        ImGui::TextDisabled("Shortcut bindings can also control fast forward, max speed, savestates, overlay, mute, and the menu.");
+        ImGui::BulletText("%s", controller_menu_hint_text());
 #if defined(__ANDROID__)
         ImGui::BulletText("Android Back / Escape: Settings Menu");
 #else
@@ -1979,27 +2317,36 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
 
-        if (ImGui::Button("Reset Display")) {
+        ImGui::EndChild();
+        ImGui::Separator();
+
+        const int footer_button_count = g_launcher_return_enabled ? 3 : 2;
+        const float footer_button_width =
+            (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * (footer_button_count - 1)) /
+            (float)footer_button_count;
+        if (ImGui::Button("Reset Display", ImVec2(footer_button_width, 0.0f))) {
             reset_runtime_display_defaults();
         }
 
         if (g_launcher_return_enabled) {
-            if (ImGui::Button("Return to Launcher")) {
+            ImGui::SameLine();
+            if (ImGui::Button("Return to Launcher", ImVec2(footer_button_width, 0.0f))) {
                 g_exit_action = GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER;
                 SDL_Event quit_event;
                 quit_event.type = SDL_QUIT;
                 SDL_PushEvent(&quit_event);
             }
-            ImGui::SameLine();
         }
 
-        if (ImGui::Button("Quit")) {
+        ImGui::SameLine();
+        if (ImGui::Button("Quit", ImVec2(footer_button_width, 0.0f))) {
             g_exit_action = GB_PLATFORM_EXIT_QUIT;
             SDL_Event quit_event;
             quit_event.type = SDL_QUIT;
             SDL_PushEvent(&quit_event);
         }
         ImGui::End();
+        ImGui::PopStyleVar(6);
     } else if (g_show_overlay) {
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.35f);
@@ -2257,7 +2604,7 @@ static bool audio_output_should_run(void) {
            g_audio_output_enabled &&
            !g_benchmark_mode &&
            !g_app_suspended &&
-           g_speed_percent == 100;
+           effective_speed_percent() == 100;
 }
 
 static uint32_t audio_ring_fill_samples(void) {
@@ -2408,6 +2755,7 @@ bool gb_platform_init(int scale) {
     g_app_suspended = false;
     g_renderer_reset_pending = false;
     g_show_overlay = false;
+    g_max_speed_mode = false;
     g_binding_capture_active = false;
     g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
     update_effective_joypad_state();
@@ -2535,9 +2883,6 @@ static bool handle_binding_capture_event(const SDL_Event* event) {
                 cancel_binding_capture();
                 return true;
             }
-            if (event->key.keysym.scancode == SDL_SCANCODE_F1) {
-                return true;
-            }
             commit_binding_capture(make_binding(GB_INPUT_BINDING_KEY, event->key.keysym.scancode));
             return true;
 
@@ -2651,6 +2996,7 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
             }
             update_controller_axis_binding_state();
             update_effective_joypad_state();
+            update_runtime_action_state(ctx);
             if (ctx &&
                 input_transition_creates_press(previous_dpad,
                                               previous_buttons,
@@ -2685,6 +3031,7 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
             }
 
             update_effective_joypad_state();
+            update_runtime_action_state(ctx);
             if (ctx &&
                 pressed &&
                 input_transition_creates_press(previous_dpad,
@@ -2712,12 +3059,6 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
                     }
                     return true;
 
-                case SDL_SCANCODE_F1:
-                    if (pressed && event->key.repeat == 0) {
-                        g_show_overlay = !g_show_overlay;
-                    }
-                    return true;
-
                 default:
                     break;
             }
@@ -2731,6 +3072,7 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
             }
 
             update_effective_joypad_state();
+            update_runtime_action_state(ctx);
             if (ctx &&
                 pressed &&
                 event->key.repeat == 0 &&
@@ -2876,7 +3218,7 @@ void gb_platform_vsync(uint32_t frame_cycles) {
     const uint64_t gb_cpu_hz = 4194304;
     uint64_t freq = SDL_GetPerformanceFrequency();
     uint64_t now = SDL_GetPerformanceCounter();
-    uint32_t speed_percent = (g_speed_percent > 0) ? (uint32_t)g_speed_percent : 100;
+    uint32_t speed_percent = (uint32_t)effective_speed_percent();
     uint64_t frame_ticks_num = (freq * gb_frame_cycles * 100ull) + frame_remainder;
     uint64_t frame_ticks_den = gb_cpu_hz * (uint64_t)speed_percent;
     uint64_t frame_ticks = frame_ticks_num / frame_ticks_den;
@@ -2987,6 +3329,110 @@ static void sdl_get_save_path(char* buffer, size_t size, const char* rom_name) {
 
 static void sdl_get_rtc_path(char* buffer, size_t size, const char* rom_name) {
     sdl_get_persistent_path(buffer, size, rom_name, ".rtc");
+}
+
+static void context_storage_name(const GBContext* ctx, char* buffer, size_t size) {
+    if (!buffer || size == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    if (ctx && ctx->save_id[0]) {
+        snprintf(buffer, size, "%s", ctx->save_id);
+        return;
+    }
+
+    if (ctx && ctx->rom && ctx->rom_size > 0x143) {
+        char title[17];
+        memset(title, 0, sizeof(title));
+        memcpy(title, &ctx->rom[0x134], 16);
+        for (int i = 0; i < 16; i++) {
+            if (title[i] == 0 || title[i] < 32 || title[i] > 126) {
+                title[i] = 0;
+            }
+        }
+        if (title[0]) {
+            snprintf(buffer, size, "%s", title);
+            return;
+        }
+    }
+
+    snprintf(buffer, size, "game");
+}
+
+static void sdl_get_savestate_path(char* buffer, size_t size, const GBContext* ctx, int slot) {
+    char storage_name[64];
+    char extension[32];
+    context_storage_name(ctx, storage_name, sizeof(storage_name));
+    if (slot < 0) {
+        slot = 0;
+    }
+    if (slot >= GB_SAVESTATE_SLOT_COUNT) {
+        slot = GB_SAVESTATE_SLOT_COUNT - 1;
+    }
+    snprintf(extension, sizeof(extension), ".state%d", slot + 1);
+    sdl_get_persistent_path(buffer, size, storage_name, extension);
+}
+
+static bool savestate_slot_exists(const GBContext* ctx, int slot, std::string* out_path) {
+    char filename[512];
+    sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
+    if (out_path) {
+        *out_path = filename;
+    }
+
+    std::error_code ec;
+    return fs::exists(fs::path(filename), ec) && !ec;
+}
+
+static bool save_savestate_slot(GBContext* ctx, int slot) {
+    if (!ctx) {
+        set_savestate_status("Save", slot, false, "No active game context");
+        return false;
+    }
+
+    char filename[512];
+    sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
+    const bool success = gb_context_save_state_file(ctx, filename);
+    set_savestate_status("Save", slot, success, filename);
+    return success;
+}
+
+static bool load_savestate_slot(GBContext* ctx, int slot) {
+    if (!ctx) {
+        set_savestate_status("Load", slot, false, "No active game context");
+        return false;
+    }
+
+    char filename[512];
+    sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
+    const bool success = gb_context_load_state_file(ctx, filename);
+    if (success) {
+        reset_audio_output_buffer(true);
+        g_last_guest_framebuffer_valid = false;
+        g_present_count = ctx->completed_frames;
+        g_last_frame_time = SDL_GetTicks();
+    }
+    set_savestate_status("Load", slot, success, filename);
+    return success;
+}
+
+static bool delete_savestate_slot(GBContext* ctx, int slot) {
+    if (!ctx) {
+        set_savestate_status("Delete", slot, false, "No active game context");
+        return false;
+    }
+
+    char filename[512];
+    sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
+    std::error_code ec;
+    const bool removed = fs::remove(fs::path(filename), ec);
+    if (!removed && !ec) {
+        set_savestate_status("Delete", slot, false, "Slot file does not exist");
+        return false;
+    }
+    set_savestate_status("Delete", slot, removed && !ec, filename);
+    return removed && !ec;
 }
 
 static bool sdl_load_battery_ram(GBContext* ctx, const char* rom_name, void* data, size_t size) {

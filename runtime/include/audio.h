@@ -80,6 +80,23 @@ uint8_t gb_audio_read_pcm12(void* apu);
 uint8_t gb_audio_read_pcm34(void* apu);
 
 /**
+ * @brief Return the serialized size of the audio state blob
+ */
+size_t gb_audio_state_size(void);
+
+/**
+ * @brief Serialize audio state into a caller-provided buffer
+ * @return true on success
+ */
+bool gb_audio_save_state(const void* apu, void* out_data, size_t size);
+
+/**
+ * @brief Restore audio state from a caller-provided buffer
+ * @return true on success
+ */
+bool gb_audio_load_state(void* apu, const void* data, size_t size);
+
+/**
  * @brief Enable/disable audio debug capture
  * @param enabled If true, capture audio to debug_audio.raw
  */

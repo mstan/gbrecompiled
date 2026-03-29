@@ -339,6 +339,22 @@ bool gb_context_save_ram(GBContext* ctx);
  */
 void gb_context_set_save_id(GBContext* ctx, const char* save_id);
 
+/**
+ * @brief Save a full emulator snapshot to a file
+ * @param ctx Target context
+ * @param path Output path
+ * @return true on success
+ */
+bool gb_context_save_state_file(GBContext* ctx, const char* path);
+
+/**
+ * @brief Load a full emulator snapshot from a file
+ * @param ctx Target context
+ * @param path Input path
+ * @return true on success
+ */
+bool gb_context_load_state_file(GBContext* ctx, const char* path);
+
 /* ============================================================================
  * Memory Access
  * ========================================================================== */

@@ -38,6 +38,9 @@ static uint64_t gbrt_ppu_trace_end_frame = 0;
 static inline void gb_sync(GBContext* ctx);
 static bool gb_context_try_load_battery_ram(GBContext* ctx);
 static bool gb_context_try_load_rtc(GBContext* ctx);
+static uint64_t gb_context_compute_rom_hash(const GBContext* ctx);
+static bool gbrt_write_exact(FILE* file, const void* data, size_t size);
+static bool gbrt_read_exact(FILE* file, void* data, size_t size);
 
 typedef struct {
     uint32_t magic;
@@ -51,6 +54,123 @@ typedef struct {
 
 #define GBRTC_PERSIST_MAGIC 0x47525443u /* 'GRTC' */
 #define GBRTC_PERSIST_VERSION 1u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t rom_hash;
+    uint32_t rom_size;
+    uint32_t eram_size;
+    uint32_t wram_size;
+    uint32_t vram_size;
+    uint32_t oam_size;
+    uint32_t hram_size;
+    uint32_t io_size;
+    uint32_t ppu_size;
+    uint32_t apu_size;
+} GBSavestateFileHeader;
+
+typedef struct {
+    uint16_t af;
+    uint16_t bc;
+    uint16_t de;
+    uint16_t hl;
+    uint16_t sp;
+    uint16_t pc;
+    uint8_t f_z;
+    uint8_t f_n;
+    uint8_t f_h;
+    uint8_t f_c;
+    uint8_t ime;
+    uint8_t ime_pending;
+    uint8_t halted;
+    uint8_t stopped;
+    uint8_t stop_mode_active;
+    uint8_t halt_bug;
+    uint8_t single_step_mode;
+    uint8_t cgb_double_speed;
+    GBConfig config;
+    char save_id[64];
+    uint16_t rom_bank;
+    uint8_t ram_bank;
+    uint8_t wram_bank;
+    uint8_t vram_bank;
+    uint8_t mbc_type;
+    uint8_t ram_enabled;
+    uint8_t mbc_mode;
+    uint8_t rom_bank_upper;
+    uint8_t rtc_mode;
+    uint8_t rtc_reg;
+    uint8_t last_joypad;
+    uint8_t used_dispatch_fallback;
+    uint8_t dispatch_fallback_bank;
+    uint8_t has_unimplemented_interpreter_opcode;
+    uint8_t last_unimplemented_opcode;
+    uint8_t last_unimplemented_bank;
+    uint8_t frame_first_fallback_bank;
+    uint8_t frame_last_fallback_bank;
+    uint16_t dispatch_fallback_addr;
+    uint16_t frame_first_fallback_addr;
+    uint16_t frame_last_fallback_addr;
+    uint16_t div_counter;
+    uint8_t tima_reload_pending;
+    struct {
+        uint8_t active;
+        uint8_t pending;
+        uint8_t source_high;
+        uint8_t progress;
+        uint16_t cycles_remaining;
+        uint8_t startup_delay;
+    } dma;
+    struct {
+        uint16_t source;
+        uint16_t dest;
+        uint8_t blocks_remaining;
+        uint8_t active;
+        uint8_t hblank_mode;
+    } hdma;
+    struct {
+        uint8_t active;
+        uint8_t fast_clock;
+        uint32_t cycles_remaining;
+    } serial_transfer;
+    struct {
+        uint8_t s, m, h, dl, dh;
+        uint8_t latched_s, latched_m, latched_h, latched_dl, latched_dh;
+        uint8_t latch_state;
+        uint64_t last_time;
+        bool active;
+    } rtc;
+    uint32_t cycles;
+    uint32_t frame_cycles;
+    uint32_t last_sync_cycles;
+    uint32_t run_cycle_budget;
+    uint32_t run_cycle_budget_start;
+    uint8_t frame_done;
+    uint8_t lcd_off_active;
+    uint32_t lcd_off_start_cycles;
+    uint32_t lcd_off_start_frame_cycles;
+    uint32_t frame_lcd_off_cycles;
+    uint32_t frame_lcd_transition_count;
+    uint32_t frame_lcd_off_span_count;
+    uint32_t last_lcd_off_span_cycles;
+    uint64_t total_lcd_off_cycles;
+    uint64_t total_lcd_transition_count;
+    uint64_t total_lcd_off_span_count;
+    uint32_t frame_dispatch_fallbacks;
+    uint64_t total_dispatch_fallbacks;
+    uint64_t total_interpreter_entries;
+    uint64_t total_interpreter_instructions;
+    uint64_t total_interpreter_cycles;
+    uint64_t frame_interpreter_instructions;
+    uint64_t frame_interpreter_cycles;
+    uint16_t last_unimplemented_addr;
+    GBInterpreterHotspot interpreter_hotspots[GBRT_INTERPRETER_HOTSPOT_CAPACITY];
+    uint64_t completed_frames;
+} GBSavestateCoreState;
+
+#define GBSAVESTATE_MAGIC 0x56534247u /* 'GBSV' */
+#define GBSAVESTATE_VERSION 1u
 
 static int gbrt_compare_hotspots_desc(const GBInterpreterHotspot* lhs,
                                       const GBInterpreterHotspot* rhs) {
@@ -531,6 +651,192 @@ static uint8_t gb_compute_cgb_compat_b(const GBContext* ctx) {
     return gb_compute_title_checksum(ctx);
 }
 
+static uint64_t gb_context_compute_rom_hash(const GBContext* ctx) {
+    if (!ctx || !ctx->rom || ctx->rom_size == 0) {
+        return 0;
+    }
+
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < ctx->rom_size; i++) {
+        hash ^= (uint64_t)ctx->rom[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static bool gbrt_write_exact(FILE* file, const void* data, size_t size) {
+    return size == 0 || (file && data && fwrite(data, 1, size, file) == size);
+}
+
+static bool gbrt_read_exact(FILE* file, void* data, size_t size) {
+    return size == 0 || (file && data && fread(data, 1, size, file) == size);
+}
+
+static void gbrt_capture_core_state(const GBContext* ctx, GBSavestateCoreState* state) {
+    if (!ctx || !state) {
+        return;
+    }
+
+    memset(state, 0, sizeof(*state));
+    state->af = ctx->af;
+    state->bc = ctx->bc;
+    state->de = ctx->de;
+    state->hl = ctx->hl;
+    state->sp = ctx->sp;
+    state->pc = ctx->pc;
+    state->f_z = ctx->f_z;
+    state->f_n = ctx->f_n;
+    state->f_h = ctx->f_h;
+    state->f_c = ctx->f_c;
+    state->ime = ctx->ime;
+    state->ime_pending = ctx->ime_pending;
+    state->halted = ctx->halted;
+    state->stopped = ctx->stopped;
+    state->stop_mode_active = ctx->stop_mode_active;
+    state->halt_bug = ctx->halt_bug;
+    state->single_step_mode = ctx->single_step_mode;
+    state->cgb_double_speed = ctx->cgb_double_speed;
+    state->config = ctx->config;
+    memcpy(state->save_id, ctx->save_id, sizeof(state->save_id));
+    state->rom_bank = ctx->rom_bank;
+    state->ram_bank = ctx->ram_bank;
+    state->wram_bank = ctx->wram_bank;
+    state->vram_bank = ctx->vram_bank;
+    state->mbc_type = ctx->mbc_type;
+    state->ram_enabled = ctx->ram_enabled;
+    state->mbc_mode = ctx->mbc_mode;
+    state->rom_bank_upper = ctx->rom_bank_upper;
+    state->rtc_mode = ctx->rtc_mode;
+    state->rtc_reg = ctx->rtc_reg;
+    state->last_joypad = ctx->last_joypad;
+    state->used_dispatch_fallback = ctx->used_dispatch_fallback;
+    state->dispatch_fallback_bank = ctx->dispatch_fallback_bank;
+    state->has_unimplemented_interpreter_opcode = ctx->has_unimplemented_interpreter_opcode;
+    state->last_unimplemented_opcode = ctx->last_unimplemented_opcode;
+    state->last_unimplemented_bank = ctx->last_unimplemented_bank;
+    state->frame_first_fallback_bank = ctx->frame_first_fallback_bank;
+    state->frame_last_fallback_bank = ctx->frame_last_fallback_bank;
+    state->dispatch_fallback_addr = ctx->dispatch_fallback_addr;
+    state->frame_first_fallback_addr = ctx->frame_first_fallback_addr;
+    state->frame_last_fallback_addr = ctx->frame_last_fallback_addr;
+    state->div_counter = ctx->div_counter;
+    state->tima_reload_pending = ctx->tima_reload_pending;
+    memcpy(&state->dma, &ctx->dma, sizeof(state->dma));
+    memcpy(&state->hdma, &ctx->hdma, sizeof(state->hdma));
+    memcpy(&state->serial_transfer, &ctx->serial_transfer, sizeof(state->serial_transfer));
+    memcpy(&state->rtc, &ctx->rtc, sizeof(state->rtc));
+    state->cycles = ctx->cycles;
+    state->frame_cycles = ctx->frame_cycles;
+    state->last_sync_cycles = ctx->last_sync_cycles;
+    state->run_cycle_budget = ctx->run_cycle_budget;
+    state->run_cycle_budget_start = ctx->run_cycle_budget_start;
+    state->frame_done = ctx->frame_done;
+    state->lcd_off_active = ctx->lcd_off_active;
+    state->lcd_off_start_cycles = ctx->lcd_off_start_cycles;
+    state->lcd_off_start_frame_cycles = ctx->lcd_off_start_frame_cycles;
+    state->frame_lcd_off_cycles = ctx->frame_lcd_off_cycles;
+    state->frame_lcd_transition_count = ctx->frame_lcd_transition_count;
+    state->frame_lcd_off_span_count = ctx->frame_lcd_off_span_count;
+    state->last_lcd_off_span_cycles = ctx->last_lcd_off_span_cycles;
+    state->total_lcd_off_cycles = ctx->total_lcd_off_cycles;
+    state->total_lcd_transition_count = ctx->total_lcd_transition_count;
+    state->total_lcd_off_span_count = ctx->total_lcd_off_span_count;
+    state->frame_dispatch_fallbacks = ctx->frame_dispatch_fallbacks;
+    state->total_dispatch_fallbacks = ctx->total_dispatch_fallbacks;
+    state->total_interpreter_entries = ctx->total_interpreter_entries;
+    state->total_interpreter_instructions = ctx->total_interpreter_instructions;
+    state->total_interpreter_cycles = ctx->total_interpreter_cycles;
+    state->frame_interpreter_instructions = ctx->frame_interpreter_instructions;
+    state->frame_interpreter_cycles = ctx->frame_interpreter_cycles;
+    state->last_unimplemented_addr = ctx->last_unimplemented_addr;
+    memcpy(state->interpreter_hotspots,
+           ctx->interpreter_hotspots,
+           sizeof(state->interpreter_hotspots));
+    state->completed_frames = ctx->completed_frames;
+}
+
+static void gbrt_restore_core_state(GBContext* ctx, const GBSavestateCoreState* state) {
+    if (!ctx || !state) {
+        return;
+    }
+
+    ctx->af = state->af;
+    ctx->bc = state->bc;
+    ctx->de = state->de;
+    ctx->hl = state->hl;
+    ctx->sp = state->sp;
+    ctx->pc = state->pc;
+    ctx->f_z = state->f_z;
+    ctx->f_n = state->f_n;
+    ctx->f_h = state->f_h;
+    ctx->f_c = state->f_c;
+    ctx->ime = state->ime;
+    ctx->ime_pending = state->ime_pending;
+    ctx->halted = state->halted;
+    ctx->stopped = state->stopped;
+    ctx->stop_mode_active = state->stop_mode_active;
+    ctx->halt_bug = state->halt_bug;
+    ctx->single_step_mode = state->single_step_mode;
+    ctx->cgb_double_speed = state->cgb_double_speed;
+    ctx->config = state->config;
+    memcpy(ctx->save_id, state->save_id, sizeof(ctx->save_id));
+    ctx->rom_bank = state->rom_bank;
+    ctx->ram_bank = state->ram_bank;
+    ctx->wram_bank = state->wram_bank;
+    ctx->vram_bank = state->vram_bank;
+    ctx->mbc_type = state->mbc_type;
+    ctx->ram_enabled = state->ram_enabled;
+    ctx->mbc_mode = state->mbc_mode;
+    ctx->rom_bank_upper = state->rom_bank_upper;
+    ctx->rtc_mode = state->rtc_mode;
+    ctx->rtc_reg = state->rtc_reg;
+    ctx->last_joypad = state->last_joypad;
+    ctx->used_dispatch_fallback = state->used_dispatch_fallback;
+    ctx->dispatch_fallback_bank = state->dispatch_fallback_bank;
+    ctx->has_unimplemented_interpreter_opcode = state->has_unimplemented_interpreter_opcode;
+    ctx->last_unimplemented_opcode = state->last_unimplemented_opcode;
+    ctx->last_unimplemented_bank = state->last_unimplemented_bank;
+    ctx->frame_first_fallback_bank = state->frame_first_fallback_bank;
+    ctx->frame_last_fallback_bank = state->frame_last_fallback_bank;
+    ctx->dispatch_fallback_addr = state->dispatch_fallback_addr;
+    ctx->frame_first_fallback_addr = state->frame_first_fallback_addr;
+    ctx->frame_last_fallback_addr = state->frame_last_fallback_addr;
+    ctx->div_counter = state->div_counter;
+    ctx->tima_reload_pending = state->tima_reload_pending;
+    memcpy(&ctx->dma, &state->dma, sizeof(ctx->dma));
+    memcpy(&ctx->hdma, &state->hdma, sizeof(ctx->hdma));
+    memcpy(&ctx->serial_transfer, &state->serial_transfer, sizeof(ctx->serial_transfer));
+    memcpy(&ctx->rtc, &state->rtc, sizeof(ctx->rtc));
+    ctx->cycles = state->cycles;
+    ctx->frame_cycles = state->frame_cycles;
+    ctx->last_sync_cycles = state->last_sync_cycles;
+    ctx->run_cycle_budget = state->run_cycle_budget;
+    ctx->run_cycle_budget_start = state->run_cycle_budget_start;
+    ctx->frame_done = state->frame_done;
+    ctx->lcd_off_active = state->lcd_off_active;
+    ctx->lcd_off_start_cycles = state->lcd_off_start_cycles;
+    ctx->lcd_off_start_frame_cycles = state->lcd_off_start_frame_cycles;
+    ctx->frame_lcd_off_cycles = state->frame_lcd_off_cycles;
+    ctx->frame_lcd_transition_count = state->frame_lcd_transition_count;
+    ctx->frame_lcd_off_span_count = state->frame_lcd_off_span_count;
+    ctx->last_lcd_off_span_cycles = state->last_lcd_off_span_cycles;
+    ctx->total_lcd_off_cycles = state->total_lcd_off_cycles;
+    ctx->total_lcd_transition_count = state->total_lcd_transition_count;
+    ctx->total_lcd_off_span_count = state->total_lcd_off_span_count;
+    ctx->frame_dispatch_fallbacks = state->frame_dispatch_fallbacks;
+    ctx->total_dispatch_fallbacks = state->total_dispatch_fallbacks;
+    ctx->total_interpreter_entries = state->total_interpreter_entries;
+    ctx->total_interpreter_instructions = state->total_interpreter_instructions;
+    ctx->total_interpreter_cycles = state->total_interpreter_cycles;
+    ctx->frame_interpreter_instructions = state->frame_interpreter_instructions;
+    ctx->frame_interpreter_cycles = state->frame_interpreter_cycles;
+    ctx->last_unimplemented_addr = state->last_unimplemented_addr;
+    memcpy(ctx->interpreter_hotspots,
+           state->interpreter_hotspots,
+           sizeof(ctx->interpreter_hotspots));
+    ctx->completed_frames = state->completed_frames;
+}
+
 GBContext* gb_context_create(const GBConfig* config) {
     gbrt_load_ppu_trace_config();
 
@@ -856,6 +1162,231 @@ bool gb_context_save_ram(GBContext* ctx) {
         rtc_result = gb_context_save_rtc(ctx);
     }
     return ram_result && rtc_result;
+}
+
+bool gb_context_save_state_file(GBContext* ctx, const char* path) {
+    if (!ctx || !path || !path[0] || !ctx->rom || ctx->rom_size == 0 ||
+        !ctx->wram || !ctx->vram || !ctx->oam || !ctx->hram || !ctx->io) {
+        return false;
+    }
+
+    FILE* file = fopen(path, "wb");
+    if (!file) {
+        fprintf(stderr, "[GBRT] Failed to open savestate for writing: %s\n", path);
+        return false;
+    }
+
+    const size_t apu_state_size = ctx->apu ? gb_audio_state_size() : 0;
+    void* apu_state = NULL;
+    bool success = true;
+
+    GBSavestateFileHeader header;
+    memset(&header, 0, sizeof(header));
+    header.magic = GBSAVESTATE_MAGIC;
+    header.version = GBSAVESTATE_VERSION;
+    header.rom_hash = gb_context_compute_rom_hash(ctx);
+    header.rom_size = (uint32_t)ctx->rom_size;
+    header.eram_size = (uint32_t)ctx->eram_size;
+    header.wram_size = WRAM_BANK_SIZE * 8u;
+    header.vram_size = VRAM_SIZE * 2u;
+    header.oam_size = OAM_SIZE;
+    header.hram_size = HRAM_SIZE;
+    header.io_size = IO_SIZE + 1u;
+    header.ppu_size = ctx->ppu ? (uint32_t)sizeof(GBPPU) : 0u;
+    header.apu_size = (uint32_t)apu_state_size;
+
+    GBSavestateCoreState core_state;
+    gbrt_capture_core_state(ctx, &core_state);
+
+    if (apu_state_size > 0) {
+        apu_state = malloc(apu_state_size);
+        if (!apu_state || !gb_audio_save_state(ctx->apu, apu_state, apu_state_size)) {
+            fprintf(stderr, "[GBRT] Failed to serialize APU state for savestate: %s\n", path);
+            success = false;
+        }
+    }
+
+    if (success) success = gbrt_write_exact(file, &header, sizeof(header));
+    if (success) success = gbrt_write_exact(file, &core_state, sizeof(core_state));
+    if (success) success = gbrt_write_exact(file, ctx->eram, ctx->eram_size);
+    if (success) success = gbrt_write_exact(file, ctx->wram, WRAM_BANK_SIZE * 8u);
+    if (success) success = gbrt_write_exact(file, ctx->vram, VRAM_SIZE * 2u);
+    if (success) success = gbrt_write_exact(file, ctx->oam, OAM_SIZE);
+    if (success) success = gbrt_write_exact(file, ctx->hram, HRAM_SIZE);
+    if (success) success = gbrt_write_exact(file, ctx->io, IO_SIZE + 1u);
+    if (success && header.ppu_size > 0) success = gbrt_write_exact(file, ctx->ppu, sizeof(GBPPU));
+    if (success && apu_state_size > 0) success = gbrt_write_exact(file, apu_state, apu_state_size);
+
+    if (!success) {
+        fprintf(stderr, "[GBRT] Failed to write savestate: %s\n", path);
+    }
+
+    fclose(file);
+    if (!success) {
+        remove(path);
+    } else {
+        printf("[GBRT] Saved state to %s\n", path);
+    }
+    free(apu_state);
+    return success;
+}
+
+bool gb_context_load_state_file(GBContext* ctx, const char* path) {
+    if (!ctx || !path || !path[0] || !ctx->rom || ctx->rom_size == 0 ||
+        !ctx->wram || !ctx->vram || !ctx->oam || !ctx->hram || !ctx->io) {
+        return false;
+    }
+
+    FILE* file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "[GBRT] Failed to open savestate for reading: %s\n", path);
+        return false;
+    }
+
+    bool success = true;
+    GBSavestateFileHeader header;
+    memset(&header, 0, sizeof(header));
+
+    GBSavestateCoreState core_state;
+    memset(&core_state, 0, sizeof(core_state));
+
+    void* eram_data = NULL;
+    void* wram_data = NULL;
+    void* vram_data = NULL;
+    void* oam_data = NULL;
+    void* hram_data = NULL;
+    void* io_data = NULL;
+    void* ppu_data = NULL;
+    void* apu_data = NULL;
+
+    if (!gbrt_read_exact(file, &header, sizeof(header))) {
+        fprintf(stderr, "[GBRT] Failed to read savestate header: %s\n", path);
+        success = false;
+    }
+
+    const uint64_t expected_rom_hash = gb_context_compute_rom_hash(ctx);
+    const size_t expected_apu_size = ctx->apu ? gb_audio_state_size() : 0;
+    if (success && header.magic != GBSAVESTATE_MAGIC) {
+        fprintf(stderr, "[GBRT] Savestate has invalid magic: %s\n", path);
+        success = false;
+    }
+    if (success && header.version != GBSAVESTATE_VERSION) {
+        fprintf(stderr, "[GBRT] Savestate version mismatch for %s (got %u, expected %u)\n",
+                path,
+                header.version,
+                GBSAVESTATE_VERSION);
+        success = false;
+    }
+    if (success &&
+        (header.rom_size != ctx->rom_size || header.rom_hash != expected_rom_hash)) {
+        fprintf(stderr, "[GBRT] Savestate ROM mismatch for %s\n", path);
+        success = false;
+    }
+    if (success &&
+        (header.eram_size != ctx->eram_size ||
+         header.wram_size != WRAM_BANK_SIZE * 8u ||
+         header.vram_size != VRAM_SIZE * 2u ||
+         header.oam_size != OAM_SIZE ||
+         header.hram_size != HRAM_SIZE ||
+         header.io_size != IO_SIZE + 1u)) {
+        fprintf(stderr, "[GBRT] Savestate memory layout mismatch for %s\n", path);
+        success = false;
+    }
+    if (success && header.ppu_size != (ctx->ppu ? (uint32_t)sizeof(GBPPU) : 0u)) {
+        fprintf(stderr, "[GBRT] Savestate PPU layout mismatch for %s\n", path);
+        success = false;
+    }
+    if (success && header.apu_size != expected_apu_size) {
+        fprintf(stderr, "[GBRT] Savestate APU layout mismatch for %s\n", path);
+        success = false;
+    }
+
+    if (success) success = gbrt_read_exact(file, &core_state, sizeof(core_state));
+    if (!success) {
+        fclose(file);
+        return false;
+    }
+
+    if (ctx->eram_size > 0) {
+        eram_data = malloc(ctx->eram_size);
+        success = eram_data != NULL && gbrt_read_exact(file, eram_data, ctx->eram_size);
+    }
+    if (success) {
+        wram_data = malloc(WRAM_BANK_SIZE * 8u);
+        success = wram_data != NULL && gbrt_read_exact(file, wram_data, WRAM_BANK_SIZE * 8u);
+    }
+    if (success) {
+        vram_data = malloc(VRAM_SIZE * 2u);
+        success = vram_data != NULL && gbrt_read_exact(file, vram_data, VRAM_SIZE * 2u);
+    }
+    if (success) {
+        oam_data = malloc(OAM_SIZE);
+        success = oam_data != NULL && gbrt_read_exact(file, oam_data, OAM_SIZE);
+    }
+    if (success) {
+        hram_data = malloc(HRAM_SIZE);
+        success = hram_data != NULL && gbrt_read_exact(file, hram_data, HRAM_SIZE);
+    }
+    if (success) {
+        io_data = malloc(IO_SIZE + 1u);
+        success = io_data != NULL && gbrt_read_exact(file, io_data, IO_SIZE + 1u);
+    }
+    if (success && header.ppu_size > 0) {
+        ppu_data = malloc(header.ppu_size);
+        success = ppu_data != NULL && gbrt_read_exact(file, ppu_data, header.ppu_size);
+    }
+    if (success && header.apu_size > 0) {
+        apu_data = malloc(header.apu_size);
+        success = apu_data != NULL && gbrt_read_exact(file, apu_data, header.apu_size);
+    }
+
+    fclose(file);
+
+    if (!success) {
+        fprintf(stderr, "[GBRT] Failed to load savestate data: %s\n", path);
+        free(eram_data);
+        free(wram_data);
+        free(vram_data);
+        free(oam_data);
+        free(hram_data);
+        free(io_data);
+        free(ppu_data);
+        free(apu_data);
+        return false;
+    }
+
+    if (ctx->eram_size > 0) memcpy(ctx->eram, eram_data, ctx->eram_size);
+    memcpy(ctx->wram, wram_data, WRAM_BANK_SIZE * 8u);
+    memcpy(ctx->vram, vram_data, VRAM_SIZE * 2u);
+    memcpy(ctx->oam, oam_data, OAM_SIZE);
+    memcpy(ctx->hram, hram_data, HRAM_SIZE);
+    memcpy(ctx->io, io_data, IO_SIZE + 1u);
+    if (header.ppu_size > 0 && ctx->ppu) memcpy(ctx->ppu, ppu_data, header.ppu_size);
+    if (header.apu_size > 0 && ctx->apu && !gb_audio_load_state(ctx->apu, apu_data, header.apu_size)) {
+        fprintf(stderr, "[GBRT] Failed to restore APU state from savestate: %s\n", path);
+        free(eram_data);
+        free(wram_data);
+        free(vram_data);
+        free(oam_data);
+        free(hram_data);
+        free(io_data);
+        free(ppu_data);
+        free(apu_data);
+        return false;
+    }
+    gbrt_restore_core_state(ctx, &core_state);
+
+    free(eram_data);
+    free(wram_data);
+    free(vram_data);
+    free(oam_data);
+    free(hram_data);
+    free(io_data);
+    free(ppu_data);
+    free(apu_data);
+
+    printf("[GBRT] Loaded state from %s\n", path);
+    return true;
 }
 
 static uint8_t gb_direct_read_dma_source(GBContext* ctx, uint16_t addr) {

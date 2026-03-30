@@ -278,7 +278,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Auto-detect standard HRAM DMA routine (fallback when no overlays in config)
-    // Routine: LDH (46),A; LD A,28; DEC A; JR NZ,-3; RET
+    // Full routine: LD A,xx; LDH (46),A; LD A,28; DEC A; JR NZ,-3; RET
+    // We match the fixed suffix (LDH onward) and back up 2 bytes to include the LD A,xx prefix.
     if (config_hram_overlays.empty()) {
         const std::vector<uint8_t> pattern = {0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9};
         const std::vector<uint8_t>& data = rom.bytes();
@@ -286,9 +287,18 @@ int main(int argc, char* argv[]) {
         auto it = std::search(data.begin(), data.end(), pattern.begin(), pattern.end());
         if (it != data.end()) {
                 size_t rom_idx = std::distance(data.begin(), it);
+
+                // The DMA routine typically starts 2 bytes earlier with LD A, HIGH(OAM)
+                // (opcode 0x3E). Include that prefix so the recompiled code loads A correctly.
+                if (rom_idx >= 2 && data[rom_idx - 2] == 0x3E) {
+                    rom_idx -= 2;
+                }
+
                 uint8_t bank = rom_idx / 0x4000;
                 uint16_t offset = rom_idx % 0x4000;
                 if (bank > 0) offset += 0x4000;
+
+                size_t routine_size = (data[rom_idx] == 0x3E) ? 10 : 8;
 
                 std::cout << "Detected OAM DMA routine at ROM 0x" << std::hex << rom_idx
                             << " (Bank " << (int)bank << ":0x" << offset << "). Mapping to HRAM 0xFF80.\n" << std::dec;
@@ -296,7 +306,7 @@ int main(int argc, char* argv[]) {
                 gbrecomp::AnalyzerOptions::RamOverlay overlay;
                 overlay.ram_addr = 0xFF80;
                 overlay.rom_addr = gbrecomp::AnalysisResult::make_addr(bank, offset);
-                overlay.size = 8;
+                overlay.size = routine_size;
                 analyze_opts.ram_overlays.push_back(overlay);
         }
     }

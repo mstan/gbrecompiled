@@ -60,6 +60,7 @@ void print_usage(const char* program) {
     std::cout << "  --add-entry-point b:a Add manual entry point (e.g. 1:4000)\n";
     std::cout << "  --no-scan             Disable aggressive code scanning (enabled by default)\n";
     std::cout << "  --symbols <file>      Load a .sym symbol file and use names for generated functions and labels\n";
+    std::cout << "  --annotations <file>  Load analyzer guidance (function/label/data ranges) from a text file\n";
     std::cout << "  --use-trace <file>    Use runtime trace to find entry points\n";
     std::cout << "  -h, --help            Show this help\n";
 }
@@ -195,6 +196,7 @@ struct GenerationOptions {
     std::vector<uint32_t> manual_entry_points;
     std::string trace_file_path;
     std::string symbol_file_path;
+    std::string annotation_file_path;
     bool emit_android_project = false;
     std::string android_package;
     std::string android_app_name;
@@ -1416,7 +1418,14 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     gbrecomp::SymbolTable symbol_table;
     if (!options.symbol_file_path.empty()) {
         std::string error;
-        if (!symbol_table.load_sym_file(options.symbol_file_path, &error)) {
+        if (!symbol_table.load_sym_file(options.symbol_file_path, &rom, &error)) {
+            std::cerr << "Error: " << error << "\n";
+            return false;
+        }
+    }
+    if (!options.annotation_file_path.empty()) {
+        std::string error;
+        if (!symbol_table.load_annotation_file(options.annotation_file_path, &error)) {
             std::cerr << "Error: " << error << "\n";
             return false;
         }
@@ -1519,6 +1528,7 @@ int main(int argc, char* argv[]) {
     std::vector<uint32_t> manual_entry_points;
     std::string trace_file_path;
     std::string symbol_file_path;
+    std::string annotation_file_path;
     bool emit_android_project = false;
     std::string android_package;
     std::string android_app_name;
@@ -1594,6 +1604,10 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 symbol_file_path = argv[++i];
             }
+        } else if (arg == "--annotations") {
+            if (i + 1 < argc) {
+                annotation_file_path = argv[++i];
+            }
         } else if (arg[0] != '-') {
             rom_path = arg;
         } else {
@@ -1627,6 +1641,7 @@ int main(int argc, char* argv[]) {
     generation_opts.manual_entry_points = manual_entry_points;
     generation_opts.trace_file_path = trace_file_path;
     generation_opts.symbol_file_path = symbol_file_path;
+    generation_opts.annotation_file_path = annotation_file_path;
     generation_opts.emit_android_project = emit_android_project;
     generation_opts.android_package = android_package;
     generation_opts.android_app_name = android_app_name;
@@ -1647,8 +1662,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: Directory mode does not support --bank or --add-entry-point\n";
             return 1;
         }
-        if (!trace_file_path.empty() || !symbol_file_path.empty()) {
-            std::cerr << "Error: Directory mode does not support --use-trace or --symbols\n";
+        if (!trace_file_path.empty() || !symbol_file_path.empty() || !annotation_file_path.empty()) {
+            std::cerr << "Error: Directory mode does not support --use-trace, --symbols, or --annotations\n";
             return 1;
         }
 
@@ -1794,11 +1809,22 @@ int main(int argc, char* argv[]) {
     gbrecomp::SymbolTable symbol_table;
     if (!symbol_file_path.empty()) {
         std::string error;
-        if (!symbol_table.load_sym_file(symbol_file_path, &error)) {
+        if (!symbol_table.load_sym_file(symbol_file_path, &rom, &error)) {
             std::cerr << "Error: " << error << "\n";
             return 1;
         }
         std::cout << "Loaded " << symbol_table.size() << " symbols from " << symbol_file_path << "\n";
+    }
+    if (!annotation_file_path.empty()) {
+        const size_t previous_annotation_count = symbol_table.annotation_count();
+        std::string error;
+        if (!symbol_table.load_annotation_file(annotation_file_path, &error)) {
+            std::cerr << "Error: " << error << "\n";
+            return 1;
+        }
+        std::cout << "Loaded " << (symbol_table.annotation_count() - previous_annotation_count)
+                  << " annotations from "
+                  << annotation_file_path << "\n";
     }
     
     // Set default output directory

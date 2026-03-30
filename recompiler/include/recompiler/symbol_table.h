@@ -26,19 +26,25 @@ struct Symbol {
 
 class SymbolTable {
 public:
-    bool load_sym_file(const std::string& path, std::string* error = nullptr);
+    bool load_sym_file(const std::string& path,
+                       const ROM* rom = nullptr,
+                       std::string* error = nullptr);
+    bool load_annotation_file(const std::string& path, std::string* error = nullptr);
 
     void clear();
 
     const Symbol* get_symbol(uint32_t addr) const;
     const Symbol* get_symbol(uint8_t bank, uint16_t addr) const;
     const std::unordered_map<uint32_t, Symbol>& symbols() const;
+    const std::vector<AnalysisAnnotation>& annotations() const;
 
     bool has_symbol(uint32_t addr) const;
     size_t size() const;
+    size_t annotation_count() const;
 
 private:
     std::unordered_map<uint32_t, Symbol> symbols_;
+    std::vector<AnalysisAnnotation> annotations_;
 };
 
 std::vector<AnalysisAnnotation> build_analysis_annotations(const SymbolTable& symbols);

@@ -15,7 +15,7 @@
 - [x] Improve handling of imgui dependency, check if a submodule is the best approach or if we can vendor it in a cleaner way, document the selected approach on the readme
 - [ ] Benchmark performance on low-end hardware compared to emulators, and optimize for that use case (ESP32, Raspberry Pi, etc.)
 - [ ] Fix double-click to launch game on multi-rom launcher
-- [ ] Guide the recompilation with .json files, entrypoints, function names, data labels, etc. to improve the generated code quality and stability
+- [~] Guide the recompilation with annotation files, entrypoints, function names, data ranges, etc. to improve the generated code quality and stability
 - [ ] Fix "ghosting" on screen shake on pokemon blue when receiving damage, likely a timing issue with the current rendering approach
 - [ ] Improve asset handling, currently they're hardcoded as raw data blobs in the code
 - [x] Fix save not detected on pokemon blue

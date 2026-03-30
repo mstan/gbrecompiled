@@ -1550,7 +1550,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "    while (!ctx->stopped && !ctx->halted) {\n";
     source_ss << "        addr = ctx->pc;\n";
     source_ss << "        uint8_t bank = ctx->rom_bank;\n";
-    source_ss << "        if (addr < 0x4000) bank = 0;\n";
+    source_ss << "        if (addr < 0x4000 || addr >= 0xFF80) bank = 0;\n";
         
     /* Debug checks in dispatch loop */
     source_ss << "        if (gbrt_instruction_limit > 0 && gbrt_instruction_count >= gbrt_instruction_limit) {\n";
@@ -1623,10 +1623,18 @@ GeneratedOutput generate_output(const ir::Program& program,
     std::map<uint16_t, std::vector<DispatchEntry>> addr_to_funcs;
 
     for (const auto& [name, func] : program.functions) {
-        // OPTIMIZATION: Only add function ENTRY points to dispatch table
-        // Internal basic blocks within functions are reached via goto labels
-        // This reduces dispatch table size by ~70%
+        // Add function entry point
         addr_to_funcs[func.entry_address].push_back({func.bank, func.name, true});
+        // Also add all internal block addresses — when a conditional branch returns
+        // to the dispatcher, it must be able to re-enter the function at any label,
+        // not just the primary entry point. The function's internal switch (ctx->pc)
+        // handles routing to the correct label once called.
+        for (const auto& block_id : func.block_ids) {
+            const auto& block = program.blocks.at(block_id);
+            if (block.start_address != func.entry_address) {
+                addr_to_funcs[block.start_address].push_back({func.bank, func.name, false});
+            }
+        }
     }
     
     for (auto& [addr, funcs] : addr_to_funcs) {
@@ -2075,6 +2083,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     cmake_ss << "    ${GBRT_DIR}/src/audio.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/interpreter.c\n";
+    cmake_ss << "    ${GBRT_DIR}/src/debug_server.c\n";
+    cmake_ss << "    ${GBRT_DIR}/src/game_extras_default.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
     cmake_ss << ")\n\n";
 
@@ -2094,6 +2104,9 @@ GeneratedOutput generate_output(const ir::Program& program,
     cmake_ss << "    ${GBRT_DIR}/third_party/imgui\n";
     cmake_ss << ")\n";
     cmake_ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
+    cmake_ss << "if(WIN32)\n";
+    cmake_ss << "    target_link_libraries(gbrt PUBLIC ws2_32)\n";
+    cmake_ss << "endif()\n";
     cmake_ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
     cmake_ss << "# Main executable\n";
     cmake_ss << "add_executable(" << options.output_prefix << "\n";

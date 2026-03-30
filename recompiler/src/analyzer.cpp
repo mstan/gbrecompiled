@@ -757,22 +757,25 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             uint16_t target = instr.imm16;
             uint8_t tbank = target_bank(target);
             instr.resolved_target_bank = tbank;
-            
+
+            // ALWAYS queue the fall-through (return address) for CALL instructions.
+            // Even if the call target is unresolvable (HRAM, end-of-bank trampoline),
+            // the CALL will RET back here and the dispatch table needs this address.
+            uint32_t fall_through = make_address(bank, offset + instr.length);
+            result.label_addresses.insert(fall_through);
+            work_queue.push({fall_through, known_a, known_b, known_c, known_d, known_e, known_h, known_l, current_switchable_bank});
+
             if (tbank > 0 && tbank != bank) {
                 if (!is_likely_valid_code(rom, tbank, target)) continue;
             }
 
             result.call_targets.insert(make_address(tbank, target));
             work_queue.push({make_address(tbank, target), -1, -1, -1, -1, -1, -1, -1, tbank});
-            
+
             if (tbank != bank) {
                 result.stats.cross_bank_calls++;
                 result.bank_tracker.record_cross_bank_call(offset, target, bank, tbank);
             }
-            
-            uint32_t fall_through = make_address(bank, offset + instr.length);
-            result.label_addresses.insert(fall_through);
-            work_queue.push({fall_through, known_a, known_b, known_c, known_d, known_e, known_h, known_l, current_switchable_bank});
         } else if (instr.is_jump) {
             if (instr.type == InstructionType::JP_NN || instr.type == InstructionType::JP_CC_NN) {
                 uint16_t target = instr.imm16;
@@ -1081,8 +1084,11 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             (func.entry_address >= 0x00 && func.entry_address <= 0x38) || // RST vectors
             (func.entry_address >= 0x40 && func.entry_address <= 0x60) // interrupt vectors
         ));
-        
-        if (total_instrs < MIN_FUNCTION_SIZE && !is_special_entry) {
+        // Manual/config entry points are always kept — the user explicitly asked for them
+        bool is_manual_entry = options.entry_points.end() != std::find(
+            options.entry_points.begin(), options.entry_points.end(), func_addr);
+
+        if (total_instrs < MIN_FUNCTION_SIZE && !is_special_entry && !is_manual_entry) {
             functions_to_remove.insert(func_addr);
         }
     }

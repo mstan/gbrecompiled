@@ -2,6 +2,7 @@
 
 add_executable(gbrecomp
     src/main.cpp
+    src/config.cpp
     src/rom.cpp
     src/decoder.cpp
     src/analyzer.cpp
@@ -16,6 +17,8 @@ add_executable(gbrecomp
 target_include_directories(gbrecomp
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tomlplusplus
 )
 
 # Enable position-independent code for shared library support

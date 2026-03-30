@@ -623,7 +623,8 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         }
         if (addr == 0xFF02 && (value & 0x80)) {
             printf("%c", ctx->io[0x01]); fflush(stdout);
-            ctx->io[0x0F] |= 0x08;
+            ctx->io[0x01] = 0xFF; /* No link partner: received bits are all 1s */
+            ctx->io[0x0F] |= 0x08; /* Serial interrupt */
         }
         ctx->io[addr - 0xFF00] = value;
         return;

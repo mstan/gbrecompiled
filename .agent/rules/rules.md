@@ -4,6 +4,9 @@ trigger: always_on
 
 # Agent Rules for gb-recompiled
 
+> **See `CLAUDE.md` at the repo root for the full agent guide, rules, and development loop.**
+> The content below supplements CLAUDE.md with quick build references.
+
 ## Project Overview
 This project is a static recompiler for GameBoy ROMs, translating them into C code compliant with modern standards.
 

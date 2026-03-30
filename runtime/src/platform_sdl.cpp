@@ -8,6 +8,10 @@
 #include "ppu.h"
 #include "audio_stats.h"
 #include "gbrt_debug.h"
+#include "debug_server.h"
+
+/* Forward declaration for debug server context setter */
+extern "C" void gb_debug_server_set_context(GBContext *ctx);
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -167,6 +171,8 @@ static int g_frame_count = 0;
  * ========================================================================== */
 
 void gb_platform_shutdown(void) {
+    gb_debug_server_shutdown();
+
     if (g_audio_device) {
         SDL_CloseAudioDevice(g_audio_device);
         g_audio_device = 0;
@@ -405,6 +411,10 @@ bool gb_platform_init(int scale) {
 }
 
 bool gb_platform_poll_events(GBContext* ctx) {
+    /* Debug server: poll TCP commands and block if paused */
+    gb_debug_server_poll();
+    gb_debug_server_wait_if_paused();
+
     SDL_Event event;
     uint8_t joyp = ctx ? ctx->io[0x00] : 0xFF;
     bool dpad_selected = !(joyp & 0x10);
@@ -605,7 +615,11 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
                   g_texture == NULL, g_renderer == NULL, framebuffer == NULL);
         return;
     }
-    
+
+    /* Debug server: record frame state and check watchpoints */
+    gb_debug_server_record_frame();
+    gb_debug_server_check_watchpoints();
+
     g_frame_count++;
     
     /* Handle Screenshot Dumping */
@@ -738,6 +752,13 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
 }
 
 uint8_t gb_platform_get_joypad(void) {
+    /* Check for debug server input override */
+    int override = gb_debug_server_get_input_override();
+    if (override >= 0) {
+        /* Override bits: 0=Right,1=Left,2=Up,3=Down,4=A,5=B,6=Select,7=Start (active high)
+         * GB joypad is active low, so invert */
+        return (uint8_t)(~override & 0xFF);
+    }
     /* Return combined state based on P1 register selection */
     /* Caller should AND with the appropriate selection bits */
     return g_joypad_buttons & g_joypad_dpad;
@@ -861,6 +882,10 @@ void gb_platform_register_context(GBContext* ctx) {
         .save_battery_ram = sdl_save_battery_ram
     };
     gb_set_platform_callbacks(ctx, &callbacks);
+
+    /* Initialize TCP debug server */
+    gb_debug_server_set_context(ctx);
+    gb_debug_server_init(0); /* default port 4370 */
 }
 
 #else  /* !GB_HAS_SDL2 */

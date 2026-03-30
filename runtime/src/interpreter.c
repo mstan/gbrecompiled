@@ -90,14 +90,17 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
     /* Set PC to the address we want to execute */
     ctx->pc = addr;
     
-    /* Interpreter entry logging */
-#ifdef GB_DEBUG_REGS
-    static int entry_count = 0;
-    entry_count++;
-    if (entry_count <= 100) {
-        fprintf(stderr, "[INTERP] Enter interpreter at 0x%04X (entry #%d)\n", addr, entry_count);
+    /* Interpreter entry logging - always on */
+    {
+        static int entry_count = 0;
+        entry_count++;
+        if (entry_count <= 200) {
+            fprintf(stderr, "[INTERP] bank:%d addr:0x%04X (entry #%d)\n",
+                    (addr < 0x4000) ? 0 : (int)ctx->rom_bank, addr, entry_count);
+        } else if (entry_count == 201) {
+            fprintf(stderr, "[INTERP] (further entries suppressed)\n");
+        }
     }
-#endif
     gbrt_log_trace(ctx, (addr < 0x4000) ? 0 : ctx->rom_bank, addr);
 
     uint32_t instructions_executed = 0;

@@ -461,10 +461,10 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
     
     switch (addr) {
         case 0xFF40:
-            DBG_REGS("LCDC: 0x%02X -> 0x%02X (LCD=%s, BG=%s, OBJ=%s)", 
+            DBG_REGS("LCDC: 0x%02X -> 0x%02X (LCD=%s, BG=%s, OBJ=%s)",
                      ppu->lcdc, value,
                      (value & 0x80) ? "ON" : "OFF",
-                     (value & 0x01) ? "ON" : "OFF", 
+                     (value & 0x01) ? "ON" : "OFF",
                      (value & 0x02) ? "ON" : "OFF");
             /* Check if LCD is being turned off */
             if ((ppu->lcdc & LCDC_LCD_ENABLE) && !(value & LCDC_LCD_ENABLE)) {
@@ -477,7 +477,12 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
                 ctx->io[0x44] = 0;
                 /* Clear frame ready to avoid stale frame rendering */
                 ppu->frame_ready = false;
-                DBG_REGS("LCD turned OFF - reset LY to 0");
+                fprintf(stderr, "[LCD] OFF — LY reset to 0, mode=HBLANK\n");
+            }
+            /* Check if LCD is being turned on */
+            if (!(ppu->lcdc & LCDC_LCD_ENABLE) && (value & LCDC_LCD_ENABLE)) {
+                fprintf(stderr, "[LCD] ON  — LY=%d mode=%d mode_cycles=%u\n",
+                        ppu->ly, ppu->mode, ppu->mode_cycles);
             }
             ppu->lcdc = value;
             break;

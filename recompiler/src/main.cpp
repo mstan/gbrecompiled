@@ -254,6 +254,17 @@ int main(int argc, char* argv[]) {
     analyze_opts.aggressive_scan = aggressive_scan;
     analyze_opts.trace_file_path = trace_file_path;
 
+    // Add data regions from config file
+    for (const auto& dr : game_config.data_regions) {
+        gbrecomp::AnalyzerOptions::DataRegion region;
+        region.bank = dr.bank;
+        region.start = dr.start;
+        region.end = dr.end;
+        analyze_opts.data_regions.push_back(region);
+        std::cout << "Config data region: bank " << dr.bank << " 0x" << std::hex
+                  << dr.start << "-0x" << dr.end << std::dec << "\n";
+    }
+
     // Add HRAM overlays from config file
     for (const auto& ov : config_hram_overlays) {
         gbrecomp::AnalyzerOptions::RamOverlay overlay;
@@ -324,6 +335,7 @@ int main(int argc, char* argv[]) {
     gen_opts.output_dir = output_dir;
     gen_opts.emit_comments = emit_comments;
     gen_opts.single_function_mode = single_function;
+    gen_opts.runtime_dir = game_config.runtime_dir;
     
     auto output = gbrecomp::codegen::generate_output(
         ir_program, rom.data(), rom.size(), gen_opts);

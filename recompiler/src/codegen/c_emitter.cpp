@@ -2057,20 +2057,24 @@ GeneratedOutput generate_output(const ir::Program& program,
     namespace fs = std::filesystem;
     fs::path out_path(options.output_dir);
     std::string runtime_path;
-    
-    // Count depth to generate correct number of ../
-    int depth = 0;
-    for (const auto& p : out_path) {
-        if (p == ".") continue;
-        depth++;
-    }
-    // Ensure at least one level up
-    if (depth == 0) depth = 1;
 
-    std::stringstream rt_ss;
-    for(int i=0; i<depth; i++) rt_ss << "../";
-    rt_ss << "runtime";
-    runtime_path = rt_ss.str();
+    if (!options.runtime_dir.empty()) {
+        // Explicit runtime dir from config (for lateral game projects)
+        runtime_path = options.runtime_dir;
+    } else {
+        // Fall back: compute relative path assuming runtime/ is sibling to output
+        int depth = 0;
+        for (const auto& p : out_path) {
+            if (p == ".") continue;
+            depth++;
+        }
+        if (depth == 0) depth = 1;
+
+        std::stringstream rt_ss;
+        for(int i=0; i<depth; i++) rt_ss << "../";
+        rt_ss << "runtime";
+        runtime_path = rt_ss.str();
+    }
 
     cmake_ss << "# Runtime library path (relative to this output directory)\n";
     cmake_ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";

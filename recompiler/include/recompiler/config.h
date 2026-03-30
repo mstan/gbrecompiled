@@ -16,10 +16,17 @@ struct HramOverlayConfig {
     uint16_t size;
 };
 
+struct DataRegionConfig {
+    int bank;           // -1 = all banks
+    uint16_t start;
+    uint16_t end;       // exclusive
+};
+
 struct GameConfig {
     // ROM
     std::string rom_path;
     std::string output_dir;
+    std::string runtime_dir;  // Path to runtime/ (relative to output_dir)
 
     // Options (all optional — unset means "use default / CLI value")
     std::optional<bool> verbose;
@@ -36,6 +43,9 @@ struct GameConfig {
 
     // HRAM overlays
     std::vector<HramOverlayConfig> hram_overlays;
+
+    // Data regions (excluded from code analysis)
+    std::vector<DataRegionConfig> data_regions;
 };
 
 // Load config from TOML file. Returns nullopt on parse error.

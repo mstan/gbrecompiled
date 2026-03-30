@@ -29,7 +29,8 @@ struct GeneratorOptions {
     bool use_prefixed_symbols = false;   // Prefix all symbols (for multi-ROM)
     bool embed_rom_data = true;          // Embed ROM data in output
     bool debug_mode = false;             // Extra debug output
-    
+    std::string runtime_dir;             // Path to runtime/ (relative to output_dir)
+
     // Cycle counting
     bool emit_cycle_counting = true;
     

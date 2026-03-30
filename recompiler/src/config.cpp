@@ -37,6 +37,9 @@ std::optional<GameConfig> load_config(const std::string& path) {
                 config.output_dir = (config_dir / config.output_dir).string();
             }
         }
+        if (auto r = rom->get("runtime_dir")) {
+            config.runtime_dir = r->value_or(std::string{});
+        }
     }
 
     // [options]
@@ -99,6 +102,24 @@ std::optional<GameConfig> load_config(const std::string& path) {
                     config.hram_overlays.push_back(ov);
                 } else {
                     std::cerr << "Warning: skipping incomplete hram_overlay entry\n";
+                }
+            }
+        }
+    }
+
+    // [[data_region]]
+    if (auto regions = tbl["data_region"].as_array()) {
+        for (auto& elem : *regions) {
+            if (auto t = elem.as_table()) {
+                DataRegionConfig dr{};
+                dr.bank  = static_cast<int>((*t)["bank"].value_or(int64_t{-1}));
+                dr.start = static_cast<uint16_t>((*t)["start"].value_or(int64_t{0}));
+                dr.end   = static_cast<uint16_t>((*t)["end"].value_or(int64_t{0}));
+
+                if (dr.end > dr.start) {
+                    config.data_regions.push_back(dr);
+                } else {
+                    std::cerr << "Warning: skipping invalid data_region (end <= start)\n";
                 }
             }
         }

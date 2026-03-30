@@ -259,140 +259,20 @@ static std::set<uint8_t> detect_bank_values(const ROM& rom) {
 }
 
 /**
- * @brief Calculate Shannon entropy of a memory region
+ * @brief Check if an address falls within a declared data region
  */
-static double calculate_entropy(const ROM& rom, uint8_t bank, uint16_t addr, size_t len) {
-    if (addr + len > 0x8000) return 0.0;
-    
-    uint32_t counts[256] = {0};
-    for (size_t i = 0; i < len; i++) {
-        counts[rom.read_banked(bank, addr + i)]++;
+static bool is_data_region(const AnalyzerOptions& options, int bank, uint16_t addr) {
+    for (const auto& dr : options.data_regions) {
+        if ((dr.bank == -1 || dr.bank == bank) && addr >= dr.start && addr < dr.end)
+            return true;
     }
-    
-    double entropy = 0;
-    for (int i = 0; i < 256; i++) {
-        if (counts[i] > 0) {
-            double p = (double)counts[i] / len;
-            entropy -= p * std::log2(p);
-        }
-    }
-    return entropy;
-}
-
-/**
- * @brief Heuristic check if an address looks like valid code start
- * 
- * Checks for:
- * 1. Shannon Entropy (filtering tile data / PCM)
- * 2. Repetitive byte patterns
- * 3. Illegal address access/jumps
- * 4. Instruction density (loads vs math/control flow)
- */
-static int is_likely_valid_code(const ROM& rom, uint8_t bank, uint16_t addr) {
-    // 1. Shannon Entropy Check
-    // Typical code has moderate entropy (3.0-6.0). 
-    // Data like tilemaps is very low (< 2.0). PCM is very high (> 7.5).
-    double entropy = calculate_entropy(rom, bank, addr, 48);
-    if (entropy < 1.8 || entropy > 7.6) return 0;
-
-    // 2. Check for repetitive patterns (e.g. tile data)
-    const int PATTERN_CHECK_LEN = 128;
-    if (addr + PATTERN_CHECK_LEN < 0x8000) {
-        for (int period = 1; period <= 8; period++) {
-            const int REQUIRED_REPEATS = 16;
-            const int REQUIRED_LEN = period * REQUIRED_REPEATS;
-            
-            bool matches = true;
-            for (int i = 0; i < REQUIRED_LEN; i++) {
-                if (rom.read_banked(bank, addr + i) != rom.read_banked(bank, addr + i + period)) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (matches) return 0;
-        }
-    }
-
-    // 3. Decode instructions
-    Decoder decoder(rom);
-    uint16_t curr = addr;
-    int instructions_checked = 0;
-    const int MAX_CHECK = 64;
-    int nop_count = 0;
-    int ld_count = 0;
-    int control_flow_count = 0;
-    int math_count = 0;
-
-    while (instructions_checked < MAX_CHECK) {
-        Instruction instr = decoder.decode(curr, bank);
-        
-        if (instr.type == InstructionType::UNDEFINED || instr.type == InstructionType::INVALID) return 0;
-        
-        if (instr.type == InstructionType::NOP) {
-            nop_count++;
-            if (nop_count > 4) return 0; // Too many NOPs
-        }
-        
-        // 4. Illegal address check
-        if (instr.type == InstructionType::LD_A_NN || instr.type == InstructionType::LD_NN_A ||
-            instr.type == InstructionType::LD_NN_SP || instr.type == InstructionType::LD_RR_NN ||
-            instr.is_call || instr.is_jump) {
-            
-            uint16_t imm = (instr.type == InstructionType::JR_N || instr.type == InstructionType::JR_CC_N) ? 0 : instr.imm16;
-            if (imm != 0) {
-                // Prohibited memory areas
-                if (imm >= 0xFEA0 && imm <= 0xFEFF) return 0;
-                // Echo RAM (usually not used by real code)
-                if (imm >= 0xE000 && imm <= 0xFDFF) return 0;
-            }
-        }
-
-        if (instr.reads_memory || instr.writes_memory) ld_count++;
-        if (instr.is_call || instr.is_jump || instr.is_return) control_flow_count++;
-        
-        // Math/Logic
-        if (instr.opcode >= 0x80 && instr.opcode <= 0xBF) math_count++;
-
-        // Reject rare/data-like opcodes if too frequent at start
-        if (instr.opcode == 0x27 || instr.opcode == 0x2F || instr.opcode == 0x37 || instr.opcode == 0x3F) {
-            if (instructions_checked < 4) return 0;
-        }
-        
-        // RST instructions in data are suspicious (0x00 or 0xFF)
-        if (instr.type == InstructionType::RST) {
-            if (instr.opcode == 0xC7 || instr.opcode == 0xFF) {
-                 if (instructions_checked < 2) return 0;
-            }
-        }
-
-        // Terminator Check
-        if (instr.is_return && !instr.is_conditional) {
-            if (instructions_checked < 2) return 0; 
-            // Avoid load-only functions discovered via scanning
-            if (ld_count >= instructions_checked && instructions_checked > 2) return 0;
-            return (curr + instr.length - addr);
-        }
-        
-        if (instr.is_jump && !instr.is_conditional) {
-             if (instructions_checked >= 3) return (curr + instr.length - addr);
-             return 0;
-        }
-        
-        curr += instr.length;
-        if (curr >= 0x8000) return 0;
-        instructions_checked++;
-        
-        // High density of loads (indicative of data or large tables)
-        if (instructions_checked >= 15 && ld_count == instructions_checked) return 0;
-    }
-
-    return 0;
+    return false;
 }
 
 /**
  * @brief Scan for 16-bit pointers that likely lead to code
  */
-static void find_pointer_entry_points(const ROM& rom, AnalysisResult& result, std::queue<AnalysisState>& work_queue) {
+static void find_pointer_entry_points(const ROM& rom, const AnalyzerOptions& options, AnalysisResult& result, std::queue<AnalysisState>& work_queue) {
     // Scan Bank 0 for potential 16-bit pointers
     // Typically pointers are found after the header (0x150)
     for (uint16_t addr = 0x0150; addr < 0x3FFE; addr++) {
@@ -403,8 +283,8 @@ static void find_pointer_entry_points(const ROM& rom, AnalysisResult& result, st
         // Target must be in ROM
         if (target >= 0x0150 && target < 0x8000) {
             uint8_t tbank = (target < 0x4000) ? 0 : 1; 
-            // If it's a pointer to code, suggest it as an entry point
-            if (is_likely_valid_code(rom, tbank, target)) {
+            // If it's a pointer to code (and not in a declared data region), suggest it
+            if (!is_data_region(options, tbank, target)) {
                 uint32_t full_addr = make_address(tbank, target);
                 if (result.call_targets.find(full_addr) == result.call_targets.end()) {
                     result.call_targets.insert(full_addr);
@@ -465,7 +345,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     std::queue<AnalysisState> work_queue;
     std::set<uint32_t> visited;
     // Pointer scanning pass
-    find_pointer_entry_points(rom, result, work_queue);
+    find_pointer_entry_points(rom, options, result, work_queue);
     
     // Entry point is always a function (bank 0)
     result.call_targets.insert(make_address(0, 0x100));
@@ -506,11 +386,9 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         std::cerr << "Analyzing all " << known_banks.size() << " banks\n";
         for (uint8_t bank : known_banks) {
                 if (bank > 0) {
-                    if (is_likely_valid_code(rom, bank, 0x4000)) {
+                    if (!is_data_region(options, bank, 0x4000)) {
                         work_queue.push({make_address(bank, 0x4000), -1, -1, -1, -1, -1, -1, -1, bank});
                         result.call_targets.insert(make_address(bank, 0x4000));
-                    } else {
-                        // std::cout << "[INFO] Skipping likely data bank " << (int)bank << " at 0x4000\n";
                     }
                 }
         }
@@ -532,7 +410,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     }
     
     // Multi-pass analysis
-    bool scanning_pass = false;
+    // (aggressive_scan removed — static analysis + TOML entry points + interpreter fallback)
 
     // Explore all reachable code
     while (true) {
@@ -742,7 +620,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                     uint8_t tbank = (target < 0x4000) ? 0 : bank;
                     if (tbank == 0 && target >= 0x4000) tbank = 1;
 
-                    if (is_likely_valid_code(rom, tbank, target)) {
+                    if (!is_data_region(options, tbank, target)) {
                         result.call_targets.insert(make_address(tbank, target));
                         work_queue.push({make_address(tbank, target), -1, -1, -1, -1, -1, -1, -1, tbank});
                         result.label_addresses.insert(make_address(tbank, target));
@@ -765,9 +643,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             result.label_addresses.insert(fall_through);
             work_queue.push({fall_through, known_a, known_b, known_c, known_d, known_e, known_h, known_l, current_switchable_bank});
 
-            if (tbank > 0 && tbank != bank) {
-                if (!is_likely_valid_code(rom, tbank, target)) continue;
-            }
+            if (is_data_region(options, tbank, target)) continue;
 
             result.call_targets.insert(make_address(tbank, target));
             work_queue.push({make_address(tbank, target), -1, -1, -1, -1, -1, -1, -1, tbank});
@@ -782,10 +658,9 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 uint8_t tbank = target_bank(target);
                 instr.resolved_target_bank = tbank;
                 if (target >= 0x4000 && target <= 0x7FFF) {
-                    if (tbank > 0 && tbank != bank) {
-                        if (!is_likely_valid_code(rom, tbank, target)) continue;
+                    if (!is_data_region(options, tbank, target)) {
+                        result.call_targets.insert(make_address(tbank, target));
                     }
-                    result.call_targets.insert(make_address(tbank, target));
                 }
                 result.label_addresses.insert(make_address(tbank, target));
                 work_queue.push({make_address(tbank, target), known_a, known_b, known_c, known_d, known_e, known_h, known_l, tbank});
@@ -820,7 +695,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                                 uint16_t target = lo | (hi << 8);
                                 if (target >= 0x0100 && target < 0x8000) {
                                     uint8_t tbank = target_bank(target);
-                                    if (is_likely_valid_code(rom, tbank, target)) {
+                                    if (!is_data_region(options, tbank, target)) {
                                         result.call_targets.insert(make_address(tbank, target));
                                         work_queue.push({make_address(tbank, target), -1, -1, -1, -1, -1, -1, -1, tbank});
                                         found_table = true;
@@ -850,82 +725,9 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         }
     } // End work_queue loop
 
-    // Aggressive Code Scanning
-    if (options.aggressive_scan && !scanning_pass) {
-        scanning_pass = true; // prevent infinite loops if we find nothing new
-        
-        if (options.verbose) std::cout << "[ANALYSIS] Starting aggressive scan for missing code..." << std::endl;
-        
-        size_t found_count = 0;
-
-        // Iterate through all known banks (and bank 0)
-        std::vector<uint8_t> banks_to_scan;
-        banks_to_scan.push_back(0);
-        for (uint8_t b : known_banks) if (b > 0) banks_to_scan.push_back(b);
-
-        // Track regions found by aggressive scanning to avoid overlapping detection in future passes
-        // (Since operands are not marked as 'visited' by the main analysis)
-        static std::set<uint32_t> aggressive_regions; 
-
-        for (uint8_t bank : banks_to_scan) {
-            uint16_t start_addr = (bank == 0) ? 0x0000 : 0x4000;
-            uint16_t end_addr = (bank == 0) ? 0x3FFF : 0x7FFF;
-            
-            for (uint32_t addr = start_addr; addr <= end_addr; ) {
-                uint32_t full_addr = make_address(bank, addr);
-                
-                // If already visited by ANY means, skip
-                if (visited.count(full_addr) || aggressive_regions.count(full_addr)) {
-                    addr++; 
-                    continue;
-                }
-                
-                // Alignment heuristic: most functions start on some boundary? No.
-                // But we can skip obvious padding (0xFF or 0x00)
-                uint8_t byte = rom.read_banked(bank, addr);
-                if (byte == 0xFF || byte == 0x00) {
-                    addr++;
-                    continue;
-                }
-
-                // Check if this looks like valid code
-                int code_len = is_likely_valid_code(rom, bank, addr);
-                if (code_len > 0) {
-                    if (options.verbose) {
-                        std::cout << "[ANALYSIS] Detected potential function at " 
-                                  << std::hex << (int)bank << ":" << addr << std::dec << "\n";
-                    }
-                    
-                    // Add as a new entry point
-                    uint32_t entry = make_address(bank, addr);
-                    result.call_targets.insert(entry);
-                    
-                    // Add to queue
-                    uint8_t context = (bank > 0) ? bank : 1;
-                    work_queue.push({entry, -1, -1, -1, -1, -1, -1, -1, context});
-                    found_count++;
-                    
-                    // Mark region as scanned
-                    for (int i = 0; i < code_len; i++) {
-                        aggressive_regions.insert(make_address(bank, addr + i));
-                    }
-                    
-                    // Skip the block we just found to avoid overlapping detection
-                    addr += code_len;
-                    continue;
-                } else {
-                    // Not valid code, skip ahead.
-                    addr++;
-                }
-            }
-        }
-        
-        if (found_count > 0) {
-            if (options.verbose) std::cout << "[ANALYSIS] Found " << found_count << " new entry points. Restarting analysis." << std::endl;
-            scanning_pass = false; // Reset pass flag to allow further scanning after this batch is analyzed
-            continue; // Go back to work_queue processing
-        }
-    }
+    // Aggressive scan removed — static analysis + manual entry points + interpreter
+    // fallback is the correct architecture. Add missing addresses to the TOML config
+    // as they're discovered at runtime via [INTERP] log messages.
     
     // If we get here, we are done
     break; 

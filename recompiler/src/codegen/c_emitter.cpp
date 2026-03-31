@@ -2052,6 +2052,12 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    " << options.output_prefix << "_init(ctx);\n";
     main_ss << "\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
+    // Set window title from ROM header
+    main_ss << "    { char title[17] = {0};\n";
+    main_ss << "      if (ctx->rom_size > 0x143) { memcpy(title, &ctx->rom[0x134], 15); }\n";
+    main_ss << "      for (int i=0;i<15;i++) if(title[i]<32||title[i]>126) title[i]=0;\n";
+    main_ss << "      if (title[0]) gb_platform_set_title(title);\n";
+    main_ss << "    }\n";
     main_ss << "    // Run the game loop\n";
     main_ss << "    while (1) {\n";
     main_ss << "        gb_run_frame(ctx);\n";

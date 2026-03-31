@@ -433,7 +433,7 @@ bool gb_platform_init(int scale) {
     
     fprintf(stderr, "[SDL] Creating window...\n");
     g_window = SDL_CreateWindow(
-        "GameBoy Recompiled",
+        "GB Recompiled",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         GB_SCREEN_WIDTH * g_scale,
@@ -854,24 +854,8 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
             SDL_PushEvent(&quit_event);
         }
         ImGui::End();
-    } else {
-        ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.35f); 
-        if (ImGui::Begin("Overlay", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
-            update_audio_stats_from_ring();
-            ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-            ImGui::Text("Press ESC for Menu");
-            /* Timing diagnostics */
-            if (g_timing_frame_count > 0) {
-                float avg_render = (float)g_timing_render_total / g_timing_frame_count;
-                float avg_vsync = (float)g_timing_vsync_total / g_timing_frame_count;
-                ImGui::Text("Render: %.1fms, VSync: %.1fms", avg_render, avg_vsync);
-                ImGui::Text("AudioBuf: %u/%u, Underruns:%u", audio_ring_fill_samples(), AUDIO_RING_SIZE, g_audio_underruns);
-                ImGui::TextUnformatted(audio_stats_get_summary());
-            }
-            ImGui::End();
-        }
     }
+    /* No overlay by default — press ESC for the debug menu */
 
     ImGui::Render();
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());

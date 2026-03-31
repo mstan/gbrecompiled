@@ -77,6 +77,7 @@ static int g_script_count = 0;
 /* Forward declarations needed by recording/playback */
 static void parse_buttons(const char* btn_str, uint8_t* dpad, uint8_t* buttons);
 static int g_frame_count = 0;
+static bool g_turbo = false;
 
 /* ---- Input Recording ---- */
 static FILE* g_record_file = NULL;
@@ -646,12 +647,16 @@ bool gb_platform_poll_events(GBContext* ctx) {
                         else g_joypad_buttons |= 0x08;
                         break;
                     
+                    case SDL_SCANCODE_TAB:
+                        g_turbo = pressed;
+                        break;
+
                     case SDL_SCANCODE_ESCAPE:
                         if (pressed) {
                             g_show_menu = !g_show_menu;
                         }
                         return true; // Don't block
-                        
+
                     default:
                         break;
                 }
@@ -720,6 +725,12 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
     if (!g_texture || !g_renderer || !framebuffer) {
         DBG_FRAME("Platform render_frame: SKIPPED (null: texture=%d, renderer=%d, fb=%d)",
                   g_texture == NULL, g_renderer == NULL, framebuffer == NULL);
+        return;
+    }
+
+    /* Turbo: skip rendering most frames, only draw every 4th */
+    if (g_turbo && (g_frame_count & 3) != 0) {
+        g_frame_count++;
         return;
     }
 
@@ -872,7 +883,14 @@ uint8_t gb_platform_get_joypad(void) {
 }
 
 void gb_platform_vsync(void) {
-    /* 
+    if (g_turbo) {
+        /* Skip frame pacing entirely — run as fast as possible */
+        update_audio_stats_from_ring();
+        audio_stats_tick(SDL_GetTicks64());
+        g_last_frame_time = SDL_GetTicks();
+        return;
+    }
+    /*
      * Frame pacing: Run at the DMG frame cadence derived from 70224 cycles
      * at 4194304 Hz, and ease off sleeping when audio fill is too low.
      */

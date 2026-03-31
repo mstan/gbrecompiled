@@ -1,5 +1,6 @@
 #include "gbrt.h"
 #include "gbrt_debug.h"
+#include "debug_server.h"
 #include "ppu.h"
 #include <stdlib.h>
 
@@ -89,17 +90,36 @@ static void set_reg8(GBContext* ctx, uint8_t idx, uint8_t val) {
 void gb_interpret(GBContext* ctx, uint16_t addr) {
     /* Set PC to the address we want to execute */
     ctx->pc = addr;
-    
-    /* Interpreter entry logging - always on */
+
+    /* Interpreter fallback logging — stderr, file, and debug server */
     {
         static int entry_count = 0;
+        static FILE* interp_log = NULL;
+        int bank = (addr < 0x4000) ? 0 : (int)ctx->rom_bank;
         entry_count++;
+
+        /* Log to stderr (first 200) */
         if (entry_count <= 200) {
             fprintf(stderr, "[INTERP] bank:%d addr:0x%04X (entry #%d)\n",
-                    (addr < 0x4000) ? 0 : (int)ctx->rom_bank, addr, entry_count);
+                    bank, addr, entry_count);
         } else if (entry_count == 201) {
-            fprintf(stderr, "[INTERP] (further entries suppressed)\n");
+            fprintf(stderr, "[INTERP] (further entries suppressed on stderr, see interp_fallbacks.log)\n");
         }
+
+        /* Always log to file */
+        if (!interp_log) {
+            interp_log = fopen("interp_fallbacks.log", "w");
+            if (interp_log) fprintf(interp_log, "# Interpreter fallback log\n# bank addr count\n");
+        }
+        if (interp_log) {
+            fprintf(interp_log, "%d 0x%04X %d\n", bank, addr, entry_count);
+            fflush(interp_log);
+        }
+
+        /* Notify debug server (if connected) */
+        gb_debug_server_send_fmt(
+            "{\"event\":\"interp_fallback\",\"bank\":%d,\"addr\":\"0x%04X\",\"count\":%d}",
+            bank, addr, entry_count);
     }
     gbrt_log_trace(ctx, (addr < 0x4000) ? 0 : ctx->rom_bank, addr);
 

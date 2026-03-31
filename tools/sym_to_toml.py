@@ -25,16 +25,22 @@ DATA_KEYWORDS = {
     'warp', 'warps', 'connection', 'border',
 }
 
-def is_likely_code(name):
+def is_likely_code(name, include_sublabels=False):
     """Heuristic: is this symbol name likely a code label vs data?"""
     lower = name.lower()
-    # Sub-labels are internal — skip them
     if '.' in name:
-        return False
-    # Check for data keywords
-    for kw in DATA_KEYWORDS:
-        if kw in lower:
+        if not include_sublabels:
             return False
+        # Even with sub-labels, skip data-like ones
+        parent = name.split('.')[0].lower()
+        for kw in DATA_KEYWORDS:
+            if kw in parent:
+                return False
+    else:
+        # Check for data keywords in top-level labels
+        for kw in DATA_KEYWORDS:
+            if kw in lower:
+                return False
     return True
 
 def main():
@@ -44,6 +50,7 @@ def main():
 
     sym_path = sys.argv[1]
     filter_data = '--filter-data' in sys.argv
+    include_sublabels = '--include-sublabels' in sys.argv
 
     banks = defaultdict(list)
     total = 0
@@ -71,7 +78,7 @@ def main():
                 skipped_ram += 1
                 continue
 
-            if filter_data and not is_likely_code(name):
+            if filter_data and not is_likely_code(name, include_sublabels):
                 if '.' in name:
                     skipped_sublabel += 1
                 else:

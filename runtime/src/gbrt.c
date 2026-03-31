@@ -105,6 +105,7 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->dma.source_high = 0;
     ctx->dma.progress = 0;
     ctx->dma.cycles_remaining = 0;
+    ctx->serial_cycles_remaining = -1;
     
     /* Reset HALT bug state */
     ctx->halt_bug = 0;
@@ -623,9 +624,9 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
              return;
         }
         if (addr == 0xFF02 && (value & 0x80)) {
-            printf("%c", ctx->io[0x01]); fflush(stdout);
-            ctx->io[0x01] = 0xFF; /* No link partner: received bits are all 1s */
-            ctx->io[0x0F] |= 0x08; /* Serial interrupt */
+            /* Start serial transfer — completes after 4096 T-cycles (internal clock).
+             * Don't fire the interrupt immediately; gb_sync will fire it when ready. */
+            ctx->serial_cycles_remaining = 4096;
         }
         ctx->io[addr - 0xFF00] = value;
         return;
@@ -813,6 +814,17 @@ static inline void gb_sync(GBContext* ctx) {
     if (delta > 0) {
         ctx->last_sync_cycles = current;
         if (ctx->ppu) ppu_tick((GBPPU*)ctx->ppu, ctx, delta);
+
+        /* Serial transfer completion */
+        if (ctx->serial_cycles_remaining > 0) {
+            ctx->serial_cycles_remaining -= (int)delta;
+            if (ctx->serial_cycles_remaining <= 0) {
+                ctx->serial_cycles_remaining = -1;
+                ctx->io[0x01] = 0xFF;       /* No link partner: received bits are all 1s */
+                ctx->io[0x02] &= ~0x80;     /* Clear transfer start bit */
+                ctx->io[0x0F] |= 0x08;      /* Serial interrupt */
+            }
+        }
     }
 }
 

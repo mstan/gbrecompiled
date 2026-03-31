@@ -122,7 +122,10 @@ typedef struct GBContext {
         uint8_t progress;       /**< Bytes copied (0-159) */
         uint16_t cycles_remaining; /**< Cycles until DMA completes */
     } dma;
-    
+
+    /* Serial transfer delay */
+    int serial_cycles_remaining; /**< Cycles until serial transfer completes (-1 = inactive) */
+
     /* Current bank numbers */
     uint16_t rom_bank;    /**< Current ROM bank (0x4000-0x7FFF) - 9 bits for MBC5 */
     uint8_t ram_bank;     /**< Current RAM bank */

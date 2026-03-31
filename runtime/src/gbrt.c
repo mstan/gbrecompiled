@@ -815,14 +815,16 @@ static inline void gb_sync(GBContext* ctx) {
         ctx->last_sync_cycles = current;
         if (ctx->ppu) ppu_tick((GBPPU*)ctx->ppu, ctx, delta);
 
-        /* Serial transfer completion */
+        /* Serial transfer completion (no link partner) */
         if (ctx->serial_cycles_remaining > 0) {
             ctx->serial_cycles_remaining -= (int)delta;
             if (ctx->serial_cycles_remaining <= 0) {
                 ctx->serial_cycles_remaining = -1;
                 ctx->io[0x01] = 0xFF;       /* No link partner: received bits are all 1s */
                 ctx->io[0x02] &= ~0x80;     /* Clear transfer start bit */
-                ctx->io[0x0F] |= 0x08;      /* Serial interrupt */
+                /* Don't fire serial interrupt — no link cable connected.
+                 * Firing it causes an infinite handler loop (handler starts
+                 * a new transfer each time) that disrupts music timing. */
             }
         }
     }

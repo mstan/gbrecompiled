@@ -74,6 +74,98 @@ typedef struct {
 static ScriptEntry g_input_script[MAX_SCRIPT_ENTRIES];
 static int g_script_count = 0;
 
+/* Forward declarations needed by recording/playback */
+static void parse_buttons(const char* btn_str, uint8_t* dpad, uint8_t* buttons);
+static int g_frame_count = 0;
+
+/* ---- Input Recording ---- */
+static FILE* g_record_file = NULL;
+static uint8_t g_prev_record_dpad = 0xFF;
+static uint8_t g_prev_record_buttons = 0xFF;
+
+static const char* buttons_to_str(uint8_t dpad, uint8_t buttons, char* buf, size_t sz) {
+    buf[0] = '\0';
+    int n = 0;
+    /* dpad is active-low: bit clear = pressed */
+    if (!(dpad & 0x01)) { if (n) buf[n++] = ','; buf[n++] = 'R'; }
+    if (!(dpad & 0x02)) { if (n) buf[n++] = ','; buf[n++] = 'L'; }
+    if (!(dpad & 0x04)) { if (n) buf[n++] = ','; buf[n++] = 'U'; }
+    if (!(dpad & 0x08)) { if (n) buf[n++] = ','; buf[n++] = 'D'; }
+    if (!(buttons & 0x01)) { if (n) buf[n++] = ','; buf[n++] = 'A'; }
+    if (!(buttons & 0x02)) { if (n) buf[n++] = ','; buf[n++] = 'B'; }
+    if (!(buttons & 0x04)) { if (n) buf[n++] = ','; buf[n++] = 'T'; } /* Select */
+    if (!(buttons & 0x08)) { if (n) buf[n++] = ','; buf[n++] = 'S'; } /* Start */
+    if (n == 0) { buf[0] = '-'; n = 1; }
+    buf[n] = '\0';
+    (void)sz;
+    return buf;
+}
+
+void gb_platform_start_recording(const char* path) {
+    if (g_record_file) fclose(g_record_file);
+    g_record_file = fopen(path, "w");
+    if (g_record_file) {
+        fprintf(g_record_file, "# gb-recompiled input recording\n");
+        fprintf(g_record_file, "# format: frame buttons\n");
+        fprintf(g_record_file, "# buttons: U,D,L,R,A,B,S(tart),T(selecT) or - for none\n");
+        printf("[RECORD] Recording inputs to %s\n", path);
+    } else {
+        fprintf(stderr, "[RECORD] Failed to open %s for writing\n", path);
+    }
+    g_prev_record_dpad = 0xFF;
+    g_prev_record_buttons = 0xFF;
+}
+
+void gb_platform_stop_recording(void) {
+    if (g_record_file) {
+        fclose(g_record_file);
+        g_record_file = NULL;
+        printf("[RECORD] Recording stopped.\n");
+    }
+}
+
+static void record_frame_input(void) {
+    if (!g_record_file) return;
+    /* Only write a line when input state changes */
+    if (g_joypad_dpad != g_prev_record_dpad || g_joypad_buttons != g_prev_record_buttons) {
+        char buf[32];
+        buttons_to_str(g_joypad_dpad, g_joypad_buttons, buf, sizeof(buf));
+        fprintf(g_record_file, "%d %s\n", g_frame_count, buf);
+        fflush(g_record_file);
+        g_prev_record_dpad = g_joypad_dpad;
+        g_prev_record_buttons = g_joypad_buttons;
+    }
+}
+
+void gb_platform_load_script_file(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "[SCRIPT] Cannot open %s\n", path); return; }
+    g_script_count = 0;
+    char line[256];
+    uint32_t prev_frame = 0;
+    while (fgets(line, sizeof(line), f) && g_script_count < MAX_SCRIPT_ENTRIES - 1) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        uint32_t frame = 0;
+        char btn_buf[64] = {0};
+        if (sscanf(line, "%u %63s", &frame, btn_buf) < 2) continue;
+
+        /* If there's a gap from the previous entry, fill it with the previous state
+         * by setting duration on the prior entry */
+        if (g_script_count > 0) {
+            ScriptEntry* prev = &g_input_script[g_script_count - 1];
+            prev->duration = frame - prev->start_frame;
+        }
+
+        ScriptEntry* e = &g_input_script[g_script_count++];
+        e->start_frame = frame;
+        e->duration = 0xFFFFFFFF; /* until next entry or forever */
+        parse_buttons(btn_buf, &e->dpad, &e->buttons);
+        prev_frame = frame;
+    }
+    fclose(f);
+    printf("[SCRIPT] Loaded %d input events from %s\n", g_script_count, path);
+}
+
 #define MAX_DUMP_FRAMES 100
 static uint32_t g_dump_frames[MAX_DUMP_FRAMES];
 static int g_dump_count = 0;
@@ -164,13 +256,12 @@ static void save_ppm(const char* filename, const uint32_t* fb, int width, int he
 }
 
 
-static int g_frame_count = 0;
-
 /* ============================================================================
  * Platform Functions
  * ========================================================================== */
 
 void gb_platform_shutdown(void) {
+    gb_platform_stop_recording();
     gb_debug_server_shutdown();
 
     if (g_audio_device) {
@@ -581,28 +672,33 @@ bool gb_platform_poll_events(GBContext* ctx) {
         }
     }
     
-    /* Handle Automation Inputs */
+    /* Handle Automation Inputs (script playback) */
+    if (g_script_count > 0) {
+        /* Reset joypad to "nothing pressed" before applying script state,
+         * otherwise released buttons stay latched from prior AND operations */
+        g_joypad_dpad = 0xFF;
+        g_joypad_buttons = 0xFF;
+    }
     for (int i = 0; i < g_script_count; i++) {
         ScriptEntry* e = &g_input_script[i];
-        if (g_frame_count >= e->start_frame && g_frame_count < (e->start_frame + e->duration)) {
-             // Apply inputs (ANDing masks)
+        if (g_frame_count >= (int)e->start_frame && g_frame_count < (int)(e->start_frame + e->duration)) {
+             // Apply inputs (ANDing masks — works now since we reset to 0xFF above)
              g_joypad_dpad &= e->dpad;
              g_joypad_buttons &= e->buttons;
-             
-             // Check triggers
-             bool trigger = false;
-             if ((~e->dpad & 0x0F) && dpad_selected) trigger = true;
-             if ((~e->buttons & 0x0F) && buttons_selected) trigger = true;
-             
-                if (trigger && ctx) {
-                    /* Only trigger on initial press, not repeats or continuous hold */
-                     if (g_frame_count == e->start_frame) {
-                        ctx->io[0x0F] |= 0x10;
-                        if (ctx->halted) ctx->halted = 0;
-                     }
-                }
+             if (g_frame_count == (int)e->start_frame) {
+                 fprintf(stderr, "[SCRIPT] Frame %d: applying entry %d (dpad=0x%02X btn=0x%02X)\n",
+                         g_frame_count, i, e->dpad, e->buttons);
+                 /* Fire joypad interrupt on press */
+                 if (ctx && (e->dpad != 0xFF || e->buttons != 0xFF)) {
+                     ctx->io[0x0F] |= 0x10;
+                     if (ctx->halted) ctx->halted = 0;
+                 }
+             }
         }
     }
+
+    /* Record input state (only writes on change) */
+    record_frame_input();
 
     return true;
 }

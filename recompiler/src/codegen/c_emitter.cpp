@@ -1979,6 +1979,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            printf(\"Instruction limit: %llu\\n\", (unsigned long long)gbrt_instruction_limit);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--input\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_input_script(argv[++i]);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--record\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            gb_platform_start_recording(argv[++i]);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--script\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            gb_platform_load_script_file(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--dump-frames\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_dump_frames(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--screenshot-prefix\") == 0 && i + 1 < argc) {\n";

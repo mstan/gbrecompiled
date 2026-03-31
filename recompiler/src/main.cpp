@@ -365,12 +365,13 @@ int main(int argc, char* argv[]) {
     
     std::cout << "\nGenerated files:\n";
     std::cout << "  " << (out_path / output.header_file) << "\n";
-    std::cout << "  " << (out_path / output.source_file) << "\n";
+    std::cout << "  " << (out_path / output.source_file) << " (dispatch + init)\n";
     std::cout << "  " << (out_path / output.main_file) << "\n";
     std::cout << "  " << (out_path / output.cmake_file) << "\n";
     if (!output.rom_data_file.empty()) {
         std::cout << "  " << (out_path / output.rom_data_file) << "\n";
     }
+    std::cout << "  " << output.bank_files.size() << " bank source files\n";
     
     std::cout << "\nBuild instructions:\n";
     std::cout << "  cd " << out_path << " && mkdir -p build && cd build && cmake -G Ninja .. && cmake --build . && ./" << gen_opts.output_prefix << "\n";

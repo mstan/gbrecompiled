@@ -1079,9 +1079,19 @@ uint32_t gb_run_frame(GBContext* ctx) {
             break;
         }
 
-        /* Safety: don't run more than ~2 frames worth of cycles */
-        if (ctx->frame_done && (ctx->cycles - start) > 140000) {
-            break;
+        /* Safety: don't run more than ~2 frames worth of cycles.
+         * Also handles LCD-off periods: when LCD is disabled, the PPU never
+         * sets frame_done, so we must exit based on cycle count alone to keep
+         * audio and event timing consistent. */
+        if ((ctx->cycles - start) > 70224) {
+            if (ctx->frame_done || !ctx->ppu ||
+                !(((GBPPU*)ctx->ppu)->lcdc & 0x80)) {
+                break;
+            }
+            /* LCD is on but frame not done yet — allow up to 2x */
+            if ((ctx->cycles - start) > 140000) {
+                break;
+            }
         }
 
         /* Check for HALT exit condition (even if IME=0) */

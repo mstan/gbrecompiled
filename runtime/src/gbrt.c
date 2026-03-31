@@ -1037,16 +1037,43 @@ uint32_t gb_run_frame(GBContext* ctx) {
     gb_reset_frame(ctx);
     uint32_t start = ctx->cycles;
 
-    while (!ctx->frame_done) {
+    /* Run until frame_done AND the VBlank handler has had a chance to complete.
+     * The VBlank ISR (including ReadJoypad) must finish within the same
+     * gb_run_frame call so that the joypad state set by poll_events is still
+     * valid when ReadJoypad reads P1.  We keep running after frame_done until
+     * we've processed the VBlank interrupt AND executed enough cycles for the
+     * handler to return (VBlank period is ~4560 T-cycles). */
+    bool vblank_serviced = false;
+    while (1) {
         gb_handle_interrupts(ctx);
-        
+
+        /* Track whether we dispatched VBlank */
+        if (ctx->frame_done && !vblank_serviced) {
+            /* VBlank IF was set by PPU. Check if it's been cleared
+             * (meaning gb_handle_interrupts dispatched it). */
+            if (!(ctx->io[0x0F] & 0x01)) {
+                vblank_serviced = true;
+            }
+        }
+
+        /* Exit once frame is done AND VBlank handler has run AND we're past
+         * the VBlank handler (IME re-enabled by RETI, or enough cycles). */
+        if (ctx->frame_done && vblank_serviced && ctx->ime) {
+            break;
+        }
+
+        /* Safety: don't run more than ~2 frames worth of cycles */
+        if (ctx->frame_done && (ctx->cycles - start) > 140000) {
+            break;
+        }
+
         /* Check for HALT exit condition (even if IME=0) */
         if (ctx->halted) {
              if (ctx->io[0x0F] & ctx->io[0x80] & 0x1F) {
                  ctx->halted = 0;
              }
         }
-        
+
         ctx->stopped = 0;
         if (ctx->halted) gb_tick(ctx, 4);
         else gb_step(ctx);

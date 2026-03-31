@@ -13,9 +13,9 @@
 extern "C" {
 #endif
 
-// Joypad state variables
-extern uint8_t g_joypad_buttons;
-extern uint8_t g_joypad_dpad;
+// Joypad state variables (volatile: modified by platform layer, read by emulation)
+extern volatile uint8_t g_joypad_buttons;
+extern volatile uint8_t g_joypad_dpad;
 
 typedef struct GBContext GBContext;
 

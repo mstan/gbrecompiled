@@ -53,8 +53,8 @@ static const uint32_t g_palettes[][4] = {
 };
 
 /* Joypad state - exported for gbrt.c to access */
-uint8_t g_joypad_buttons = 0xFF;  /* Active low: Start, Select, B, A */
-uint8_t g_joypad_dpad = 0xFF;     /* Active low: Down, Up, Left, Right */
+volatile uint8_t g_joypad_buttons = 0xFF;  /* Active low: Start, Select, B, A */
+volatile uint8_t g_joypad_dpad = 0xFF;     /* Active low: Down, Up, Left, Right */
 
 /* ============================================================================
  * Automation State
@@ -688,11 +688,22 @@ bool gb_platform_poll_events(GBContext* ctx) {
              if (g_frame_count == (int)e->start_frame) {
                  fprintf(stderr, "[SCRIPT] Frame %d: applying entry %d (dpad=0x%02X btn=0x%02X)\n",
                          g_frame_count, i, e->dpad, e->buttons);
-                 /* Fire joypad interrupt on press */
-                 if (ctx && (e->dpad != 0xFF || e->buttons != 0xFF)) {
-                     ctx->io[0x0F] |= 0x10;
-                     if (ctx->halted) ctx->halted = 0;
-                 }
+             }
+             /* Also write directly to hJoyInput so _Joypad sees it even if
+              * ReadJoypad timing doesn't align with script application */
+             if (ctx && (e->dpad != 0xFF || e->buttons != 0xFF)) {
+                 /* Compute hJoyInput value: active-high combined dpad+buttons */
+                 uint8_t joy = 0;
+                 if (!(e->dpad & 0x01)) joy |= 0x10; /* Right */
+                 if (!(e->dpad & 0x02)) joy |= 0x20; /* Left */
+                 if (!(e->dpad & 0x04)) joy |= 0x40; /* Up */
+                 if (!(e->dpad & 0x08)) joy |= 0x80; /* Down */
+                 if (!(e->buttons & 0x01)) joy |= 0x01; /* A */
+                 if (!(e->buttons & 0x02)) joy |= 0x02; /* B */
+                 if (!(e->buttons & 0x04)) joy |= 0x04; /* Select */
+                 if (!(e->buttons & 0x08)) joy |= 0x08; /* Start */
+                 /* Write to hJoyInput ($FFF8) in HRAM */
+                 ctx->hram[0x78] = joy;
              }
         }
     }

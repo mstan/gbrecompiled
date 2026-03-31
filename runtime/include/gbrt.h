@@ -151,6 +151,8 @@ typedef struct GBContext {
     size_t rom_size;
     uint8_t* eram;        /**< External RAM */
     size_t eram_size;
+    uint8_t eram_dirty;   /**< Set when ERAM is written; cleared after flush */
+    uint32_t eram_dirty_frame; /**< Frame when ERAM was last dirtied */
     uint8_t* wram;        /**< Work RAM */
     uint8_t* vram;        /**< Video RAM */
     uint8_t* oam;         /**< Object Attribute Memory */

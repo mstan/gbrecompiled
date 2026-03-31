@@ -78,6 +78,7 @@ static int g_script_count = 0;
 static void parse_buttons(const char* btn_str, uint8_t* dpad, uint8_t* buttons);
 static int g_frame_count = 0;
 static bool g_turbo = false;
+static GBContext* g_ctx = NULL;  /* Stored from register_context for SRAM flush */
 
 /* ---- Input Recording ---- */
 static FILE* g_record_file = NULL;
@@ -739,7 +740,18 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
     gb_debug_server_check_watchpoints();
 
     g_frame_count++;
-    
+
+    /* Flush battery RAM to disk ~1 second after last ERAM write */
+    if (g_ctx && g_ctx->eram_dirty) {
+        if (g_ctx->eram_dirty_frame == 0) {
+            g_ctx->eram_dirty_frame = g_frame_count;
+        } else if ((uint32_t)(g_frame_count - g_ctx->eram_dirty_frame) > 60) {
+            gb_context_save_ram(g_ctx);
+            g_ctx->eram_dirty = 0;
+            g_ctx->eram_dirty_frame = 0;
+        }
+    }
+
     /* Handle Screenshot Dumping */
     for (int i = 0; i < g_dump_count; i++) {
         if (g_dump_frames[i] == (uint32_t)g_frame_count) {
@@ -1001,6 +1013,7 @@ static bool sdl_save_battery_ram(GBContext* ctx, const char* rom_name, const voi
 }
 
 void gb_platform_register_context(GBContext* ctx) {
+    g_ctx = ctx;
     GBPlatformCallbacks callbacks = {
         .on_audio_sample = on_audio_sample,
         .load_battery_ram = sdl_load_battery_ram,

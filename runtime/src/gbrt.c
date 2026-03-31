@@ -73,8 +73,10 @@ GBContext* gb_context_create(const GBConfig* config) {
 void gb_context_destroy(GBContext* ctx) {
     if (!ctx) return;
     
-    /* Save RAM before destroying if available */
-    if (ctx->eram && ctx->ram_enabled && ctx->callbacks.save_battery_ram) {
+    /* Save battery RAM before destroying — always save if ERAM exists,
+     * regardless of ram_enabled (the MBC gate is for access control,
+     * not for whether the data should persist on disk). */
+    if (ctx->eram && ctx->eram_size && ctx->callbacks.save_battery_ram) {
         gb_context_save_ram(ctx);
     }
     
@@ -559,6 +561,7 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             uint32_t eram_addr = ((uint32_t)ctx->ram_bank * 0x2000) + (addr - 0xA000);
             if (eram_addr < ctx->eram_size) {
                 ctx->eram[eram_addr] = value;
+                ctx->eram_dirty = 1;
             }
         }
         return;

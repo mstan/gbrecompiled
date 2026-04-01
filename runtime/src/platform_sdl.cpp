@@ -9,6 +9,9 @@
 #include "audio_stats.h"
 #include "gbrt_debug.h"
 #include "debug_server.h"
+extern "C" {
+#include "keybinds.h"
+}
 
 /* Forward declaration for debug server context setter */
 extern "C" void gb_debug_server_set_context(GBContext *ctx);
@@ -385,7 +388,10 @@ bool gb_platform_init(int scale) {
     g_scale = scale;
     if (g_scale < 1) g_scale = 1;
     if (g_scale > 8) g_scale = 8;
-    
+
+    /* Load configurable keybinds */
+    keybinds_init(NULL);
+
     fprintf(stderr, "[SDL] Initializing SDL...\n");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
@@ -603,63 +609,45 @@ bool gb_platform_poll_events(GBContext* ctx) {
             case SDL_KEYUP: {
                 bool pressed = (event.type == SDL_KEYDOWN);
                 bool trigger = false;
-                
-                switch (event.key.keysym.scancode) {
-                    /* D-pad */
-                    case SDL_SCANCODE_UP:
-                    case SDL_SCANCODE_W:
-                        if (pressed) { g_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
-                        else g_joypad_dpad |= 0x04;
-                        break;
-                    case SDL_SCANCODE_DOWN:
-                    case SDL_SCANCODE_S:
-                        if (pressed) { g_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
-                        else g_joypad_dpad |= 0x08;
-                        break;
-                    case SDL_SCANCODE_LEFT:
-                    case SDL_SCANCODE_A:
-                        if (pressed) { g_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
-                        else g_joypad_dpad |= 0x02;
-                        break;
-                    case SDL_SCANCODE_RIGHT:
-                    case SDL_SCANCODE_D:
-                        if (pressed) { g_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
-                        else g_joypad_dpad |= 0x01;
-                        break;
-                    
-                    /* Buttons */
-                    case SDL_SCANCODE_Z:
-                    case SDL_SCANCODE_J:
-                        if (pressed) { g_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; } /* A */
-                        else g_joypad_buttons |= 0x01;
-                        break;
-                    case SDL_SCANCODE_X:
-                    case SDL_SCANCODE_K:
-                        if (pressed) { g_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; } /* B */
-                        else g_joypad_buttons |= 0x02;
-                        break;
-                    case SDL_SCANCODE_RSHIFT:
-                    case SDL_SCANCODE_BACKSPACE:
-                        if (pressed) { g_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; } /* Select */
-                        else g_joypad_buttons |= 0x04;
-                        break;
-                    case SDL_SCANCODE_RETURN:
-                        if (pressed) { g_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; } /* Start */
-                        else g_joypad_buttons |= 0x08;
-                        break;
-                    
-                    case SDL_SCANCODE_TAB:
-                        g_turbo = pressed;
-                        break;
+                const GBKeybinds *kb = keybinds_get();
+                SDL_Scancode sc = event.key.keysym.scancode;
 
-                    case SDL_SCANCODE_ESCAPE:
-                        if (pressed) {
-                            g_show_menu = !g_show_menu;
-                        }
-                        return true; // Don't block
-
-                    default:
-                        break;
+                /* D-pad */
+                if (sc == kb->up) {
+                    if (pressed) { g_joypad_dpad &= ~0x04; if (dpad_selected) trigger = true; }
+                    else g_joypad_dpad |= 0x04;
+                } else if (sc == kb->down) {
+                    if (pressed) { g_joypad_dpad &= ~0x08; if (dpad_selected) trigger = true; }
+                    else g_joypad_dpad |= 0x08;
+                } else if (sc == kb->left) {
+                    if (pressed) { g_joypad_dpad &= ~0x02; if (dpad_selected) trigger = true; }
+                    else g_joypad_dpad |= 0x02;
+                } else if (sc == kb->right) {
+                    if (pressed) { g_joypad_dpad &= ~0x01; if (dpad_selected) trigger = true; }
+                    else g_joypad_dpad |= 0x01;
+                }
+                /* Buttons */
+                else if (sc == kb->a) {
+                    if (pressed) { g_joypad_buttons &= ~0x01; if (buttons_selected) trigger = true; }
+                    else g_joypad_buttons |= 0x01;
+                } else if (sc == kb->b) {
+                    if (pressed) { g_joypad_buttons &= ~0x02; if (buttons_selected) trigger = true; }
+                    else g_joypad_buttons |= 0x02;
+                } else if (sc == kb->select) {
+                    if (pressed) { g_joypad_buttons &= ~0x04; if (buttons_selected) trigger = true; }
+                    else g_joypad_buttons |= 0x04;
+                } else if (sc == kb->start) {
+                    if (pressed) { g_joypad_buttons &= ~0x08; if (buttons_selected) trigger = true; }
+                    else g_joypad_buttons |= 0x08;
+                }
+                /* Turbo */
+                else if (sc == kb->turbo) {
+                    g_turbo = pressed;
+                }
+                /* Escape (always hardcoded — menu toggle) */
+                else if (sc == SDL_SCANCODE_ESCAPE) {
+                    if (pressed) g_show_menu = !g_show_menu;
+                    return true;
                 }
                 
                 if (trigger && ctx && event.key.repeat == 0) {

@@ -2134,6 +2134,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     cmake_ss << "    ${GBRT_DIR}/src/interpreter.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/debug_server.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/game_extras_default.c\n";
+    cmake_ss << "    ${GBRT_DIR}/src/keybinds.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
     cmake_ss << ")\n\n";
 

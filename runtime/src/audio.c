@@ -733,18 +733,24 @@ void gb_audio_step(GBContext* ctx, uint32_t cycles) {
         uint32_t steps = apu->ch4.accum / period;
         apu->ch4.accum %= period;
 
+        /* Cap iterations: 15-bit LFSR cycles after 32767 steps,
+           7-bit LFSR cycles after 127 steps. Beyond that, extra
+           shifts don't change the audible output. */
+        uint32_t max_steps = (apu->ch4.nr43 & 0x08) ? 127 : 32767;
+        if (steps > max_steps) steps = max_steps;
+
+        uint16_t lfsr = apu->ch4.lfsr;
+        bool narrow = (apu->ch4.nr43 & 0x08);
         while (steps-- > 0) {
-            /* Shift LFSR */
-            uint16_t lfsr = apu->ch4.lfsr;
             bool xor_res = (lfsr & 1) ^ ((lfsr >> 1) & 1);
             lfsr >>= 1;
             lfsr |= (xor_res << 14);
-            if (apu->ch4.nr43 & 0x08) { /* 7-bit mode */
+            if (narrow) {
                 lfsr &= ~0x40;
                 lfsr |= (xor_res << 6);
             }
-            apu->ch4.lfsr = lfsr;
         }
+        apu->ch4.lfsr = lfsr;
     }
     
     /* Use fixed-point timing for accurate 44100 Hz sample generation */

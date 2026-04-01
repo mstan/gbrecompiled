@@ -130,12 +130,14 @@ static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
     bool bg_enable = (ppu->lcdc & LCDC_BG_ENABLE);
     /* Note: on DMG, LCDC_BG_ENABLE (bit 0) also controls Master Enable (BG+Window). 
        On CGB, it controls priority. Assuming DMG mostly here. */
-    bool window_enable = bg_enable && (ppu->lcdc & LCDC_WINDOW_ENABLE) && (ppu->wx <= 166) && (ppu->wy <= scanline);
-    
-    /* Track if window was triggered */
-    if (window_enable && !ppu->window_triggered) {
+    /* Window triggers when WY matches the current scanline. Once triggered,
+       it stays active for the rest of the frame (window_line increments).
+       This prevents WY changes mid-frame from incorrectly activating the window. */
+    bool window_hw_enable = bg_enable && (ppu->lcdc & LCDC_WINDOW_ENABLE) && (ppu->wx <= 166);
+    if (window_hw_enable && !ppu->window_triggered && ppu->wy == scanline) {
         ppu->window_triggered = true;
     }
+    bool window_enable = window_hw_enable && ppu->window_triggered;
     
     for (int x = 0; x < GB_SCREEN_WIDTH; x++) {
         uint8_t color = 0;
@@ -285,18 +287,8 @@ void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
  * @brief Convert framebuffer to RGB
  */
 static void convert_to_rgb(GBPPU* ppu) {
-    /* Debug: check if framebuffer has any non-zero pixels */
-    static int convert_count = 0;
-    bool has_content = dbg_has_nonzero_pixels(ppu->framebuffer, GB_FRAMEBUFFER_SIZE);
-    
     for (int i = 0; i < GB_FRAMEBUFFER_SIZE; i++) {
         ppu->rgb_framebuffer[i] = dmg_palette[ppu->framebuffer[i] & 0x03];
-    }
-    
-    convert_count++;
-    if (convert_count <= 5 || (convert_count % 60 == 0)) {
-        DBG_FRAME("Frame %d converted to RGB - has_content=%d", convert_count, has_content);
-        dbg_dump_framebuffer(ppu->framebuffer, GB_SCREEN_WIDTH);
     }
 }
 

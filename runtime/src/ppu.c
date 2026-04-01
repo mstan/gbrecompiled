@@ -484,8 +484,15 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
             }
             /* Check if LCD is being turned on */
             if (!(ppu->lcdc & LCDC_LCD_ENABLE) && (value & LCDC_LCD_ENABLE)) {
-                fprintf(stderr, "[LCD] ON  — LY=%d mode=%d mode_cycles=%u\n",
-                        ppu->ly, ppu->mode, ppu->mode_cycles);
+                /* LCD re-enabled — start fresh frame from OAM mode */
+                ppu->ly = 0;
+                ppu->mode = PPU_MODE_OAM;
+                ppu->mode_cycles = 0;
+                ppu->window_line = 0;
+                ppu->window_triggered = false;
+                ctx->io[0x44] = 0;
+                update_stat(ppu, ctx);
+                fprintf(stderr, "[LCD] ON  — reset to LY=0 mode=OAM\n");
             }
             ppu->lcdc = value;
             break;

@@ -281,10 +281,8 @@ bool gb_context_save_ram(GBContext* ctx) {
     if(title[0] == 0) strcpy(title, "UNKNOWN_GAME");
     
     bool result = ctx->callbacks.save_battery_ram(ctx, title, ctx->eram, ctx->eram_size);
-    if (result) {
-        printf("[GBRT] Saved battery RAM for '%s'\n", title);
-    } else {
-        printf("[GBRT] Failed to save battery RAM for '%s'\n", title);
+    if (!result) {
+        fprintf(stderr, "[GBRT] Failed to save battery RAM for '%s'\n", title);
     }
     return result;
 }

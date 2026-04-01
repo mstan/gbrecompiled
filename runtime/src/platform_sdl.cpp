@@ -769,15 +769,18 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
 
     g_frame_count++;
 
-    /* Flush battery RAM to disk ~1 second after last ERAM write */
+    /* Flush battery RAM to disk after no ERAM writes for ~5 seconds.
+     * eram_dirty_frame tracks the LAST write, so we debounce properly
+     * even if the game writes ERAM frequently (e.g. RTC updates). */
     if (g_ctx && g_ctx->eram_dirty) {
-        if (g_ctx->eram_dirty_frame == 0) {
-            g_ctx->eram_dirty_frame = g_frame_count;
-        } else if ((uint32_t)(g_frame_count - g_ctx->eram_dirty_frame) > 60) {
-            gb_context_save_ram(g_ctx);
-            g_ctx->eram_dirty = 0;
-            g_ctx->eram_dirty_frame = 0;
-        }
+        /* Update last-write timestamp on each dirty frame */
+        g_ctx->eram_dirty_frame = g_frame_count;
+        g_ctx->eram_dirty = 0;  /* Clear until next write */
+    }
+    if (g_ctx && g_ctx->eram_dirty_frame != 0 &&
+        (uint32_t)(g_frame_count - g_ctx->eram_dirty_frame) > 300) {
+        gb_context_save_ram(g_ctx);
+        g_ctx->eram_dirty_frame = 0;
     }
 
     /* Handle Screenshot Dumping */

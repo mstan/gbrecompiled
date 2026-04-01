@@ -523,9 +523,9 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         return;
     }
     if (addr < 0xA000) {
-        /* VRAM Write - Check STAT mode 3 */
-        // if ((ctx->io[0x41] & 3) == 3) return;
-        
+        /* VRAM Write - blocked during mode 3 (pixel transfer) */
+        if ((ctx->io[0x41] & 3) == 3) return;
+
         ctx->vram[(ctx->vram_bank * VRAM_SIZE) + (addr - 0x8000)] = value;
         return;
     }
@@ -570,11 +570,11 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
     if (addr < 0xD000) { ctx->wram[addr - 0xC000] = value; return; }
     if (addr < 0xE000) { ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)] = value; return; }
     if (addr < 0xFE00) { gb_write8(ctx, addr - 0x2000, value); return; }
-    if (addr < 0xFEA0) { 
-        /* OAM Write - Check STAT mode 2 or 3 */
+    if (addr < 0xFEA0) {
+        /* OAM Write - blocked during mode 2 (OAM scan) and mode 3 (pixel transfer) */
         uint8_t stat = ctx->io[0x41] & 3;
-        // if (stat == 2 || stat == 3) return;
-        
+        if (stat == 2 || stat == 3) return;
+
         ctx->oam[addr - 0xFE00] = value; 
         return; 
     }

@@ -520,7 +520,7 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
                 ctx->io[0x44] = 0;
                 /* Clear frame ready to avoid stale frame rendering */
                 ppu->frame_ready = false;
-                fprintf(stderr, "[LCD] OFF — LY reset to 0, mode=HBLANK\n");
+                DBG_PPU("LCD OFF — LY reset to 0, mode=HBLANK");
             }
             /* Check if LCD is being turned on */
             if (!(ppu->lcdc & LCDC_LCD_ENABLE) && (value & LCDC_LCD_ENABLE)) {
@@ -532,7 +532,7 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
                 ppu->window_triggered = false;
                 ctx->io[0x44] = 0;
                 update_stat(ppu, ctx);
-                fprintf(stderr, "[LCD] ON  — reset to LY=0 mode=OAM\n");
+                DBG_PPU("LCD ON — reset to LY=0 mode=OAM");
             }
             ppu->lcdc = value;
             break;

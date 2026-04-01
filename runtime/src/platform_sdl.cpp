@@ -322,6 +322,10 @@ static uint32_t g_audio_device_sample_rate = AUDIO_SAMPLE_RATE;
 static uint32_t g_audio_samples_written = 0;
 static uint32_t g_audio_underruns = 0;
 
+/* Last valid sample for smooth underrun handling */
+static int16_t g_last_sample_l = 0;
+static int16_t g_last_sample_r = 0;
+
 static uint32_t audio_ring_fill_samples(void) {
     uint32_t write_pos = g_audio_write_pos.load(std::memory_order_acquire);
     uint32_t read_pos = g_audio_read_pos.load(std::memory_order_acquire);
@@ -332,30 +336,66 @@ static void update_audio_stats_from_ring(void) {
     audio_stats_update_buffer(audio_ring_fill_samples(), AUDIO_RING_SIZE, g_audio_device_sample_rate);
 }
 
-/* SDL callback - pulls samples from ring buffer */
+/* SDL callback - pulls samples from ring buffer.
+ * On underrun, holds the last valid sample with a gentle fade-out
+ * instead of inserting silence, which eliminates audible pops. */
 static void sdl_audio_callback(void* userdata, Uint8* stream, int len) {
     (void)userdata;
     int16_t* out = (int16_t*)stream;
     int samples_needed = len / 4;  /* Stereo 16-bit = 4 bytes per sample */
-    
+
     uint32_t write_pos = g_audio_write_pos.load(std::memory_order_acquire);
     uint32_t read_pos = g_audio_read_pos.load(std::memory_order_relaxed);
-    
-    for (int i = 0; i < samples_needed; i++) {
-        if (read_pos != write_pos) {
-            /* Have data - copy it */
-            out[i * 2] = g_audio_ring[read_pos * 2];
+
+    /* Count available samples */
+    uint32_t available = (write_pos >= read_pos)
+        ? (write_pos - read_pos)
+        : (AUDIO_RING_SIZE - read_pos + write_pos);
+
+    if (available >= (uint32_t)samples_needed) {
+        /* Normal path — enough samples */
+        for (int i = 0; i < samples_needed; i++) {
+            out[i * 2]     = g_audio_ring[read_pos * 2];
             out[i * 2 + 1] = g_audio_ring[read_pos * 2 + 1];
             read_pos = (read_pos + 1) % AUDIO_RING_SIZE;
-        } else {
-            /* Underrun - output silence */
-            out[i * 2] = 0;
-            out[i * 2 + 1] = 0;
-            g_audio_underruns++;
-            audio_stats_underrun();
         }
+        g_last_sample_l = out[(samples_needed - 1) * 2];
+        g_last_sample_r = out[(samples_needed - 1) * 2 + 1];
+    } else if (available > 0) {
+        /* Partial underrun — consume what's available, then hold last sample
+         * with gentle fade to mask the gap until the emulator catches up. */
+        int i = 0;
+        for (; i < (int)available; i++) {
+            out[i * 2]     = g_audio_ring[read_pos * 2];
+            out[i * 2 + 1] = g_audio_ring[read_pos * 2 + 1];
+            read_pos = (read_pos + 1) % AUDIO_RING_SIZE;
+        }
+        g_last_sample_l = out[(i - 1) * 2];
+        g_last_sample_r = out[(i - 1) * 2 + 1];
+
+        /* Fade out from last sample over remaining slots */
+        int fade_len = samples_needed - i;
+        for (int j = 0; j < fade_len; j++) {
+            /* Linear fade: full → zero over the remaining samples */
+            int32_t scale = (fade_len - j) * 256 / fade_len;
+            out[(i + j) * 2]     = (int16_t)((g_last_sample_l * scale) >> 8);
+            out[(i + j) * 2 + 1] = (int16_t)((g_last_sample_r * scale) >> 8);
+        }
+        g_audio_underruns++;
+        audio_stats_underrun();
+    } else {
+        /* Full underrun — fade from last known sample */
+        for (int i = 0; i < samples_needed; i++) {
+            int32_t scale = (samples_needed - i) * 256 / samples_needed;
+            out[i * 2]     = (int16_t)((g_last_sample_l * scale) >> 8);
+            out[i * 2 + 1] = (int16_t)((g_last_sample_r * scale) >> 8);
+        }
+        g_last_sample_l = 0;
+        g_last_sample_r = 0;
+        g_audio_underruns++;
+        audio_stats_underrun();
     }
-    
+
     g_audio_read_pos.store(read_pos, std::memory_order_release);
 }
 

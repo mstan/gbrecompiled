@@ -10,8 +10,10 @@
 #define RECOMPILER_CODEGEN_EMITTER_H
 
 #include "../ir/ir.h"
+#include <cstdint>
 #include <string>
 #include <ostream>
+#include <vector>
 
 namespace gbrecomp {
 namespace codegen {
@@ -36,6 +38,9 @@ struct GeneratorOptions {
     
     // Bank handling
     bool generate_bank_dispatch = true;  // Generate runtime bank dispatch
+
+    // Valid CRC32s for multi-version ROM support
+    std::vector<uint32_t> valid_crcs;
 };
 
 /**

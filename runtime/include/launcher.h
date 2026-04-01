@@ -23,6 +23,13 @@ const char *launcher_get_rom_path(void);
 void launcher_set_expected_crc32(unsigned int crc32);
 
 /**
+ * Add a valid CRC32 to the accepted list.
+ * When multiple CRCs are added, the ROM is accepted if it matches ANY of them.
+ * This is useful for games with multiple valid ROM versions (e.g. Red and Blue).
+ */
+void launcher_add_valid_crc32(unsigned int crc32);
+
+/**
  * Load a ROM file into a malloc'd buffer.
  * Caller must free the returned buffer.
  * Sets *out_size to the file size.

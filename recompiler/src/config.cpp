@@ -40,6 +40,18 @@ std::optional<GameConfig> load_config(const std::string& path) {
         if (auto r = rom->get("runtime_dir")) {
             config.runtime_dir = r->value_or(std::string{});
         }
+        if (auto p = rom->get("output_prefix")) {
+            config.output_prefix = p->value_or(std::string{});
+        }
+        if (auto crcs = rom->get("valid_crcs")) {
+            if (auto arr = crcs->as_array()) {
+                for (auto& elem : *arr) {
+                    if (auto v = elem.value<int64_t>()) {
+                        config.valid_crcs.push_back(static_cast<uint32_t>(*v));
+                    }
+                }
+            }
+        }
     }
 
     // [options]

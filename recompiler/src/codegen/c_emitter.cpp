@@ -1948,8 +1948,15 @@ GeneratedOutput generate_output(const ir::Program& program,
         source_ss << "void " << options.output_prefix << "_init(GBContext* ctx) {\n";
         source_ss << "    /* Load ROM from file via launcher */\n";
         source_ss << "    launcher_init();\n";
-        source_ss << "    launcher_set_expected_crc32(0x" << std::hex << std::setfill('0')
-                   << std::setw(8) << crc << std::dec << ");\n";
+        if (!options.valid_crcs.empty()) {
+            for (uint32_t vcrc : options.valid_crcs) {
+                source_ss << "    launcher_add_valid_crc32(0x" << std::hex << std::setfill('0')
+                           << std::setw(8) << vcrc << std::dec << ");\n";
+            }
+        } else {
+            source_ss << "    launcher_set_expected_crc32(0x" << std::hex << std::setfill('0')
+                       << std::setw(8) << crc << std::dec << ");\n";
+        }
     }
     source_ss << "    const char *rom_path = launcher_get_rom_path();\n";
     source_ss << "    if (!rom_path) {\n";

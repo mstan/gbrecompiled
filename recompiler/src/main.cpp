@@ -341,12 +341,17 @@ int main(int argc, char* argv[]) {
     std::cout << "\nGenerating C code...\n";
     
     gbrecomp::codegen::GeneratorOptions gen_opts;
-    gen_opts.output_prefix = sanitize_prefix(fs::path(rom_path).stem().string());
+    if (!game_config.output_prefix.empty()) {
+        gen_opts.output_prefix = game_config.output_prefix;
+    } else {
+        gen_opts.output_prefix = sanitize_prefix(fs::path(rom_path).stem().string());
+    }
     gen_opts.output_dir = output_dir;
     gen_opts.emit_comments = emit_comments;
     gen_opts.single_function_mode = single_function;
     gen_opts.runtime_dir = game_config.runtime_dir;
-    
+    gen_opts.valid_crcs = game_config.valid_crcs;
+
     auto output = gbrecomp::codegen::generate_output(
         ir_program, rom.data(), rom.size(), gen_opts);
     

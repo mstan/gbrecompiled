@@ -27,6 +27,7 @@ struct GameConfig {
     std::string rom_path;
     std::string output_dir;
     std::string runtime_dir;  // Path to runtime/ (relative to output_dir)
+    std::string output_prefix;  // Override for generated symbol/file prefix
 
     // Options (all optional — unset means "use default / CLI value")
     std::optional<bool> verbose;
@@ -46,6 +47,9 @@ struct GameConfig {
 
     // Data regions (excluded from code analysis)
     std::vector<DataRegionConfig> data_regions;
+
+    // Valid CRC32s (for multi-version ROM support, e.g. Red + Blue)
+    std::vector<uint32_t> valid_crcs;
 };
 
 // Load config from TOML file. Returns nullopt on parse error.

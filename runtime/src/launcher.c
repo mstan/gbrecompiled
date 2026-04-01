@@ -22,6 +22,10 @@ static char s_cfg_path[512] = {0};
 static char s_rom_path[512] = {0};
 static unsigned int s_expected_crc32 = 0;
 
+#define MAX_VALID_CRCS 8
+static unsigned int s_valid_crcs[MAX_VALID_CRCS];
+static int s_valid_crc_count = 0;
+
 /* ── CRC32 ────────────────────────────────────────────────────────────────── */
 
 static unsigned int crc32_table[256];
@@ -47,6 +51,12 @@ static unsigned int crc32_compute(const unsigned char *data, unsigned int len) {
 
 void launcher_set_expected_crc32(unsigned int crc32) {
     s_expected_crc32 = crc32;
+}
+
+void launcher_add_valid_crc32(unsigned int crc32) {
+    if (s_valid_crc_count < MAX_VALID_CRCS) {
+        s_valid_crcs[s_valid_crc_count++] = crc32;
+    }
 }
 
 void launcher_init(void) {
@@ -109,7 +119,7 @@ static int file_exists(const char *path) {
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 static int verify_rom_crc(const char *path) {
-    if (s_expected_crc32 == 0) return 1;
+    if (s_expected_crc32 == 0 && s_valid_crc_count == 0) return 1;
 
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -125,19 +135,25 @@ static int verify_rom_crc(const char *path) {
     unsigned int actual = crc32_compute(data, (unsigned int)sz);
     free(data);
 
-    if (actual != s_expected_crc32) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
-            "ROM CRC32 mismatch!\n\nExpected: %08X\nGot:      %08X\n\n"
-            "Please select the correct ROM file.",
-            s_expected_crc32, actual);
-        fprintf(stderr, "[Launcher] %s\n", msg);
-#ifdef _WIN32
-        MessageBoxA(NULL, msg, "Wrong ROM", MB_ICONWARNING | MB_OK);
-#endif
-        return 0;
+    /* Check against valid CRC list first */
+    if (s_valid_crc_count > 0) {
+        for (int i = 0; i < s_valid_crc_count; i++) {
+            if (actual == s_valid_crcs[i]) return 1;
+        }
+    } else if (actual == s_expected_crc32) {
+        return 1;
     }
-    return 1;
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+        "ROM CRC32 mismatch!\n\nGot: %08X\n\n"
+        "Please select a valid ROM file.",
+        actual);
+    fprintf(stderr, "[Launcher] %s\n", msg);
+#ifdef _WIN32
+    MessageBoxA(NULL, msg, "Wrong ROM", MB_ICONWARNING | MB_OK);
+#endif
+    return 0;
 }
 
 const char *launcher_get_rom_path(void) {

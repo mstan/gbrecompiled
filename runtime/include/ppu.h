@@ -119,6 +119,10 @@ typedef struct GBPPU {
     uint32_t mode_cycles;     /* Cycles in current mode */
     uint8_t window_line;      /* Current window internal line counter */
     bool window_triggered;    /* Window was triggered this frame */
+
+    /* Latched scroll registers (sampled at start of each scanline) */
+    uint8_t latched_scx;
+    uint8_t latched_scy;
     
     /* Framebuffer (2-bit color indices) */
     uint8_t framebuffer[GB_FRAMEBUFFER_SIZE];

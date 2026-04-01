@@ -162,9 +162,9 @@ static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
             uint8_t bit = 7 - pixel_x;
             color = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
         } else if (bg_enable) {
-            /* Render background */
-            int bg_x = (x + ppu->scx) & 0xFF;
-            int bg_y = (scanline + ppu->scy) & 0xFF;
+            /* Render background using latched scroll values */
+            int bg_x = (x + ppu->latched_scx) & 0xFF;
+            int bg_y = (scanline + ppu->latched_scy) & 0xFF;
             
             /* Get tile from background tilemap */
             uint16_t tilemap_addr = get_bg_tilemap_addr(ppu);
@@ -362,6 +362,9 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
         case PPU_MODE_OAM:
             if (ppu->mode_cycles >= CYCLES_OAM_SCAN) {
                 ppu->mode_cycles -= CYCLES_OAM_SCAN;
+                /* Latch scroll registers for this scanline */
+                ppu->latched_scx = ppu->scx;
+                ppu->latched_scy = ppu->scy;
                 ppu->mode = PPU_MODE_DRAW;
                 update_stat(ppu, ctx);
             }

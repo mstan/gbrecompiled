@@ -1934,16 +1934,37 @@ GeneratedOutput generate_output(const ir::Program& program,
         out << "}\n\n";
     }
     
-    // Extern reference to ROM data
-    source_ss << "/* Extern reference to ROM data */\n";
-    source_ss << "extern const uint8_t rom_data[];\n\n";
-    
-    // Emit init and run functions
-    source_ss << "void " << options.output_prefix << "_init(GBContext* ctx) {\n";
-    source_ss << "    /* Load ROM data into context */\n";
-    source_ss << "    gb_context_load_rom(ctx, rom_data, " << rom_size << ");\n";
-    source_ss << "    /* Set MBC type from header */\n";
+    // Compute ROM CRC32 at codegen time
+    {
+        uint32_t crc = 0xFFFFFFFF;
+        for (size_t i = 0; i < rom_size; i++) {
+            crc ^= rom_data[i];
+            for (int j = 0; j < 8; j++)
+                crc = (crc >> 1) ^ (crc & 1 ? 0xEDB88320u : 0);
+        }
+        crc ^= 0xFFFFFFFF;
+        source_ss << "#include \"launcher.h\"\n";
+        source_ss << "#include <stdlib.h>\n\n";
+        source_ss << "void " << options.output_prefix << "_init(GBContext* ctx) {\n";
+        source_ss << "    /* Load ROM from file via launcher */\n";
+        source_ss << "    launcher_init();\n";
+        source_ss << "    launcher_set_expected_crc32(0x" << std::hex << std::setfill('0')
+                   << std::setw(8) << crc << std::dec << ");\n";
+    }
+    source_ss << "    const char *rom_path = launcher_get_rom_path();\n";
+    source_ss << "    if (!rom_path) {\n";
+    source_ss << "        fprintf(stderr, \"No ROM selected — exiting.\\n\");\n";
+    source_ss << "        exit(1);\n";
+    source_ss << "    }\n";
+    source_ss << "    unsigned int rom_size = 0;\n";
+    source_ss << "    unsigned char *rom_data = launcher_load_rom(rom_path, &rom_size);\n";
+    source_ss << "    if (!rom_data) {\n";
+    source_ss << "        fprintf(stderr, \"Failed to load ROM: %s\\n\", rom_path);\n";
+    source_ss << "        exit(1);\n";
+    source_ss << "    }\n";
+    source_ss << "    gb_context_load_rom(ctx, rom_data, rom_size);\n";
     source_ss << "    ctx->mbc_type = rom_data[0x147];\n";
+    source_ss << "    free(rom_data);\n";
     source_ss << "}\n\n";
     
     source_ss << "void " << options.output_prefix << "_run(GBContext* ctx) {\n";
@@ -1962,23 +1983,8 @@ GeneratedOutput generate_output(const ir::Program& program,
         output.bank_sources[bank] = ss.str();
     }
 
-    // Generate ROM data
-    std::ostringstream rom_ss;
-    rom_ss << "/* ROM data */\n";
-    rom_ss << "#include <stdint.h>\n";
-    rom_ss << "#include <stddef.h>\n\n";
-    rom_ss << "const uint8_t rom_data[" << rom_size << "] = {\n";
-    for (size_t i = 0; i < rom_size; i++) {
-        if (i % 16 == 0) rom_ss << "    ";
-        rom_ss << "0x" << std::hex << std::setfill('0') << std::setw(2) 
-               << (int)rom_data[i];
-        if (i < rom_size - 1) rom_ss << ",";
-        if (i % 16 == 15 || i == rom_size - 1) rom_ss << "\n";
-        else rom_ss << " ";
-    }
-    rom_ss << std::dec << "};\n";
-    rom_ss << "const size_t rom_size = " << rom_size << ";\n";
-    output.rom_data_content = rom_ss.str();
+    // ROM data is now loaded at runtime via launcher — generate empty stub
+    output.rom_data_content = "/* ROM loaded at runtime via launcher */\n";
     output.rom_data_file = options.output_prefix + "_rom.c";
     
     // Generate main
@@ -2135,6 +2141,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     cmake_ss << "    ${GBRT_DIR}/src/debug_server.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/game_extras_default.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/keybinds.c\n";
+    cmake_ss << "    ${GBRT_DIR}/src/launcher.c\n";
     cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
     cmake_ss << ")\n\n";
 
@@ -2155,7 +2162,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     cmake_ss << ")\n";
     cmake_ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
     cmake_ss << "if(WIN32)\n";
-    cmake_ss << "    target_link_libraries(gbrt PUBLIC ws2_32)\n";
+    cmake_ss << "    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32)\n";
     cmake_ss << "endif()\n";
     cmake_ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
     cmake_ss << "# Main executable\n";

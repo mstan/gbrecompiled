@@ -115,87 +115,110 @@ static uint8_t apply_palette(uint8_t color, uint8_t palette) {
 }
 
 /**
- * @brief Render background/window for current scanline
+ * @brief Render background/window for current scanline (tile-optimized)
+ *
+ * Instead of per-pixel tile lookups, fetch each tile row once and decode
+ * all 8 pixels from it. This reduces VRAM reads from ~640/scanline to ~40.
  */
 static void render_bg_scanline(GBPPU* ppu, GBContext* ctx, uint8_t* bg_prio) {
     uint8_t scanline = ppu->ly;
-    
+    uint8_t *fb_row = &ppu->framebuffer[scanline * GB_SCREEN_WIDTH];
+
     if (!(ppu->lcdc & LCDC_LCD_ENABLE)) {
-        /* LCD disabled - blank line */
-        memset(&ppu->framebuffer[scanline * GB_SCREEN_WIDTH], 0, GB_SCREEN_WIDTH);
+        memset(fb_row, 0, GB_SCREEN_WIDTH);
         if (bg_prio) memset(bg_prio, 0, GB_SCREEN_WIDTH);
         return;
     }
-    
+
     bool bg_enable = (ppu->lcdc & LCDC_BG_ENABLE);
-    /* Note: on DMG, LCDC_BG_ENABLE (bit 0) also controls Master Enable (BG+Window). 
-       On CGB, it controls priority. Assuming DMG mostly here. */
-    /* Window triggers when WY matches the current scanline. Once triggered,
-       it stays active for the rest of the frame (window_line increments).
-       This prevents WY changes mid-frame from incorrectly activating the window. */
     bool window_hw_enable = bg_enable && (ppu->lcdc & LCDC_WINDOW_ENABLE) && (ppu->wx <= 166);
     if (window_hw_enable && !ppu->window_triggered && ppu->wy == scanline) {
         ppu->window_triggered = true;
     }
     bool window_enable = window_hw_enable && ppu->window_triggered;
-    
-    for (int x = 0; x < GB_SCREEN_WIDTH; x++) {
-        uint8_t color = 0;
-        
-        /* Check if we're in window area */
-        bool in_window = window_enable && (x >= (ppu->wx - 7));
-        
-        if (in_window) {
-            /* Render window */
-            int win_x = x - (ppu->wx - 7);
-            int win_y = ppu->window_line;
-            
-            /* Get tile from window tilemap */
-            uint16_t tilemap_addr = get_window_tilemap_addr(ppu);
-            uint8_t tile_x = win_x / 8;
-            uint8_t tile_y = win_y / 8;
-            uint8_t tile_idx = vram_read(ctx, tilemap_addr + tile_y * 32 + tile_x);
-            
-            /* Get pixel from tile */
-            uint16_t tile_addr = get_tile_data_addr(ppu, tile_idx, false);
-            uint8_t pixel_y = win_y % 8;
-            uint8_t pixel_x = win_x % 8;
-            
-            uint8_t lo = vram_read(ctx, tile_addr + pixel_y * 2);
-            uint8_t hi = vram_read(ctx, tile_addr + pixel_y * 2 + 1);
-            
-            uint8_t bit = 7 - pixel_x;
-            color = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
-        } else if (bg_enable) {
-            /* Render background using latched scroll values */
-            int bg_x = (x + ppu->latched_scx) & 0xFF;
-            int bg_y = (scanline + ppu->latched_scy) & 0xFF;
-            
-            /* Get tile from background tilemap */
-            uint16_t tilemap_addr = get_bg_tilemap_addr(ppu);
-            uint8_t tile_x = bg_x / 8;
-            uint8_t tile_y = bg_y / 8;
-            uint8_t tile_idx = vram_read(ctx, tilemap_addr + tile_y * 32 + tile_x);
-            
-            /* Get pixel from tile */
-            uint16_t tile_addr = get_tile_data_addr(ppu, tile_idx, false);
-            uint8_t pixel_y = bg_y % 8;
-            uint8_t pixel_x = bg_x % 8;
-            
-            uint8_t lo = vram_read(ctx, tile_addr + pixel_y * 2);
-            uint8_t hi = vram_read(ctx, tile_addr + pixel_y * 2 + 1);
-            
-            uint8_t bit = 7 - pixel_x;
-            color = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+
+    /* Pre-compute values constant across the scanline */
+    uint8_t bgp = ppu->bgp;
+    uint8_t *vram = ctx->vram;  /* Direct VRAM pointer (no bounds checks) */
+    bool use_8000 = (ppu->lcdc & LCDC_TILE_DATA) != 0;
+
+    /* Background constants */
+    uint16_t bg_tilemap = ((ppu->lcdc & LCDC_BG_TILEMAP) ? 0x9C00 : 0x9800) - 0x8000;
+    int bg_y = (scanline + ppu->latched_scy) & 0xFF;
+    int bg_tile_row = (bg_y / 8) * 32;  /* Row offset in tilemap */
+    int bg_pixel_y = bg_y & 7;          /* Y within tile */
+
+    /* Window constants */
+    int win_start_x = window_enable ? (ppu->wx - 7) : 256; /* off-screen if disabled */
+    uint16_t win_tilemap = ((ppu->lcdc & LCDC_WINDOW_TILEMAP) ? 0x9C00 : 0x9800) - 0x8000;
+    int win_y = ppu->window_line;
+    int win_tile_row = (win_y / 8) * 32;
+    int win_pixel_y = win_y & 7;
+
+    int x = 0;
+
+    /* === Render background portion (before window) === */
+    if (bg_enable && win_start_x > 0) {
+        int bg_end = (win_start_x < GB_SCREEN_WIDTH) ? win_start_x : GB_SCREEN_WIDTH;
+        int bg_x = (ppu->latched_scx) & 0xFF;
+
+        while (x < bg_end) {
+            /* Fetch tile */
+            uint8_t tile_idx = vram[bg_tilemap + bg_tile_row + (bg_x >> 3)];
+            uint16_t tile_base;
+            if (use_8000) {
+                tile_base = tile_idx * 16;
+            } else {
+                tile_base = 0x1000 + (int8_t)tile_idx * 16;
+            }
+            uint8_t lo = vram[tile_base + bg_pixel_y * 2];
+            uint8_t hi = vram[tile_base + bg_pixel_y * 2 + 1];
+
+            /* Decode pixels from this tile */
+            int start_bit = bg_x & 7;
+            for (int bit = start_bit; bit < 8 && x < bg_end; bit++, x++) {
+                uint8_t shift = 7 - bit;
+                uint8_t color = ((lo >> shift) & 1) | (((hi >> shift) & 1) << 1);
+                fb_row[x] = (bgp >> (color * 2)) & 0x03;
+                if (bg_prio) bg_prio[x] = color;
+            }
+            bg_x = (bg_x + (8 - start_bit)) & 0xFF;
         }
-        
-        /* Apply palette and store */
-        ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = apply_palette(color, ppu->bgp);
-        if (bg_prio) bg_prio[x] = color;
+    } else if (!bg_enable) {
+        /* BG disabled — fill with color 0 */
+        int bg_end = (win_start_x < GB_SCREEN_WIDTH) ? win_start_x : GB_SCREEN_WIDTH;
+        for (; x < bg_end; x++) {
+            fb_row[x] = bgp & 0x03;
+            if (bg_prio) bg_prio[x] = 0;
+        }
     }
-    
-    /* Increment window line counter if window was used */
-    if (ppu->window_triggered && window_enable) {
+
+    /* === Render window portion === */
+    if (window_enable && x < GB_SCREEN_WIDTH) {
+        if (x < win_start_x) x = win_start_x;
+        int win_x = x - win_start_x;
+
+        while (x < GB_SCREEN_WIDTH) {
+            uint8_t tile_idx = vram[win_tilemap + win_tile_row + (win_x >> 3)];
+            uint16_t tile_base;
+            if (use_8000) {
+                tile_base = tile_idx * 16;
+            } else {
+                tile_base = 0x1000 + (int8_t)tile_idx * 16;
+            }
+            uint8_t lo = vram[tile_base + win_pixel_y * 2];
+            uint8_t hi = vram[tile_base + win_pixel_y * 2 + 1];
+
+            int start_bit = win_x & 7;
+            for (int bit = start_bit; bit < 8 && x < GB_SCREEN_WIDTH; bit++, x++, win_x++) {
+                uint8_t shift = 7 - bit;
+                uint8_t color = ((lo >> shift) & 1) | (((hi >> shift) & 1) << 1);
+                fb_row[x] = (bgp >> (color * 2)) & 0x03;
+                if (bg_prio) bg_prio[x] = color;
+            }
+        }
+        ppu->window_line++;
+    } else if (ppu->window_triggered && window_enable) {
         ppu->window_line++;
     }
 }
@@ -225,42 +248,44 @@ static void render_sprites_scanline(GBPPU* ppu, GBContext* ctx, const uint8_t* b
     }
     
     /* Render sprites in reverse order (priority - lower index = higher priority) */
+    uint8_t *vram = ctx->vram;
+    uint8_t *fb_row = &ppu->framebuffer[scanline * GB_SCREEN_WIDTH];
+
     for (int i = sprite_count - 1; i >= 0; i--) {
         OAMEntry* sprite = (OAMEntry*)(ctx->oam + sprites[i] * 4);
-        int sprite_y = sprite->y - 16;
         int sprite_x = sprite->x - 8;
-        
+
+        /* Skip sprites entirely off-screen */
+        if (sprite_x <= -8 || sprite_x >= GB_SCREEN_WIDTH) continue;
+
         uint8_t tile_idx = sprite->tile;
-        if (sprite_height == 16) {
-            tile_idx &= 0xFE;  /* Clear bit 0 for 8x16 sprites */
-        }
-        
-        int line = scanline - sprite_y;
-        if (sprite->flags & OAM_FLIP_Y) {
-            line = sprite_height - 1 - line;
-        }
-        
-        uint16_t tile_addr = 0x8000 + tile_idx * 16 + line * 2;
-        uint8_t lo = vram_read(ctx, tile_addr);
-        uint8_t hi = vram_read(ctx, tile_addr + 1);
-        
+        if (sprite_height == 16) tile_idx &= 0xFE;
+
+        int line = scanline - (sprite->y - 16);
+        if (sprite->flags & OAM_FLIP_Y) line = sprite_height - 1 - line;
+
+        /* Direct VRAM access (sprites always use 0x8000 addressing) */
+        uint16_t tile_off = tile_idx * 16 + line * 2;
+        uint8_t lo = vram[tile_off];
+        uint8_t hi = vram[tile_off + 1];
+
         uint8_t palette = (sprite->flags & OAM_PALETTE) ? ppu->obp1 : ppu->obp0;
         bool behind_bg = (sprite->flags & OAM_PRIORITY);
-        
-        for (int px = 0; px < 8; px++) {
-            int screen_x = sprite_x + px;
-            if (screen_x < 0 || screen_x >= GB_SCREEN_WIDTH) continue;
-            
-            int bit_pos = (sprite->flags & OAM_FLIP_X) ? px : (7 - px);
+        bool flip_x = (sprite->flags & OAM_FLIP_X);
+
+        /* Clamp pixel loop to visible range */
+        int px_start = (sprite_x < 0) ? -sprite_x : 0;
+        int px_end = (sprite_x + 8 > GB_SCREEN_WIDTH) ? (GB_SCREEN_WIDTH - sprite_x) : 8;
+
+        for (int px = px_start; px < px_end; px++) {
+            int bit_pos = flip_x ? px : (7 - px);
             uint8_t color = ((lo >> bit_pos) & 1) | (((hi >> bit_pos) & 1) << 1);
-            
-            if (color == 0) continue;  /* Color 0 is transparent */
-            
-            /* Check priority */
-            uint8_t bg_raw_color = bg_prio ? bg_prio[screen_x] : 0;
-            if (behind_bg && bg_raw_color != 0) continue;
-            
-            ppu->framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] = apply_palette(color, palette);
+            if (color == 0) continue;
+
+            int screen_x = sprite_x + px;
+            if (behind_bg && bg_prio && bg_prio[screen_x] != 0) continue;
+
+            fb_row[screen_x] = (palette >> (color * 2)) & 0x03;
         }
     }
 }

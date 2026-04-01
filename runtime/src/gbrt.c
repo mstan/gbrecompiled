@@ -923,96 +923,78 @@ static void gb_dma_tick(GBContext* ctx, uint32_t cycles) {
 }
 
 void gb_tick(GBContext* ctx, uint32_t cycles) {
-    static uint32_t last_log = 0;
-    
-    // Check limit
-    if (gbrt_instruction_limit > 0) {
-        gbrt_instruction_count++;
-        if (gbrt_instruction_count >= gbrt_instruction_limit) {
+    ctx->cycles += cycles;
+    ctx->frame_cycles += cycles;
+
+    /* Update DIV (always running) */
+    uint16_t old_div = ctx->div_counter;
+    ctx->div_counter += (uint16_t)cycles;
+    ctx->io[0x04] = (uint8_t)(ctx->div_counter >> 8);
+
+    /* Audio DIV tick (frame sequencer) */
+    if (ctx->apu) gb_audio_div_tick(ctx->apu, old_div, ctx->div_counter);
+
+    /* TIMA — only when timer is enabled */
+    if (ctx->io[0x07] & 0x04) {
+        static const uint16_t tima_masks[4] = {
+            1 << 9,  /* 4096 Hz */
+            1 << 3,  /* 262144 Hz */
+            1 << 5,  /* 65536 Hz */
+            1 << 7   /* 16384 Hz */
+        };
+        uint16_t mask = tima_masks[ctx->io[0x07] & 0x03];
+        uint16_t period = mask << 1;
+
+        /* Fast check: did the selected bit have a falling edge? */
+        uint16_t xor_bits = old_div ^ ctx->div_counter;
+        if (xor_bits & mask) {
+            /* At least one edge — count falling edges */
+            uint16_t current = old_div;
+            uint32_t cycles_left = cycles;
+            while (cycles_left > 0) {
+                uint16_t next_fall = (current | (period - 1)) + 1;
+                uint32_t dist = (uint16_t)(next_fall - current);
+                if (dist == 0) dist = period;
+                if (cycles_left >= dist) {
+                    if (ctx->io[0x05] == 0xFF) {
+                        ctx->io[0x05] = ctx->io[0x06];
+                        ctx->io[0x0F] |= 0x04;
+                    } else {
+                        ctx->io[0x05]++;
+                    }
+                    current += (uint16_t)dist;
+                    cycles_left -= dist;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /* RTC & DMA (cheap — early-out when inactive) */
+    gb_rtc_tick(ctx, cycles);
+    gb_dma_tick(ctx, cycles);
+
+    /* PPU sync — batch updates, only sync when enough cycles accumulate
+       or when interrupts are pending */
+    if ((ctx->cycles & 0xFF) < cycles || (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) {
+        gb_sync(ctx);
+        if (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F)) ctx->stopped = 1;
+    }
+
+    /* Audio sample generation */
+    if (ctx->apu) gb_audio_step(ctx, cycles);
+
+    /* Delayed IME enable (after EI instruction) */
+    if (ctx->ime_pending) { ctx->ime = 1; ctx->ime_pending = 0; }
+
+    /* Debug features — only checked when enabled */
+    if (__builtin_expect(gbrt_instruction_limit > 0, 0)) {
+        if (++gbrt_instruction_count >= gbrt_instruction_limit) {
             printf("Instruction limit reached (%llu)\n", (unsigned long long)gbrt_instruction_limit);
             exit(0);
         }
     }
-
-    if (gbrt_trace_enabled && ctx->cycles - last_log >= 10000) {
-        last_log = ctx->cycles;
-        fprintf(stderr, "[TICK] Cycles: %u, PC: 0x%04X, IME: %d, IF: 0x%02X, IE: 0x%02X\n", 
-                ctx->cycles, ctx->pc, ctx->ime, ctx->io[0x0F], ctx->io[0x80]);
-    }
-    gb_add_cycles(ctx, cycles);
-    
-    /* RTC Tick */
-    gb_rtc_tick(ctx, cycles);
-    
-    /* OAM DMA Tick */
-    gb_dma_tick(ctx, cycles);
-
-    /* Update DIV and TIMA */
-    uint16_t old_div = ctx->div_counter;
-    ctx->div_counter += (uint16_t)cycles;
-    ctx->io[0x04] = (uint8_t)(ctx->div_counter >> 8);
-    if (ctx->apu) gb_audio_div_tick(ctx->apu, old_div, ctx->div_counter);
-    
-    uint8_t tac = ctx->io[0x07];
-    if (tac & 0x04) { /* Timer Enabled */
-        uint16_t mask;
-        switch (tac & 0x03) {
-            case 0: mask = 1 << 9; break; /* 4096 Hz (1024 cycles) -> bit 9 */
-            case 1: mask = 1 << 3; break; /* 262144 Hz (16 cycles) -> bit 3 */
-            case 2: mask = 1 << 5; break; /* 65536 Hz (64 cycles) -> bit 5 */
-            case 3: mask = 1 << 7; break; /* 16384 Hz (256 cycles) -> bit 7 */
-            default: mask = 0; break;
-        }
-        
-        /* Check for falling edges.
-           We detect how many times the bit flipped from 1 to 0.
-           The bit flips every 'mask' cycles (period is 2*mask).
-           We iterate to find all falling edges in the range. 
-        */
-        uint16_t current = old_div;
-        uint32_t cycles_left = cycles;
-        
-        /* Optimization: if cycles are small (common case), doing a loop is fine. */
-        while (cycles_left > 0) {
-            /* Next falling edge is at next multiple of (2*mask) */
-            uint16_t next_fall = (current | (mask * 2 - 1)) + 1;
-            
-            /* Distance to next fall */
-            uint32_t dist = (uint16_t)(next_fall - current);
-            if (dist == 0) dist = mask * 2; /* Should happen if current is exactly on edge? */
-            
-            /* Check if we reach the fall */
-            if (cycles_left >= dist) {
-                /* Validate it is a falling edge for the selected bit?
-                   next_fall is the transition 11...1 -> 00...0 for bits < bit+1.
-                   Bit 'mask' definitely transitions. 
-                   Wait, next multiple of 2*mask means mask bit becomes 0.
-                   So yes, next_fall is a falling edge point.
-                */
-                if (ctx->io[0x05] == 0xFF) { 
-                    ctx->io[0x05] = ctx->io[0x06]; /* Reload TMA */
-                    ctx->io[0x0F] |= 0x04;         /* Request Timer Interrupt */
-                } else {
-                    ctx->io[0x05]++;
-                }
-                current += (uint16_t)dist;
-                cycles_left -= dist;
-            } else {
-                break;
-            }
-        }
-    }
-    
-    if ((ctx->cycles & 0xFF) < cycles || (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) {
-        gb_sync(ctx);
-        /* Only stop for pending interrupts, NOT for frame_done.
-         * frame_done is checked by gb_run_frame's loop condition.
-         * Setting stopped here for frame_done would abort the VBlank handler
-         * mid-execution (e.g. ReadJoypad never completes). */
-        if (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F)) ctx->stopped = 1;
-    }
-    if (ctx->apu) gb_audio_step(ctx, cycles);
-    if (ctx->ime_pending) { ctx->ime = 1; ctx->ime_pending = 0; }
 }
 
 void gb_handle_interrupts(GBContext* ctx) {

@@ -123,6 +123,11 @@ typedef struct GBPPU {
     /* Latched scroll registers (sampled at start of each scanline) */
     uint8_t latched_scx;
     uint8_t latched_scy;
+
+    /* Per-scanline timing (computed during OAM scan) */
+    uint32_t scanline_draw_cycles;   /* Variable mode 3 duration */
+    uint32_t scanline_hblank_cycles; /* Adjusted mode 0 duration */
+    uint8_t  scanline_sprite_count;  /* Sprites found on this line */
     
     /* Framebuffer (2-bit color indices) */
     uint8_t framebuffer[GB_FRAMEBUFFER_SIZE];

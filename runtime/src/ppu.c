@@ -51,6 +51,9 @@ void ppu_reset(GBPPU* ppu) {
     ppu->window_line = 0;
     ppu->window_triggered = false;
     ppu->frame_ready = false;
+    ppu->scanline_draw_cycles = CYCLES_PIXEL_DRAW;
+    ppu->scanline_hblank_cycles = CYCLES_HBLANK;
+    ppu->scanline_sprite_count = 0;
     
     /* Clear framebuffers */
     memset(ppu->framebuffer, 0, sizeof(ppu->framebuffer));
@@ -365,14 +368,34 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 /* Latch scroll registers for this scanline */
                 ppu->latched_scx = ppu->scx;
                 ppu->latched_scy = ppu->scy;
+
+                /* Count sprites on this scanline for variable mode 3 timing */
+                {
+                    uint8_t sprite_height = (ppu->lcdc & LCDC_OBJ_SIZE) ? 16 : 8;
+                    uint8_t count = 0;
+                    for (int i = 0; i < 40 && count < 10; i++) {
+                        uint8_t sy = ctx->oam[i * 4] - 16;
+                        if (ppu->ly >= sy && ppu->ly < sy + sprite_height)
+                            count++;
+                    }
+                    ppu->scanline_sprite_count = count;
+
+                    /* Mode 3 base = 172, +SCX fine scroll penalty, +6 per sprite */
+                    uint32_t draw = 172 + (ppu->latched_scx & 7) + count * 6;
+                    /* Mode 3 + Mode 0 = 376 cycles (456 - 80 OAM) */
+                    uint32_t hblank = (draw < 376) ? (376 - draw) : 0;
+                    ppu->scanline_draw_cycles = draw;
+                    ppu->scanline_hblank_cycles = hblank;
+                }
+
                 ppu->mode = PPU_MODE_DRAW;
                 update_stat(ppu, ctx);
             }
             break;
             
         case PPU_MODE_DRAW:
-            if (ppu->mode_cycles >= CYCLES_PIXEL_DRAW) {
-                ppu->mode_cycles -= CYCLES_PIXEL_DRAW;
+            if (ppu->mode_cycles >= ppu->scanline_draw_cycles) {
+                ppu->mode_cycles -= ppu->scanline_draw_cycles;
                 
                 /* Render the scanline */
                 ppu_render_scanline(ppu, ctx);
@@ -384,8 +407,8 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
             break;
             
         case PPU_MODE_HBLANK:
-            if (ppu->mode_cycles >= CYCLES_HBLANK) {
-                ppu->mode_cycles -= CYCLES_HBLANK;
+            if (ppu->mode_cycles >= ppu->scanline_hblank_cycles) {
+                ppu->mode_cycles -= ppu->scanline_hblank_cycles;
                 ppu->ly++;
                 
                 if (ppu->ly >= VISIBLE_SCANLINES) {

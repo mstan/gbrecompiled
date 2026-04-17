@@ -3413,20 +3413,52 @@ uint32_t gb_run_cycles(GBContext* ctx, uint32_t max_cycles) {
         ctx->run_cycle_budget_start = start;
     }
 
-    while (!ctx->frame_done) {
+    /* Run until frame_done AND the VBlank handler has had a chance to
+     * execute.  Many games (e.g. ReadJoypad in Pokemon R/B) sample joypad
+     * input inside the VBlank ISR, so the host needs to poll events,
+     * update the joypad state, and then let the emulated CPU see that
+     * state when the VBlank handler runs.  If gb_run_frame returns the
+     * instant frame_done is set, the VBlank IF is pending but the ISR
+     * hasn't started yet, so the handler reads a stale joypad on the
+     * next call.
+     *
+     * Keep running after frame_done until we observe that the VBlank IF
+     * bit has been cleared (meaning gb_handle_interrupts dispatched it)
+     * AND IME has been re-enabled (RETI at the end of the handler). A
+     * ~2-frame cycle budget caps the tail in case a game masks VBlank. */
+    bool vblank_serviced = false;
+    while (1) {
         if (max_cycles > 0 && (ctx->cycles - start) >= max_cycles) {
             break;
         }
 
         gb_handle_interrupts(ctx);
-        
+
+        /* Track whether the pending VBlank interrupt has been dispatched. */
+        if (ctx->frame_done && !vblank_serviced &&
+            !(ctx->io[0x0F] & 0x01)) {
+            vblank_serviced = true;
+        }
+
+        /* Exit once frame is done AND VBlank handler has run (IF cleared)
+         * AND we're past the handler body (IME re-enabled by RETI). */
+        if (ctx->frame_done && vblank_serviced && ctx->ime) {
+            break;
+        }
+
+        /* Safety tail: don't run more than ~2 frames worth of cycles,
+         * so a game that keeps VBlank masked can't hold us forever. */
+        if (ctx->frame_done && (ctx->cycles - start) > 140000) {
+            break;
+        }
+
         /* Check for HALT exit condition (even if IME=0) */
         if (ctx->halted) {
              if (ctx->io[0x0F] & ctx->io[0x80] & 0x1F) {
                  ctx->halted = 0;
              }
         }
-        
+
         ctx->stopped = 0;
         if (ctx->stop_mode_active) {
             if (gb_stop_should_resume(ctx)) {

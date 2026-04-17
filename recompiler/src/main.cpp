@@ -7,6 +7,7 @@
 #include "recompiler/decoder.h"
 #include "recompiler/analyzer.h"
 #include "recompiler/symbol_table.h"
+#include "recompiler/config.h"
 #include "recompiler/ir/ir.h"
 #include "recompiler/ir/ir_builder.h"
 #include "recompiler/codegen/c_emitter.h"
@@ -44,6 +45,7 @@ void print_usage(const char* program) {
     std::cout << "Directory mode recompiles every .gb/.gbc/.sgb file under the folder,\n";
     std::cout << "emits one module per ROM, and generates a launcher to choose the game.\n\n";
     std::cout << "Options:\n";
+    std::cout << "  --config <file.toml>  Load per-game configuration from TOML file\n";
     std::cout << "  -o, --output <dir>    Output directory (default: <rom>_output)\n";
     std::cout << "  -d, --disasm          Disassemble only (don't generate code)\n";
     std::cout << "  -a, --analyze         Analyze control flow only\n";
@@ -63,6 +65,7 @@ void print_usage(const char* program) {
     std::cout << "  --annotations <file>  Load analyzer guidance (function/label/data ranges) from a text file\n";
     std::cout << "  --use-trace <file>    Use runtime trace to find entry points\n";
     std::cout << "  -h, --help            Show this help\n";
+    std::cout << "\nCLI flags override TOML config values.\n";
 }
 
 static std::vector<uint16_t> find_oam_dma_overlay_destinations(const std::vector<uint8_t>& data,
@@ -1512,19 +1515,21 @@ int main(int argc, char* argv[]) {
         print_usage(argv[0]);
         return 1;
     }
-    
+
     std::string rom_path;
     std::string output_dir;
+    std::string config_path;
     bool disasm_only = false;
     bool analyze_only = false;
-    bool verbose = false;
-    bool trace_log = false;
-    size_t limit_instructions = 0;
+    // Optionals for flags that can come from TOML — CLI wins when set, resolved to plain below
+    std::optional<bool> cli_verbose;
+    std::optional<bool> cli_trace_log;
+    std::optional<size_t> cli_limit_instructions;
     size_t requested_jobs = 0;
     bool single_function = false;
-    bool emit_comments = true;
-    bool aggressive_scan = true;
-    int specific_bank = -1;
+    std::optional<bool> cli_emit_comments;
+    std::optional<bool> cli_aggressive_scan;
+    std::optional<int> cli_specific_bank;
     std::vector<uint32_t> manual_entry_points;
     std::string trace_file_path;
     std::string symbol_file_path;
@@ -1532,13 +1537,18 @@ int main(int argc, char* argv[]) {
     bool emit_android_project = false;
     std::string android_package;
     std::string android_app_name;
-    
+
+
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        
+
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
+        } else if (arg == "--config") {
+            if (i + 1 < argc) {
+                config_path = argv[++i];
+            }
         } else if (arg == "-o" || arg == "--output") {
             if (i + 1 < argc) {
                 output_dir = argv[++i];
@@ -1548,12 +1558,12 @@ int main(int argc, char* argv[]) {
         } else if (arg == "-a" || arg == "--analyze") {
             analyze_only = true;
         } else if (arg == "-v" || arg == "--verbose") {
-            verbose = true;
+            cli_verbose = true;
         } else if (arg == "--trace") {
-            trace_log = true;
+            cli_trace_log = true;
         } else if (arg == "--limit") {
             if (i + 1 < argc) {
-                limit_instructions = std::stoul(argv[++i]);
+                cli_limit_instructions = std::stoul(argv[++i]);
             }
         } else if (arg == "-j" || arg == "--jobs") {
             if (i + 1 < argc) {
@@ -1572,10 +1582,10 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--single-function") {
             single_function = true;
         } else if (arg == "--no-comments") {
-            emit_comments = false;
+            cli_emit_comments = false;
         } else if (arg == "--bank") {
             if (i + 1 < argc) {
-                specific_bank = std::stoi(argv[++i]);
+                cli_specific_bank = std::stoi(argv[++i]);
             }
         } else if (arg == "--add-entry-point") {
             if (i + 1 < argc) {
@@ -1595,7 +1605,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         } else if (arg == "--no-scan") {
-            aggressive_scan = false;
+            cli_aggressive_scan = false;
         } else if (arg == "--use-trace") {
             if (i + 1 < argc) {
                 trace_file_path = argv[++i];
@@ -1615,9 +1625,48 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
-    
+
+    // Load TOML config if specified
+    gbrecomp::GameConfig game_config;
+    std::vector<gbrecomp::HramOverlayConfig> config_hram_overlays;
+
+    if (!config_path.empty()) {
+        auto loaded = gbrecomp::load_config(config_path);
+        if (!loaded) {
+            std::cerr << "Error: Failed to parse config file: " << config_path << "\n";
+            return 1;
+        }
+        game_config = *loaded;
+        std::cout << "Loaded config: " << config_path << "\n";
+
+        // Apply TOML values where CLI didn't override
+        if (rom_path.empty()) rom_path = game_config.rom_path;
+        if (output_dir.empty()) output_dir = game_config.output_dir;
+        if (!trace_file_path.empty()) { /* CLI wins */ }
+        else trace_file_path = game_config.trace_file;
+
+        // Merge TOML entry points with CLI entry points
+        for (const auto& [bank, addrs] : game_config.entry_points) {
+            for (uint16_t addr : addrs) {
+                manual_entry_points.push_back(gbrecomp::AnalysisResult::make_addr(bank, addr));
+                std::cout << "Config entry point: Bank " << (int)bank << " Address 0x"
+                          << std::hex << addr << std::dec << "\n";
+            }
+        }
+
+        config_hram_overlays = game_config.hram_overlays;
+    }
+
+    // Resolve final option values: CLI > TOML > defaults
+    bool verbose          = cli_verbose.value_or(game_config.verbose.value_or(false));
+    bool trace_log        = cli_trace_log.value_or(game_config.trace_log.value_or(false));
+    size_t limit_instructions = cli_limit_instructions.value_or(game_config.limit_instructions.value_or(0));
+    bool emit_comments    = cli_emit_comments.value_or(game_config.emit_comments.value_or(true));
+    bool aggressive_scan  = cli_aggressive_scan.value_or(game_config.aggressive_scan.value_or(true));
+    int specific_bank     = cli_specific_bank.value_or(game_config.specific_bank.value_or(-1));
+
     if (rom_path.empty()) {
-        std::cerr << "Error: No ROM file specified\n";
+        std::cerr << "Error: No ROM file specified (use positional arg or [rom].path in config)\n";
         print_usage(argv[0]);
         return 1;
     }
@@ -1878,6 +1927,29 @@ int main(int argc, char* argv[]) {
             analyze_opts.ram_overlays.push_back(overlay);
     }
 
+    // Add data regions from TOML config file
+    for (const auto& dr : game_config.data_regions) {
+        gbrecomp::AnalyzerOptions::DataRegion region;
+        region.bank = dr.bank;
+        region.start = dr.start;
+        region.end = dr.end;
+        analyze_opts.data_regions.push_back(region);
+        std::cout << "Config data region: bank " << dr.bank << " 0x" << std::hex
+                  << dr.start << "-0x" << dr.end << std::dec << "\n";
+    }
+
+    // Add HRAM overlays from TOML config file (in addition to auto-detected ones)
+    for (const auto& ov : config_hram_overlays) {
+        gbrecomp::AnalyzerOptions::RamOverlay overlay;
+        overlay.ram_addr = ov.ram_addr;
+        overlay.rom_addr = gbrecomp::AnalysisResult::make_addr(ov.source_bank, ov.source_addr);
+        overlay.size = ov.size;
+        analyze_opts.ram_overlays.push_back(overlay);
+        std::cout << "Config HRAM overlay: 0x" << std::hex << ov.ram_addr
+                  << " <- Bank " << (int)ov.source_bank << ":0x" << ov.source_addr
+                  << " (" << std::dec << ov.size << " bytes)\n";
+    }
+
     auto analysis = gbrecomp::analyze(rom, analyze_opts);
     if (symbol_table.size() > 0) {
         gbrecomp::apply_symbols_to_analysis(symbol_table, analysis);
@@ -1911,13 +1983,20 @@ int main(int argc, char* argv[]) {
     std::cout << "\nGenerating C code...\n";
     
     gbrecomp::codegen::GeneratorOptions gen_opts;
-    gen_opts.output_prefix = sanitize_prefix(fs::path(rom_path).stem().string());
+    if (!game_config.output_prefix.empty()) {
+        gen_opts.output_prefix = game_config.output_prefix;
+    } else {
+        gen_opts.output_prefix = sanitize_prefix(fs::path(rom_path).stem().string());
+    }
     gen_opts.output_dir = output_dir;
     gen_opts.emit_comments = emit_comments;
     gen_opts.single_function_mode = single_function;
     gen_opts.parallel_codegen_jobs = requested_jobs;
+    gen_opts.runtime_dir = game_config.runtime_dir;
+    gen_opts.valid_crcs = game_config.valid_crcs;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
-    
+
+
     auto output = gbrecomp::codegen::generate_output(
         ir_program, rom.data(), rom.size(), gen_opts);
     
@@ -1959,11 +2038,14 @@ int main(int argc, char* argv[]) {
     
     std::cout << "\nGenerated files:\n";
     std::cout << "  " << (out_path / output.header_file) << "\n";
-    std::cout << "  " << (out_path / output.source_file) << "\n";
+    std::cout << "  " << (out_path / output.source_file) << " (dispatch + init)\n";
     std::cout << "  " << (out_path / output.main_file) << "\n";
     std::cout << "  " << (out_path / output.cmake_file) << "\n";
     if (!output.rom_data_file.empty()) {
         std::cout << "  " << (out_path / output.rom_data_file) << "\n";
+    }
+    if (!output.bank_files.empty()) {
+        std::cout << "  " << output.bank_files.size() << " bank source files\n";
     }
     if (emit_android_project) {
         std::cout << "  " << (out_path / "android" / "app" / "build.gradle") << "\n";

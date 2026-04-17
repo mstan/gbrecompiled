@@ -186,7 +186,11 @@ typedef struct GBContext {
         uint8_t active;         /**< Transfer is currently active */
         uint8_t hblank_mode;    /**< Transfer runs during HBlank only */
     } hdma;
-    
+
+    /* Serial transfer delay */
+    int serial_cycles_remaining; /**< Cycles until serial transfer completes (-1 = inactive) */
+
+
     /* Current bank numbers */
     uint16_t rom_bank;    /**< Current ROM bank (0x4000-0x7FFF) - 9 bits for MBC5 */
     uint8_t ram_bank;     /**< Current RAM bank */
@@ -239,6 +243,8 @@ typedef struct GBContext {
     size_t rom_size;
     uint8_t* eram;        /**< External RAM */
     size_t eram_size;
+    uint8_t eram_dirty;   /**< Set when ERAM is written; cleared after flush */
+    uint32_t eram_dirty_frame; /**< Frame when ERAM was last dirtied */
     uint8_t* wram;        /**< Work RAM */
     uint8_t* vram;        /**< Video RAM */
     uint8_t* oam;         /**< Object Attribute Memory */

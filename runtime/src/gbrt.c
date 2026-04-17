@@ -894,8 +894,10 @@ GBContext* gb_context_create(const GBConfig* config) {
 void gb_context_destroy(GBContext* ctx) {
     if (!ctx) return;
     
-    /* Save RAM before destroying if available */
-    if (ctx->eram && ctx->callbacks.save_battery_ram) {
+    /* Save battery RAM before destroying — always save if ERAM exists,
+     * regardless of ram_enabled (the MBC gate is for access control,
+     * not for whether the data should persist on disk). */
+    if (ctx->eram && ctx->eram_size && ctx->callbacks.save_battery_ram) {
         gb_context_save_ram(ctx);
     }
     
@@ -936,6 +938,7 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->dma.cycles_remaining = 0;
     ctx->dma.startup_delay = 0;
     memset(&ctx->hdma, 0, sizeof(ctx->hdma));
+    ctx->serial_cycles_remaining = -1;
     
     /* Reset HALT bug state */
     ctx->halt_bug = 0;
@@ -1854,6 +1857,7 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             uint32_t eram_addr = ((uint32_t)ctx->ram_bank * 0x2000) + (addr - 0xA000);
             if (eram_addr < ctx->eram_size) {
                 ctx->eram[eram_addr] = value;
+                ctx->eram_dirty = 1;
             }
         }
         return;
@@ -2047,7 +2051,7 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         // if (addr >= 0xFF80 && addr <= 0xFF8F) {
         //      DBG_GENERAL("Writing to HRAM[%04X]: %02X", addr, value);
         // }
-        ctx->hram[addr - 0xFF80] = value; return; 
+        ctx->hram[addr - 0xFF80] = value; return;
     }
     if (addr == 0xFFFF) { ctx->io[0x80] = value; return; }
 }
@@ -3093,6 +3097,19 @@ static inline void gb_sync(GBContext* ctx) {
     if (delta > 0) {
         ctx->last_sync_cycles = current;
         if (ctx->ppu) ppu_tick((GBPPU*)ctx->ppu, ctx, delta);
+
+        /* Serial transfer completion (no link partner) */
+        if (ctx->serial_cycles_remaining > 0) {
+            ctx->serial_cycles_remaining -= (int)delta;
+            if (ctx->serial_cycles_remaining <= 0) {
+                ctx->serial_cycles_remaining = -1;
+                ctx->io[0x01] = 0xFF;       /* No link partner: received bits are all 1s */
+                ctx->io[0x02] &= ~0x80;     /* Clear transfer start bit */
+                /* Don't fire serial interrupt — no link cable connected.
+                 * Firing it causes an infinite handler loop (handler starts
+                 * a new transfer each time) that disrupts music timing. */
+            }
+        }
     }
 }
 
@@ -3248,11 +3265,10 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
     static uint32_t last_log = 0;
     uint32_t cpu_cycles = cycles;
     uint32_t system_cycles = ctx->cgb_double_speed ? (cycles / 2) : cycles;
-    
+
     // Check limit
-    if (gbrt_instruction_limit > 0) {
-        gbrt_instruction_count++;
-        if (gbrt_instruction_count >= gbrt_instruction_limit) {
+    if (__builtin_expect(gbrt_instruction_limit > 0, 0)) {
+        if (++gbrt_instruction_count >= gbrt_instruction_limit) {
             printf("Instruction limit reached (%llu)\n", (unsigned long long)gbrt_instruction_limit);
             if (gbrt_instruction_limit_callback != NULL) {
                 gbrt_instruction_limit_callback();
@@ -3413,20 +3429,58 @@ uint32_t gb_run_cycles(GBContext* ctx, uint32_t max_cycles) {
         ctx->run_cycle_budget_start = start;
     }
 
-    while (!ctx->frame_done) {
+    /* Run until frame_done AND the VBlank handler has had a chance to complete.
+     * The VBlank ISR (including ReadJoypad) must finish within the same
+     * gb_run_frame call so that the joypad state set by poll_events is still
+     * valid when ReadJoypad reads P1.  We keep running after frame_done until
+     * we've processed the VBlank interrupt AND executed enough cycles for the
+     * handler to return (VBlank period is ~4560 T-cycles). */
+    bool vblank_serviced = false;
+    while (1) {
         if (max_cycles > 0 && (ctx->cycles - start) >= max_cycles) {
             break;
         }
 
+
         gb_handle_interrupts(ctx);
-        
+
+        /* Track whether we dispatched VBlank */
+        if (ctx->frame_done && !vblank_serviced) {
+            /* VBlank IF was set by PPU. Check if it's been cleared
+             * (meaning gb_handle_interrupts dispatched it). */
+            if (!(ctx->io[0x0F] & 0x01)) {
+                vblank_serviced = true;
+            }
+        }
+
+        /* Exit once frame is done AND VBlank handler has run AND we're past
+         * the VBlank handler (IME re-enabled by RETI, or enough cycles). */
+        if (ctx->frame_done && vblank_serviced && ctx->ime) {
+            break;
+        }
+
+        /* Safety: don't run more than ~2 frames worth of cycles.
+         * Also handles LCD-off periods: when LCD is disabled, the PPU never
+         * sets frame_done, so we must exit based on cycle count alone to keep
+         * audio and event timing consistent. */
+        if ((ctx->cycles - start) > 70224) {
+            if (ctx->frame_done || !ctx->ppu ||
+                !(((GBPPU*)ctx->ppu)->lcdc & 0x80)) {
+                break;
+            }
+            /* LCD is on but frame not done yet — allow up to 2x */
+            if ((ctx->cycles - start) > 140000) {
+                break;
+            }
+        }
+
         /* Check for HALT exit condition (even if IME=0) */
         if (ctx->halted) {
              if (ctx->io[0x0F] & ctx->io[0x80] & 0x1F) {
                  ctx->halted = 0;
              }
         }
-        
+
         ctx->stopped = 0;
         if (ctx->stop_mode_active) {
             if (gb_stop_should_resume(ctx)) {

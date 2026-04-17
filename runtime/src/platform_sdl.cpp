@@ -8,6 +8,13 @@
 #include "ppu.h"
 #include "audio_stats.h"
 #include "gbrt_debug.h"
+#include "debug_server.h"
+extern "C" {
+#include "keybinds.h"
+}
+
+/* Forward declaration for debug server context setter */
+extern "C" void gb_debug_server_set_context(GBContext *ctx);
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -262,6 +269,101 @@ static uint64_t g_input_record_start_cycle = 0;
 static uint64_t g_input_record_end_cycle = 0;
 static uint8_t g_input_record_dpad = 0xFF;
 static uint8_t g_input_record_buttons = 0xFF;
+
+/* Forward declarations needed by recording/playback */
+static void parse_buttons(const char* btn_str, uint8_t* dpad, uint8_t* buttons);
+static int g_frame_count = 0;
+static bool g_turbo = false;
+static GBContext* g_ctx = NULL;  /* Stored from register_context for SRAM flush */
+
+/* ---- Input Recording ---- */
+static FILE* g_record_file = NULL;
+static uint8_t g_prev_record_dpad = 0xFF;
+static uint8_t g_prev_record_buttons = 0xFF;
+
+static const char* buttons_to_str(uint8_t dpad, uint8_t buttons, char* buf, size_t sz) {
+    buf[0] = '\0';
+    int n = 0;
+    /* dpad is active-low: bit clear = pressed */
+    if (!(dpad & 0x01)) { if (n) buf[n++] = ','; buf[n++] = 'R'; }
+    if (!(dpad & 0x02)) { if (n) buf[n++] = ','; buf[n++] = 'L'; }
+    if (!(dpad & 0x04)) { if (n) buf[n++] = ','; buf[n++] = 'U'; }
+    if (!(dpad & 0x08)) { if (n) buf[n++] = ','; buf[n++] = 'D'; }
+    if (!(buttons & 0x01)) { if (n) buf[n++] = ','; buf[n++] = 'A'; }
+    if (!(buttons & 0x02)) { if (n) buf[n++] = ','; buf[n++] = 'B'; }
+    if (!(buttons & 0x04)) { if (n) buf[n++] = ','; buf[n++] = 'T'; } /* Select */
+    if (!(buttons & 0x08)) { if (n) buf[n++] = ','; buf[n++] = 'S'; } /* Start */
+    if (n == 0) { buf[0] = '-'; n = 1; }
+    buf[n] = '\0';
+    (void)sz;
+    return buf;
+}
+
+void gb_platform_start_recording(const char* path) {
+    if (g_record_file) fclose(g_record_file);
+    g_record_file = fopen(path, "w");
+    if (g_record_file) {
+        fprintf(g_record_file, "# gb-recompiled input recording\n");
+        fprintf(g_record_file, "# format: frame buttons\n");
+        fprintf(g_record_file, "# buttons: U,D,L,R,A,B,S(tart),T(selecT) or - for none\n");
+        printf("[RECORD] Recording inputs to %s\n", path);
+    } else {
+        fprintf(stderr, "[RECORD] Failed to open %s for writing\n", path);
+    }
+    g_prev_record_dpad = 0xFF;
+    g_prev_record_buttons = 0xFF;
+}
+
+void gb_platform_stop_recording(void) {
+    if (g_record_file) {
+        fclose(g_record_file);
+        g_record_file = NULL;
+        printf("[RECORD] Recording stopped.\n");
+    }
+}
+
+static void record_frame_input(void) {
+    if (!g_record_file) return;
+    /* Only write a line when input state changes */
+    if (g_joypad_dpad != g_prev_record_dpad || g_joypad_buttons != g_prev_record_buttons) {
+        char buf[32];
+        buttons_to_str(g_joypad_dpad, g_joypad_buttons, buf, sizeof(buf));
+        fprintf(g_record_file, "%d %s\n", g_frame_count, buf);
+        fflush(g_record_file);
+        g_prev_record_dpad = g_joypad_dpad;
+        g_prev_record_buttons = g_joypad_buttons;
+    }
+}
+
+void gb_platform_load_script_file(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "[SCRIPT] Cannot open %s\n", path); return; }
+    g_script_count = 0;
+    char line[256];
+    uint32_t prev_frame = 0;
+    while (fgets(line, sizeof(line), f) && g_script_count < MAX_SCRIPT_ENTRIES - 1) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        uint32_t frame = 0;
+        char btn_buf[64] = {0};
+        if (sscanf(line, "%u %63s", &frame, btn_buf) < 2) continue;
+
+        /* If there's a gap from the previous entry, fill it with the previous state
+         * by setting duration on the prior entry */
+        if (g_script_count > 0) {
+            ScriptEntry* prev = &g_input_script[g_script_count - 1];
+            prev->duration = frame - prev->start;
+        }
+
+        ScriptEntry* e = &g_input_script[g_script_count++];
+        e->anchor = SCRIPT_ANCHOR_FRAME;
+        e->start = frame;
+        e->duration = 0xFFFFFFFF; /* until next entry or forever */
+        parse_buttons(btn_buf, &e->dpad, &e->buttons);
+        prev_frame = frame;
+    }
+    fclose(f);
+    printf("[SCRIPT] Loaded %d input events from %s\n", g_script_count, path);
+}
 
 #define MAX_DUMP_FRAMES 100
 static uint32_t g_dump_frames[MAX_DUMP_FRAMES];
@@ -1543,8 +1645,6 @@ static void save_ppm(const char* filename, const uint32_t* fb, int width, int he
 }
 
 
-static int g_frame_count = 0;
-
 static double sdl_now_ms(void) {
     uint64_t ticks = SDL_GetPerformanceCounter();
     uint64_t freq = SDL_GetPerformanceFrequency();
@@ -2411,6 +2511,7 @@ void gb_platform_shutdown(void) {
     close_input_record_file();
     close_audio_output_device();
     g_audio_output_devices.clear();
+    gb_debug_server_shutdown();
 
     clear_controller_state();
     g_binding_capture_active = false;
@@ -2472,6 +2573,10 @@ static std::atomic<uint32_t> g_audio_read_pos{0};
 /* Debug counters */
 static uint32_t g_audio_samples_written = 0;
 static uint32_t g_audio_underruns = 0;
+
+/* Last valid sample for smooth underrun handling */
+static int16_t g_last_sample_l = 0;
+static int16_t g_last_sample_r = 0;
 
 static bool audio_subsystem_available(void) {
     return (SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) != 0;
@@ -2672,43 +2777,75 @@ static void reset_audio_output_buffer(bool preserve_stats) {
     }
 }
 
-/* SDL callback - pulls samples from ring buffer */
+/* SDL callback - pulls samples from ring buffer.
+ * On underrun, holds the last valid sample with a gentle fade-out
+ * instead of inserting silence, which eliminates audible pops. */
 static void sdl_audio_callback(void* userdata, Uint8* stream, int len) {
     (void)userdata;
     int16_t* out = (int16_t*)stream;
     int samples_needed = len / 4;  /* Stereo 16-bit = 4 bytes per sample */
-    
+
     uint32_t write_pos = g_audio_write_pos.load(std::memory_order_acquire);
     uint32_t read_pos = g_audio_read_pos.load(std::memory_order_relaxed);
-    
-    for (int i = 0; i < samples_needed; i++) {
-        if (read_pos != write_pos) {
-            /* Have data - copy it */
-            int32_t left = g_audio_ring[read_pos * 2];
-            int32_t right = g_audio_ring[read_pos * 2 + 1];
-            if (g_audio_muted || g_audio_volume_percent == 0) {
-                left = 0;
-                right = 0;
-            } else if (g_audio_volume_percent != 100) {
-                left = (left * (int32_t)g_audio_volume_percent) / 100;
-                right = (right * (int32_t)g_audio_volume_percent) / 100;
-                if (left < -32768) left = -32768;
-                if (left > 32767) left = 32767;
-                if (right < -32768) right = -32768;
-                if (right > 32767) right = 32767;
-            }
-            out[i * 2] = (int16_t)left;
-            out[i * 2 + 1] = (int16_t)right;
+
+    /* Count available samples */
+    uint32_t available = (write_pos >= read_pos)
+        ? (write_pos - read_pos)
+        : (AUDIO_RING_SIZE - read_pos + write_pos);
+
+    auto apply_volume = [](int16_t sample) -> int16_t {
+        if (g_audio_muted || g_audio_volume_percent == 0) return 0;
+        if (g_audio_volume_percent == 100) return sample;
+        int32_t v = ((int32_t)sample * (int32_t)g_audio_volume_percent) / 100;
+        if (v < -32768) v = -32768;
+        if (v > 32767) v = 32767;
+        return (int16_t)v;
+    };
+
+    if (available >= (uint32_t)samples_needed) {
+        /* Normal path — enough samples */
+        for (int i = 0; i < samples_needed; i++) {
+            out[i * 2]     = apply_volume(g_audio_ring[read_pos * 2]);
+            out[i * 2 + 1] = apply_volume(g_audio_ring[read_pos * 2 + 1]);
             read_pos = (read_pos + 1) % AUDIO_RING_SIZE;
-        } else {
-            /* Underrun - output silence */
-            out[i * 2] = 0;
-            out[i * 2 + 1] = 0;
-            g_audio_underruns++;
-            audio_stats_underrun();
         }
+        g_last_sample_l = out[(samples_needed - 1) * 2];
+        g_last_sample_r = out[(samples_needed - 1) * 2 + 1];
+    } else if (available > 0) {
+        /* Partial underrun — consume what's available, then hold last sample
+         * with gentle fade to mask the gap until the emulator catches up. */
+        int i = 0;
+        for (; i < (int)available; i++) {
+            out[i * 2]     = g_audio_ring[read_pos * 2];
+            out[i * 2 + 1] = g_audio_ring[read_pos * 2 + 1];
+            read_pos = (read_pos + 1) % AUDIO_RING_SIZE;
+        }
+        g_last_sample_l = out[(i - 1) * 2];
+        g_last_sample_r = out[(i - 1) * 2 + 1];
+
+        /* Fade out from last sample over remaining slots */
+        int fade_len = samples_needed - i;
+        for (int j = 0; j < fade_len; j++) {
+            /* Linear fade: full → zero over the remaining samples */
+            int32_t scale = (fade_len - j) * 256 / fade_len;
+            out[(i + j) * 2]     = (int16_t)((g_last_sample_l * scale) >> 8);
+            out[(i + j) * 2 + 1] = (int16_t)((g_last_sample_r * scale) >> 8);
+        }
+        g_audio_underruns++;
+        audio_stats_underrun();
+    } else {
+        /* Full underrun — fade from last known sample */
+        for (int i = 0; i < samples_needed; i++) {
+            int32_t scale = (samples_needed - i) * 256 / samples_needed;
+            out[i * 2]     = (int16_t)((g_last_sample_l * scale) >> 8);
+            out[i * 2 + 1] = (int16_t)((g_last_sample_r * scale) >> 8);
+        }
+        g_last_sample_l = 0;
+        g_last_sample_r = 0;
+        g_audio_underruns++;
+        audio_stats_underrun();
     }
-    
+
     g_audio_read_pos.store(read_pos, std::memory_order_release);
 }
 
@@ -2763,6 +2900,9 @@ bool gb_platform_init(int scale) {
     g_present_count = 0;
     g_last_timing = {};
 
+    /* Load configurable keybinds */
+    keybinds_init(NULL);
+
     if (g_benchmark_mode) {
         if (!SDL_getenv("SDL_VIDEODRIVER")) {
             SDL_setenv("SDL_VIDEODRIVER", "dummy", 0);
@@ -2778,7 +2918,8 @@ bool gb_platform_init(int scale) {
         g_last_frame_time = SDL_GetTicks();
         return true;
     }
-    
+
+
     fprintf(stderr, "[SDL] Initializing SDL...\n");
 #if defined(__ANDROID__)
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
@@ -2803,7 +2944,7 @@ bool gb_platform_init(int scale) {
     
     fprintf(stderr, "[SDL] Creating window...\n");
     g_window = SDL_CreateWindow(
-        "GameBoy Recompiled",
+        "GB Recompiled",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         g_windowed_width,
@@ -3106,6 +3247,10 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
 }
 
 bool gb_platform_poll_events(GBContext* ctx) {
+    /* Debug server: poll TCP commands and block if paused */
+    gb_debug_server_poll();
+    gb_debug_server_wait_if_paused();
+
     SDL_Event event;
 
     if (!g_benchmark_mode) {
@@ -3173,6 +3318,23 @@ bool gb_platform_poll_events(GBContext* ctx) {
 
 
 void gb_platform_render_frame(const uint32_t* framebuffer) {
+    /* Debug server: record frame state and check watchpoints */
+    gb_debug_server_record_frame();
+    gb_debug_server_check_watchpoints();
+
+    /* Flush battery RAM to disk after no ERAM writes for ~5 seconds.
+     * eram_dirty_frame tracks the LAST write, so we debounce properly
+     * even if the game writes ERAM frequently (e.g. RTC updates). */
+    if (g_registered_ctx && g_registered_ctx->eram_dirty) {
+        g_registered_ctx->eram_dirty_frame = (uint32_t)g_frame_count;
+        g_registered_ctx->eram_dirty = 0;
+    }
+    if (g_registered_ctx && g_registered_ctx->eram_dirty_frame != 0 &&
+        (uint32_t)(g_frame_count - g_registered_ctx->eram_dirty_frame) > 300) {
+        gb_context_save_ram(g_registered_ctx);
+        g_registered_ctx->eram_dirty_frame = 0;
+    }
+
     render_frame_internal(framebuffer, true);
 }
 
@@ -3193,6 +3355,13 @@ void gb_platform_get_timing_info(GBPlatformTimingInfo* out) {
 }
 
 uint8_t gb_platform_get_joypad(void) {
+    /* Check for debug server input override */
+    int override = gb_debug_server_get_input_override();
+    if (override >= 0) {
+        /* Override bits: 0=Right,1=Left,2=Up,3=Down,4=A,5=B,6=Select,7=Start (active high)
+         * GB joypad is active low, so invert */
+        return (uint8_t)(~override & 0xFF);
+    }
     /* Return combined state based on P1 register selection */
     /* Caller should AND with the appropriate selection bits */
     return g_joypad_buttons & g_joypad_dpad;
@@ -3204,7 +3373,14 @@ void gb_platform_vsync(uint32_t frame_cycles) {
         g_last_timing.pacing_ms = 0.0;
         return;
     }
-    /* 
+    if (g_turbo) {
+        /* Skip frame pacing entirely — run as fast as possible */
+        update_audio_stats_from_ring();
+        audio_stats_tick(SDL_GetTicks64());
+        g_last_frame_time = SDL_GetTicks();
+        return;
+    }
+    /*
      * Frame pacing: Run at the DMG frame cadence derived from 70224 cycles
      * at 4194304 Hz, and ease off sleeping when audio fill is too low.
      *
@@ -3501,6 +3677,10 @@ void gb_platform_register_context(GBContext* ctx) {
         .save_rtc_data = sdl_save_rtc_data
     };
     gb_set_platform_callbacks(ctx, &callbacks);
+
+    /* Initialize TCP debug server */
+    gb_debug_server_set_context(ctx);
+    gb_debug_server_init(0); /* default port 4370 */
 }
 
 #else  /* !GB_HAS_SDL2 */

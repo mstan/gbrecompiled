@@ -1,0 +1,40 @@
+# Tetris (Japan) - Game Boy Static Recompiler Configuration
+# Used with: gbrecomp --config tetris.toml
+
+[rom]
+path = "roms/tetris.gb"
+output_dir = "tetris_test"
+
+[options]
+aggressive_scan = true
+emit_comments = true
+
+# Manual entry points the analyzer misses.
+# These are addresses that fall back to the interpreter at runtime because
+# the analyzer can't follow calls to unresolvable targets (HRAM, end-of-bank
+# trampolines) and skips the fall-through code after the CALL.
+[entry_points]
+bank_0 = [
+    0x018E,   # Serial interrupt: RST 0x28 jump table dispatcher
+    0x0257,   # VBlank handler: return from CALL 0xFFB6 (OAM DMA)
+    0x0325,   # Main loop init: return from CALL 0x7FF3 (bank 1 trampoline)
+    0x0377,   # Game state dispatcher (RST 0x28 jump table)
+    0x0892,   # Game state 24: missed by is_likely_valid_code heuristic
+    0x0953,   # Game state 25: serial handshake init
+    0x14F0,   # Game state 9: immediate RET (no-op state)
+    0x1A6B,   # Game state 10: demo/attract mode init
+]
+bank_1 = [
+    0x6641,   # Cross-bank call target (setup trampoline)
+    0x7FF0,   # Trampoline: JP 0x6553 (input routine)
+    0x7FF3,   # Trampoline: JP 0x69D6 (init routine)
+]
+
+# HRAM overlay: OAM DMA routine copied to HRAM at init.
+# The init code at 0x0312 copies 12 bytes from ROM 0x2AC7 to HRAM 0xFFB6.
+# Auto-detect maps to 0xFF80 (wrong); this is the correct mapping.
+[[hram_overlay]]
+ram_addr = 0xFFB6
+source_bank = 0
+source_addr = 0x2AC7
+size = 12

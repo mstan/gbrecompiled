@@ -8,6 +8,8 @@ add_library(gbrt STATIC
     src/ppu.c
     src/audio.c
     src/audio_stats.c
+    src/debug_server.c
+    src/game_extras_default.c
     src/platform_sdl.cpp
 )
 
@@ -71,4 +73,9 @@ endif()
 if(SDL2_FOUND)
     target_link_libraries(gbrt PUBLIC SDL2::SDL2)
     target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)
+endif()
+
+# Winsock for debug server TCP
+if(WIN32)
+    target_link_libraries(gbrt PUBLIC ws2_32)
 endif()

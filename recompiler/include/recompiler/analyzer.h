@@ -216,6 +216,14 @@ struct AnalyzerOptions {
     std::string trace_file_path;        // Path to entry points trace file
     std::vector<AnalysisAnnotation> annotations;
     bool add_builtin_rom_annotations = true;
+
+    // Data regions (known non-code areas to skip during analysis)
+    struct DataRegion {
+        int bank;           // -1 = all banks
+        uint16_t start;
+        uint16_t end;       // exclusive
+    };
+    std::vector<DataRegion> data_regions;
 };
 
 /**

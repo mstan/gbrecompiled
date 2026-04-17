@@ -1269,15 +1269,15 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                 }
             } else if (instr.dst.type == ir::OperandType::REG16) {
                 if (instr.src.type == ir::OperandType::IMM8) {
-                    out << "gb_write8(ctx, ctx->" << reg16_names[instr.dst.value.reg16] 
+                    out << "gb_write8(ctx, ctx->" << reg16_names[instr.dst.value.reg16]
                         << ", 0x" << std::hex << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
                 } else {
                     const char* src_name = get_reg8_name(instr.src.value.reg8);
                     if (src_name) {
-                        out << "gb_write8(ctx, ctx->" << reg16_names[instr.dst.value.reg16] 
+                        out << "gb_write8(ctx, ctx->" << reg16_names[instr.dst.value.reg16]
                             << ", ctx->" << src_name << ");\n";
                     } else {
-                        out << "gb_write8(ctx, ctx->" << reg16_names[instr.dst.value.reg16] 
+                        out << "gb_write8(ctx, ctx->" << reg16_names[instr.dst.value.reg16]
                             << ", ctx->a);\n";
                     }
                 }
@@ -2208,7 +2208,13 @@ GeneratedOutput generate_output(const ir::Program& program,
     header_ss << "void " << options.output_prefix << "_run(GBContext* ctx);\n";
     header_ss << "void " << options.output_prefix << "_init(GBContext* ctx);\n";
     header_ss << "int " << module_main_name(options) << "(int argc, char* argv[]);\n\n";
-    header_ss << "#endif\n";
+
+    // Function prototypes for all recompiled functions (needed for cross-bank calls)
+    header_ss << "/* Recompiled function prototypes */\n";
+    for (const auto& [name, func] : program.functions) {
+        header_ss << "void " << func.name << "(GBContext* ctx);\n";
+    }
+    header_ss << "\n#endif\n";
     output.header_content = header_ss.str();
     output.header_file = options.output_prefix + ".h";
     const std::string internal_header_file = options.output_prefix + "_internal.h";
@@ -3055,6 +3061,7 @@ GeneratedOutput generate_output(const ir::Program& program,
 
             func_ss << block.label << ":\n";
 
+
             for (size_t i = 0; i < block.instructions.size(); ++i) {
                 const auto& ir_instr = block.instructions[i];
 
@@ -3213,10 +3220,6 @@ GeneratedOutput generate_output(const ir::Program& program,
     std::vector<const EmittedBody*> emitted_body_sources;
     emitted_body_sources.reserve(emitted_bodies.size());
     for (const EmittedBody& body : emitted_bodies) {
-        auto wrappers_it = wrappers_by_body_name.find(body.name);
-        if (wrappers_it == wrappers_by_body_name.end() || wrappers_it->second.empty()) {
-            continue;
-        }
         emitted_body_sources.push_back(&body);
     }
 
@@ -3277,7 +3280,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "/* Extern reference to ROM data */\n";
     source_ss << "extern const uint8_t " << rom_data_symbol_name(options) << "[];\n";
     source_ss << "extern const size_t " << rom_size_symbol_name(options) << ";\n\n";
-    
+
     source_ss << "const GBConfig* " << options.output_prefix << "_default_config(void) {\n";
     source_ss << "    static const GBConfig config = {\n";
     source_ss << "        .model = " << (rom_is_cgb ? "GB_MODEL_CGB" : "GB_MODEL_DMG") << ",\n";
@@ -3309,7 +3312,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     
     output.source_content = source_ss.str();
     output.source_file = options.output_prefix + ".c";
-    
+
+
     // Generate ROM data
     std::ostringstream rom_ss;
     rom_ss << "/* ROM data */\n";
@@ -3318,7 +3322,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     rom_ss << "const uint8_t " << rom_data_symbol_name(options) << "[" << rom_size << "] = {\n";
     for (size_t i = 0; i < rom_size; i++) {
         if (i % 16 == 0) rom_ss << "    ";
-        rom_ss << "0x" << std::hex << std::setfill('0') << std::setw(2) 
+        rom_ss << "0x" << std::hex << std::setfill('0') << std::setw(2)
                << (int)rom_data[i];
         if (i < rom_size - 1) rom_ss << ",";
         if (i % 16 == 15 || i == rom_size - 1) rom_ss << "\n";
@@ -3514,6 +3518,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            gb_platform_set_input_script(input_script);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--record-input\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_input_record_file(argv[++i]);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--record\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            gb_platform_start_recording(argv[++i]);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--script\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            gb_platform_load_script_file(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--dump-frames\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_dump_frames(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--dump-present-frames\") == 0 && i + 1 < argc) {\n";
@@ -3644,7 +3652,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    if (debug_audio_trace) gb_audio_set_debug_trace(true);\n";
     main_ss << "    audio_stats_set_log_to_console(audio_stats_console);\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
-    main_ss << "    // Initialize SDL2 platform with 5x scaling\n";
+    main_ss << "    // Initialize SDL2 platform BEFORE game init so save/load\n";
+    main_ss << "    // callbacks are available when load_rom reads battery RAM\n";
     main_ss << "    if (benchmark_mode) {\n";
     main_ss << "        gb_platform_set_benchmark_mode(true);\n";
     main_ss << "    }\n";
@@ -3666,6 +3675,12 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        gbrt_enable_interpreter_summary(ctx, (unsigned)interpreter_hotspot_limit);\n";
     main_ss << "    }\n";
     main_ss << "\n";
+    // Set window title from ROM header
+    main_ss << "    { char title[17] = {0};\n";
+    main_ss << "      if (ctx->rom_size > 0x143) { memcpy(title, &ctx->rom[0x134], 15); }\n";
+    main_ss << "      for (int i=0;i<15;i++) if(title[i]<32||title[i]>126) title[i]=0;\n";
+    main_ss << "      if (title[0]) gb_platform_set_title(title);\n";
+    main_ss << "    }\n";
     main_ss << "    // Run the game loop\n";
     main_ss << "    unsigned long long frame_index = 0;\n";
     main_ss << "    const uint32_t lcd_smooth_slice_cycles = 70224u;\n";
@@ -3830,38 +3845,49 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "        add_compile_options(-O3)\n";
         cmake_ss << "    endif()\n";
         cmake_ss << "    add_compile_options(-ffunction-sections -fdata-sections)\n";
+        cmake_ss << "endif()\n";
+        cmake_ss << "# Very large ROMs (e.g. Pokemon 1MB) blow past the default COFF\n";
+        cmake_ss << "# relocation limit on Windows; -Wa,-mbig-obj uses the extended header.\n";
+        cmake_ss << "if(WIN32 AND (CMAKE_C_COMPILER_ID STREQUAL \"GNU\" OR CMAKE_C_COMPILER_ID MATCHES \"Clang\"))\n";
+        cmake_ss << "    add_compile_options(-Wa,-mbig-obj)\n";
         cmake_ss << "endif()\n\n";
         // Calculate relative path to runtime
         namespace fs = std::filesystem;
         fs::path out_path(options.output_dir);
         std::string runtime_path;
 
-        // Normalise to a path relative to the CWD (= workspace root when gbrecomp
-        // is run per AGENTS.md conventions).  This handles the case where -o was
-        // given as an absolute path: fs::relative strips the leading /host/path
-        // components and leaves only the workspace-relative portion so that the
-        // generated ../../../runtime chain has the right number of segments.
-        fs::path relative_out;
-        try {
-            relative_out = fs::relative(out_path);
-        } catch (...) {
-            relative_out = out_path;
-        }
+        if (!options.runtime_dir.empty()) {
+            // Explicit runtime dir from TOML config (supports lateral game projects
+            // where the fork runtime lives outside the game's output tree).
+            runtime_path = options.runtime_dir;
+        } else {
+            // Normalise to a path relative to the CWD (= workspace root when gbrecomp
+            // is run per AGENTS.md conventions).  This handles the case where -o was
+            // given as an absolute path: fs::relative strips the leading /host/path
+            // components and leaves only the workspace-relative portion so that the
+            // generated ../../../runtime chain has the right number of segments.
+            fs::path relative_out;
+            try {
+                relative_out = fs::relative(out_path);
+            } catch (...) {
+                relative_out = out_path;
+            }
 
-        // Count depth to generate correct number of ../
-        int depth = 0;
-        for (const auto& p : relative_out) {
-            const std::string s = p.string();
-            if (s == "." || s == "/" || s.empty()) continue;
-            depth++;
-        }
-        // Ensure at least one level up
-        if (depth == 0) depth = 1;
+            // Count depth to generate correct number of ../
+            int depth = 0;
+            for (const auto& p : relative_out) {
+                const std::string s = p.string();
+                if (s == "." || s == "/" || s.empty()) continue;
+                depth++;
+            }
+            // Ensure at least one level up
+            if (depth == 0) depth = 1;
 
-        std::stringstream rt_ss;
-        for (int i = 0; i < depth; i++) rt_ss << "../";
-        rt_ss << "runtime";
-        runtime_path = rt_ss.str();
+            std::stringstream rt_ss;
+            for (int i = 0; i < depth; i++) rt_ss << "../";
+            rt_ss << "runtime";
+            runtime_path = rt_ss.str();
+        }
 
         cmake_ss << "# Runtime library path (relative to this output directory)\n";
         cmake_ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
@@ -3875,6 +3901,10 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    ${GBRT_DIR}/src/audio.c\n";
         cmake_ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
         cmake_ss << "    ${GBRT_DIR}/src/interpreter.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/debug_server.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/game_extras_default.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/keybinds.c\n";
+        cmake_ss << "    ${GBRT_DIR}/src/launcher.c\n";
         cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
         cmake_ss << ")\n\n";
 
@@ -3893,6 +3923,9 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    ${GBRT_DIR}/vendor/imgui\n";
         cmake_ss << ")\n";
         cmake_ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
+        cmake_ss << "if(WIN32)\n";
+        cmake_ss << "    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32)\n";
+        cmake_ss << "endif()\n";
         cmake_ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
         cmake_ss << "# Main executable\n";
         std::vector<std::string> generated_source_files = {options.output_prefix + ".c"};
@@ -3942,6 +3975,10 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    endif()\n";
         cmake_ss << "endif()\n\n";
         cmake_ss << "target_link_libraries(" << options.output_prefix << " gbrt)\n";
+        cmake_ss << "if(WIN32 AND TARGET SDL2::SDL2main)\n";
+        cmake_ss << "    # SDL2 redefines main to SDL_main via SDL.h; SDL2main provides WinMain.\n";
+        cmake_ss << "    target_link_libraries(" << options.output_prefix << " SDL2::SDL2main)\n";
+        cmake_ss << "endif()\n";
         cmake_ss << "if(GBRECOMP_ENABLE_STRIP AND NOT MSVC AND NOT CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
         cmake_ss << "    if(APPLE)\n";
         cmake_ss << "        add_custom_command(TARGET " << options.output_prefix << " POST_BUILD\n";
@@ -4009,6 +4046,14 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
             out_file.close();
         }
         
+        // Write per-bank source files
+        for (const auto& [bank, fname] : output.bank_files) {
+            std::ofstream bank_file(out_path / fname);
+            if (!bank_file) return false;
+            bank_file << output.bank_sources.at(bank);
+            bank_file.close();
+        }
+
         // Write CMakeLists.txt
         if (!output.cmake_file.empty()) {
             std::ofstream cmake_file(out_path / output.cmake_file);

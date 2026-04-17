@@ -40,7 +40,9 @@ struct GeneratorOptions {
     bool embed_rom_data = true;          // Embed ROM data in output
     bool debug_mode = false;             // Extra debug output
     size_t parallel_codegen_jobs = 0;    // 0 = auto, 1 = disabled
-    
+    std::string runtime_dir;             // Path to runtime/ (relative to output_dir)
+
+
     // Cycle counting
     bool emit_cycle_counting = true;
     
@@ -50,6 +52,9 @@ struct GeneratorOptions {
     // Known writable-memory overlays copied from ROM and safe to dispatch
     // when the live bytes still match the generated image.
     std::vector<RamOverlay> ram_overlays;
+
+    // Valid CRC32s for multi-version ROM support
+    std::vector<uint32_t> valid_crcs;
 };
 
 /**

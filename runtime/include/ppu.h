@@ -132,6 +132,11 @@ typedef struct GBPPU {
     uint32_t mode_cycles;     /* Cycles in current mode */
     uint8_t window_line;      /* Current window internal line counter */
     bool window_triggered;    /* Window was triggered this frame */
+
+    /* Per-scanline timing (computed during OAM scan) */
+    uint32_t scanline_draw_cycles;   /* Variable mode 3 duration */
+    uint32_t scanline_hblank_cycles; /* Adjusted mode 0 duration */
+    uint8_t  scanline_sprite_count;  /* Sprites found on this line */
     
     /* Framebuffer (2-bit color indices) */
     uint8_t framebuffer[GB_FRAMEBUFFER_SIZE];

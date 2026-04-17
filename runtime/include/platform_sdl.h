@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-// Joypad state variables
+// Joypad state variables (modified by platform layer, read by emulation)
 extern uint8_t g_joypad_buttons;
 extern uint8_t g_joypad_dpad;
 
@@ -149,6 +149,32 @@ void gb_platform_set_smooth_lcd_transitions(bool enabled);
  * @brief Set window title
  */
 void gb_platform_set_title(const char* title);
+
+/**
+ * @brief Set input script from inline string (frame:buttons:duration,...)
+ */
+void gb_platform_set_input_script(const char* script);
+
+/**
+ * @brief Load input script from file (--script)
+ * File format: one line per event, "frame buttons" where buttons is a
+ * combination of U/D/L/R/A/B/S/T (or - for none). Active-low hex joypad
+ * state is also accepted as "frame 0xHH".
+ */
+void gb_platform_load_script_file(const char* path);
+
+/**
+ * @brief Start recording inputs to a file (--record)
+ */
+void gb_platform_start_recording(const char* path);
+
+/**
+ * @brief Stop recording (called on shutdown)
+ */
+void gb_platform_stop_recording(void);
+
+void gb_platform_set_dump_frames(const char* frames);
+void gb_platform_set_screenshot_prefix(const char* prefix);
 
 #ifdef __cplusplus
 }

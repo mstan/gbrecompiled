@@ -376,10 +376,19 @@ static void render_bg_scanline(GBPPU* ppu,
     bool cgb_mode = ppu_is_cgb_mode(ctx);
     bool cgb_compat_mode = ppu_is_cgb_compat_mode(ctx);
     bool bg_visible = cgb_mode ? true : ((lcdc & LCDC_BG_ENABLE) != 0);
-    bool window_enable = (lcdc & LCDC_WINDOW_ENABLE) &&
-                         (ppu->latched_wx <= 166) &&
-                         (ppu->latched_wy <= scanline) &&
-                         (cgb_mode || bg_visible);
+    /* Window becomes active only on the first scanline where LY == WY (and
+     * the other preconditions are met). Once activated, it stays active for
+     * the rest of the frame even if WY is rewritten to a different value.
+     * Using (WY <= scanline) instead would let a mid-frame WY decrease
+     * retroactively trigger the window, which is not how the hardware latches. */
+    bool window_hw_enable = (lcdc & LCDC_WINDOW_ENABLE) &&
+                            (ppu->latched_wx <= 166) &&
+                            (cgb_mode || bg_visible);
+    if (window_hw_enable && !ppu->window_triggered &&
+        ppu->latched_wy == scanline) {
+        ppu->window_triggered = true;
+    }
+    bool window_enable = window_hw_enable && ppu->window_triggered;
 
     if (!(lcdc & LCDC_LCD_ENABLE)) {
         memset(&ppu->framebuffer[scanline * GB_SCREEN_WIDTH], 0, GB_SCREEN_WIDTH);
@@ -389,10 +398,6 @@ static void render_bg_scanline(GBPPU* ppu,
             ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_palette_rgb555[0];
         }
         return;
-    }
-
-    if (window_enable && !ppu->window_triggered) {
-        ppu->window_triggered = true;
     }
 
     for (int x = 0; x < GB_SCREEN_WIDTH; x++) {

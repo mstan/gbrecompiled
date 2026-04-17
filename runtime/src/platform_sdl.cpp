@@ -2672,43 +2672,65 @@ static void reset_audio_output_buffer(bool preserve_stats) {
     }
 }
 
-/* SDL callback - pulls samples from ring buffer */
+/* SDL callback - pulls samples from ring buffer.
+ * On underrun we fade from the last emitted sample to zero over the rest
+ * of the requested block instead of jumping straight to silence, which
+ * avoids the audible click that a zero-crossing discontinuity produces
+ * when the emulator briefly starves the output (common on slow frames
+ * or turbo toggles). */
+static int16_t g_audio_last_sample_l = 0;
+static int16_t g_audio_last_sample_r = 0;
+
 static void sdl_audio_callback(void* userdata, Uint8* stream, int len) {
     (void)userdata;
     int16_t* out = (int16_t*)stream;
     int samples_needed = len / 4;  /* Stereo 16-bit = 4 bytes per sample */
-    
+
     uint32_t write_pos = g_audio_write_pos.load(std::memory_order_acquire);
     uint32_t read_pos = g_audio_read_pos.load(std::memory_order_relaxed);
-    
-    for (int i = 0; i < samples_needed; i++) {
-        if (read_pos != write_pos) {
-            /* Have data - copy it */
-            int32_t left = g_audio_ring[read_pos * 2];
-            int32_t right = g_audio_ring[read_pos * 2 + 1];
-            if (g_audio_muted || g_audio_volume_percent == 0) {
-                left = 0;
-                right = 0;
-            } else if (g_audio_volume_percent != 100) {
-                left = (left * (int32_t)g_audio_volume_percent) / 100;
-                right = (right * (int32_t)g_audio_volume_percent) / 100;
-                if (left < -32768) left = -32768;
-                if (left > 32767) left = 32767;
-                if (right < -32768) right = -32768;
-                if (right > 32767) right = 32767;
-            }
-            out[i * 2] = (int16_t)left;
-            out[i * 2 + 1] = (int16_t)right;
-            read_pos = (read_pos + 1) % AUDIO_RING_SIZE;
-        } else {
-            /* Underrun - output silence */
-            out[i * 2] = 0;
-            out[i * 2 + 1] = 0;
-            g_audio_underruns++;
-            audio_stats_underrun();
+
+    int produced = 0;
+    for (; produced < samples_needed; produced++) {
+        if (read_pos == write_pos) break;
+        int32_t left = g_audio_ring[read_pos * 2];
+        int32_t right = g_audio_ring[read_pos * 2 + 1];
+        if (g_audio_muted || g_audio_volume_percent == 0) {
+            left = 0;
+            right = 0;
+        } else if (g_audio_volume_percent != 100) {
+            left = (left * (int32_t)g_audio_volume_percent) / 100;
+            right = (right * (int32_t)g_audio_volume_percent) / 100;
+            if (left < -32768) left = -32768;
+            if (left > 32767) left = 32767;
+            if (right < -32768) right = -32768;
+            if (right > 32767) right = 32767;
         }
+        out[produced * 2] = (int16_t)left;
+        out[produced * 2 + 1] = (int16_t)right;
+        read_pos = (read_pos + 1) % AUDIO_RING_SIZE;
     }
-    
+
+    if (produced > 0) {
+        g_audio_last_sample_l = out[(produced - 1) * 2];
+        g_audio_last_sample_r = out[(produced - 1) * 2 + 1];
+    }
+
+    /* Underrun tail: linear fade from the last real sample to zero. */
+    if (produced < samples_needed) {
+        int fade_len = samples_needed - produced;
+        int16_t start_l = g_audio_last_sample_l;
+        int16_t start_r = g_audio_last_sample_r;
+        for (int j = 0; j < fade_len; j++) {
+            int32_t scale = (fade_len - j) * 256 / fade_len;  /* 256 -> 0 */
+            out[(produced + j) * 2]     = (int16_t)((start_l * scale) >> 8);
+            out[(produced + j) * 2 + 1] = (int16_t)((start_r * scale) >> 8);
+        }
+        g_audio_last_sample_l = 0;
+        g_audio_last_sample_r = 0;
+        g_audio_underruns++;
+        audio_stats_underrun();
+    }
+
     g_audio_read_pos.store(read_pos, std::memory_order_release);
 }
 

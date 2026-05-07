@@ -10,6 +10,22 @@
 #include "gbrt_debug.h"
 
 /* ============================================================================
+ * Pocket Camera — Webcam Capture (cross-platform via gbcam.cpp / OpenCV)
+ * ========================================================================== */
+#include "gbcam.h"
+/* Camera sensor registers (written by the game via 0xA001-0xA005) */
+static uint8_t gbcam_regs[6] = {0};
+
+/* Wrapper: delegate to gbcam cross-platform capture */
+static bool gbcam_capture_webcam(GBContext* ctx) {
+    if (!ctx->eram) return false;
+    return gbcam_capture_to_sram(ctx->eram, ctx->eram_size, gbcam_regs);
+}
+
+/* End of Pocket Camera webcam capture */
+
+
+/* ============================================================================
  * Definitions
  * ========================================================================== */
 
@@ -376,6 +392,7 @@ static bool gb_cart_type_has_battery(uint8_t type) {
         case 0x1B: /* MBC5+RAM+BATTERY */
         case 0x1E: /* MBC5+RUMBLE+RAM+BATTERY */
         case 0x22: /* MBC7+SENSOR+RUMBLE+RAM+BATTERY */
+        case 0xFC: /* POCKET CAMERA */
         case 0xFF: /* HuC1+RAM+BATTERY */
             return true;
     }
@@ -1558,8 +1575,23 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
     
     /* External RAM / RTC (0xA000-0xBFFF) */
     if (addr < 0xC000) {
-        if (!ctx->ram_enabled) return 0xFF;
-        
+        /* Pocket Camera register mode (RAM bank >= 0x10) — accessible without RAM enable */
+        if (ctx->mbc_type == 0xFC && ctx->ram_bank >= 0x10) {
+            uint16_t reg_addr = addr - 0xA000;
+            if (reg_addr == 0x00) {
+                /* Register 0: Capture status. Bit 0 = 1 while capturing.
+                 * We always return 0 (capture complete / idle). */
+                return 0x00;
+            }
+            /* Registers 0x01-0x35: camera parameters (write-only, read returns 0) */
+            if (reg_addr >= 0x01 && reg_addr <= 0x35) return 0x00;
+            /* 0xA036-0xBFFF in register mode: return 0x00 */
+            return 0x00;
+        }
+
+        /* Pocket Camera: SRAM is always accessible (no RAM enable gate) */
+        if (!ctx->ram_enabled && ctx->mbc_type != 0xFC) return 0xFF;
+
         /* MBC3 RTC mode */
         if (ctx->rtc_mode) {
             switch (ctx->rtc_reg) {
@@ -1798,6 +1830,24 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             /* 0x6000-0x7FFF: Unused for MBC5 */
         }
         /* ================================================================
+         * Pocket Camera (Cartridge type 0xFC)
+         * MBC-like with 6-bit ROM bank, 4-bit RAM bank, camera registers
+         * ================================================================ */
+        else if (ctx->mbc_type == 0xFC) {
+            if (addr < 0x2000) {
+                /* RAM Enable */
+                ctx->ram_enabled = ((value & 0x0F) == 0x0A);
+            } else if (addr < 0x4000) {
+                /* ROM Bank Number (6-bit, 0-63) */
+                ctx->rom_bank = value & 0x3F;
+                if (ctx->rom_bank == 0) ctx->rom_bank = 1;
+            } else if (addr < 0x6000) {
+                /* RAM Bank / Camera Register Select */
+                ctx->ram_bank = value & 0x1F;
+            }
+            /* 0x6000-0x7FFF: Unused for Pocket Camera */
+        }
+        /* ================================================================
          * No MBC / ROM Only (type 0x00) or Unknown
          * ================================================================ */
         else {
@@ -1822,9 +1872,32 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         return;
     }
     if (addr < 0xC000) {
-        /* External RAM / RTC Write */
-        if (!ctx->ram_enabled) return;
-        
+        /* Pocket Camera register writes (RAM bank >= 0x10) — accessible without RAM enable */
+        if (ctx->mbc_type == 0xFC && ctx->ram_bank >= 0x10) {
+            uint16_t reg_addr = addr - 0xA000;
+            if (reg_addr == 0x00 && (value & 0x01)) {
+                /* Capture trigger: bit 0 starts capture.
+                 * Try to grab a real webcam frame via V4L2. If that fails,
+                 * fill with a test pattern so the game still works. */
+                if (!gbcam_capture_webcam(ctx)) {
+                    /* Fallback: gradient test pattern */
+                    if (ctx->eram && ctx->eram_size >= 0x2000) {
+                        for (uint32_t i = 0x0100; i < 0x1200 && i < ctx->eram_size; i++) {
+                            ctx->eram[i] = (uint8_t)(i & 0xFF);
+                        }
+                    }
+                }
+            }
+            /* Store camera sensor register writes */
+            if (reg_addr >= 0x01 && reg_addr <= 0x05) {
+                gbcam_regs[reg_addr] = value;
+            }
+            return;
+        }
+
+        /* External RAM / RTC Write — Pocket Camera SRAM always accessible */
+        if (!ctx->ram_enabled && ctx->mbc_type != 0xFC) return;
+
         /* MBC3 RTC mode */
         if (ctx->rtc_mode) {
             /* RTC Register Write */

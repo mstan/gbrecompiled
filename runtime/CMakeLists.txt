@@ -9,7 +9,14 @@ add_library(gbrt STATIC
     src/audio.c
     src/audio_stats.c
     src/platform_sdl.cpp
+    src/gbcam.c
 )
+
+# macOS: add AVFoundation camera backend
+if(APPLE)
+    target_sources(gbrt PRIVATE src/gbcam_macos.m)
+    target_link_libraries(gbrt PRIVATE "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
+endif()
 
 # Dear ImGui sources (if using SDL2)
 find_package(SDL2 QUIET)

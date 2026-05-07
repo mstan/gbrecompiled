@@ -1975,13 +1975,27 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             ctx->serial_transfer.active = 0;
             ctx->serial_transfer.fast_clock = 0;
             ctx->serial_transfer.cycles_remaining = 0;
+            ctx->serial_transfer.deferred = 0;
+            ctx->serial_transfer.slave_armed = 0;
 
-            if ((sc & 0x80) && (sc & 0x01) && ctx->config.enable_serial) {
-                ctx->serial_transfer.active = 1;
-                ctx->serial_transfer.fast_clock =
-                    (uint8_t)((gb_is_cgb_mode(ctx) && (sc & 0x02)) ? 1 : 0);
-                ctx->serial_transfer.cycles_remaining =
-                    ctx->serial_transfer.fast_clock ? 128u : 4096u;
+            if ((sc & 0x80) && ctx->config.enable_serial) {
+                if (sc & 0x01) {
+                    /* Internal clock — master. Tick a countdown until the
+                     * 8 bits would have shifted out, then notify the link
+                     * layer (if any) via on_serial_byte. */
+                    ctx->serial_transfer.active = 1;
+                    ctx->serial_transfer.fast_clock =
+                        (uint8_t)((gb_is_cgb_mode(ctx) && (sc & 0x02)) ? 1 : 0);
+                    ctx->serial_transfer.cycles_remaining =
+                        ctx->serial_transfer.fast_clock ? 128u : 4096u;
+                } else {
+                    /* External clock — slave. The peer drives the clock so
+                     * we don't tick anything here; the link layer pulls the
+                     * outgoing byte and completes the transfer once a peer
+                     * sync1 arrives. */
+                    ctx->serial_transfer.slave_armed = 1;
+                    ctx->serial_transfer.slave_outgoing = ctx->io[0x01];
+                }
             }
             return;
         }
@@ -3284,25 +3298,48 @@ static void gb_dma_tick(GBContext* ctx, uint32_t cycles) {
 }
 
 static void gb_serial_tick(GBContext* ctx, uint32_t cpu_cycles) {
-    if (!ctx->serial_transfer.active) {
+    if (!ctx->serial_transfer.active || ctx->serial_transfer.deferred) {
         return;
     }
 
     if (cpu_cycles >= ctx->serial_transfer.cycles_remaining) {
         uint8_t outgoing = ctx->io[0x01];
-        ctx->serial_transfer.active = 0;
         ctx->serial_transfer.cycles_remaining = 0;
-        ctx->io[0x02] &= (uint8_t)~0x80;
-        ctx->io[0x01] = 0xFF;
-        ctx->io[0x0F] |= 0x08;
 
+        /* Notify the link layer (if any). It may set serial_transfer.deferred
+         * to claim ownership of completion — in which case we leave the
+         * transfer in flight (SC bit 7 still set, no IRQ yet) and the link
+         * layer will call gb_serial_complete_transfer() once the peer
+         * responds with sync2. */
         if (ctx->callbacks.on_serial_byte) {
             ctx->callbacks.on_serial_byte(ctx, outgoing);
+        }
+
+        if (!ctx->serial_transfer.deferred) {
+            /* No peer claimed it — finish with 0xFF as if the cable is unplugged. */
+            gb_serial_complete_transfer(ctx, 0xFF);
         }
         return;
     }
 
     ctx->serial_transfer.cycles_remaining -= cpu_cycles;
+}
+
+void gb_serial_complete_transfer(GBContext* ctx, uint8_t received_byte) {
+    if (!ctx) return;
+    ctx->io[0x01] = received_byte;
+    ctx->io[0x02] &= (uint8_t)~0x80;
+    ctx->io[0x0F] |= 0x08; /* SIO interrupt */
+    ctx->serial_transfer.active = 0;
+    ctx->serial_transfer.deferred = 0;
+    ctx->serial_transfer.cycles_remaining = 0;
+    ctx->serial_transfer.slave_armed = 0;
+}
+
+bool gb_serial_take_slave_byte(GBContext* ctx, uint8_t* outgoing_out) {
+    if (!ctx || !ctx->serial_transfer.slave_armed) return false;
+    if (outgoing_out) *outgoing_out = ctx->serial_transfer.slave_outgoing;
+    return true;
 }
 
 static bool gb_stop_should_resume(GBContext* ctx) {

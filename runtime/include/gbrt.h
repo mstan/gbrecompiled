@@ -232,6 +232,9 @@ typedef struct GBContext {
         uint8_t active;      /**< Internal-clock transfer currently in progress */
         uint8_t fast_clock;  /**< CGB fast serial clock is selected */
         uint32_t cycles_remaining; /**< Remaining CPU cycles until completion */
+        uint8_t deferred;    /**< Master countdown elapsed; awaiting peer reply (link layer) */
+        uint8_t slave_armed; /**< External-clock transfer armed; awaiting peer master byte */
+        uint8_t slave_outgoing; /**< Byte captured from SB at the moment slave mode was armed */
     } serial_transfer;
     
     /* Memory pointers */
@@ -550,6 +553,27 @@ static inline void gb_unpack_flags(GBContext* ctx) {
     ctx->f_h = (ctx->f & 0x20) != 0;
     ctx->f_c = (ctx->f & 0x10) != 0;
 }
+
+/* ============================================================================
+ * Serial port
+ * ========================================================================== */
+
+/**
+ * @brief Complete a deferred or slave serial transfer with the byte received
+ * from the peer. Updates SB, clears SC bit 7, raises the SIO interrupt, and
+ * resets the in-flight transfer state. Safe to call from either an
+ * external-clock (slave) path or a deferred internal-clock (master) path.
+ */
+void gb_serial_complete_transfer(GBContext* ctx, uint8_t received_byte);
+
+/**
+ * @brief If an external-clock (slave) transfer is currently armed, copy out
+ * the byte the game placed in SB and return true. Caller is expected to
+ * forward that byte to the link peer and then call
+ * gb_serial_complete_transfer() when the peer's master byte arrives.
+ * Returns false if no slave transfer is armed.
+ */
+bool gb_serial_take_slave_byte(GBContext* ctx, uint8_t* outgoing_out);
 
 /* ============================================================================
  * Timing

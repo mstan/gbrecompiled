@@ -10,7 +10,12 @@ add_library(gbrt STATIC
     src/audio_stats.c
     src/platform_sdl.cpp
     src/gbcam.c
+    src/serial_link.c
 )
+
+# pthread for the BGB link recv thread
+find_package(Threads REQUIRED)
+target_link_libraries(gbrt PUBLIC Threads::Threads)
 
 # macOS: add AVFoundation camera backend
 if(APPLE)

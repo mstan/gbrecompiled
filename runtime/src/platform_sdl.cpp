@@ -8,6 +8,7 @@
 #include "ppu.h"
 #include "audio_stats.h"
 #include "gbrt_debug.h"
+#include "serial_link.h"
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -2408,6 +2409,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
  * ========================================================================== */
 
 void gb_platform_shutdown(void) {
+    gb_serial_link_shutdown();
     close_input_record_file();
     close_audio_output_device();
     g_audio_output_devices.clear();
@@ -3106,6 +3108,9 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
 }
 
 bool gb_platform_poll_events(GBContext* ctx) {
+    /* Drain inbound BGB packets and apply them to the live serial state. */
+    gb_serial_link_tick(ctx);
+
     SDL_Event event;
 
     if (!g_benchmark_mode) {
@@ -3495,12 +3500,17 @@ void gb_platform_register_context(GBContext* ctx) {
     g_registered_ctx = ctx;
     GBPlatformCallbacks callbacks = {
         .on_audio_sample = on_audio_sample,
+        .on_serial_byte = gb_serial_link_on_serial_byte,
         .load_battery_ram = sdl_load_battery_ram,
         .save_battery_ram = sdl_save_battery_ram,
         .load_rtc_data = sdl_load_rtc_data,
         .save_rtc_data = sdl_save_rtc_data
     };
     gb_set_platform_callbacks(ctx, &callbacks);
+
+    /* Bring up the BGB-protocol link if GB_LINK_LISTEN or GB_LINK_CONNECT
+     * is set in the environment. No-op otherwise. */
+    gb_serial_link_init_from_env();
 }
 
 #else  /* !GB_HAS_SDL2 */

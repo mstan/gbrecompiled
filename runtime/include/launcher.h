@@ -1,6 +1,15 @@
 #pragma once
 
 /**
+ * launcher.h — ROM discovery, CRC32 verification, and external-ROM loading.
+ *
+ * CRC validation is driven by game_extras hooks (game_get_expected_crc32 /
+ * game_get_valid_crcs), mirroring the NES recomp pattern. Game projects
+ * provide an extras.c implementing those; the runtime library has weak
+ * defaults that return 0 (no validation).
+ */
+
+/**
  * Initialize launcher — find rom.cfg location next to the executable.
  * Call before launcher_get_rom_path().
  */
@@ -8,26 +17,16 @@ void launcher_init(void);
 
 /**
  * Get ROM file path. Checks in order:
- *   1. Cached path from rom.cfg (if file still exists)
- *   2. Windows file picker dialog
+ *   1. Cached path from rom.cfg (if file still exists and CRC matches)
+ *   2. Windows file picker dialog (re-prompts on CRC mismatch)
  * Caches the result to rom.cfg for next run.
  * Returns NULL if no ROM was selected (user cancelled).
+ *
+ * CRC list is read from game_get_valid_crcs() (preferred) or
+ * game_get_expected_crc32() (fallback). Both returning 0 / NULL skips
+ * CRC validation.
  */
 const char *launcher_get_rom_path(void);
-
-/**
- * Set expected CRC32 for ROM verification.
- * If non-zero, launcher_load_rom will verify the CRC and prompt
- * the user to pick again on mismatch. Set to 0 to skip verification.
- */
-void launcher_set_expected_crc32(unsigned int crc32);
-
-/**
- * Add a valid CRC32 to the accepted list.
- * When multiple CRCs are added, the ROM is accepted if it matches ANY of them.
- * This is useful for games with multiple valid ROM versions (e.g. Red and Blue).
- */
-void launcher_add_valid_crc32(unsigned int crc32);
 
 /**
  * Load a ROM file into a malloc'd buffer.

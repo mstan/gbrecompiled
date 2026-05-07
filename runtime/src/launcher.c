@@ -5,6 +5,8 @@
  * Caches the path in rom.cfg next to the executable for subsequent runs.
  */
 #include "launcher.h"
+#include "game_extras.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,11 +22,6 @@
 
 static char s_cfg_path[512] = {0};
 static char s_rom_path[512] = {0};
-static unsigned int s_expected_crc32 = 0;
-
-#define MAX_VALID_CRCS 8
-static unsigned int s_valid_crcs[MAX_VALID_CRCS];
-static int s_valid_crc_count = 0;
 
 /* ── CRC32 ────────────────────────────────────────────────────────────────── */
 
@@ -47,16 +44,6 @@ static unsigned int crc32_compute(const unsigned char *data, unsigned int len) {
     for (unsigned int i = 0; i < len; i++)
         crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
     return crc ^ 0xFFFFFFFF;
-}
-
-void launcher_set_expected_crc32(unsigned int crc32) {
-    s_expected_crc32 = crc32;
-}
-
-void launcher_add_valid_crc32(unsigned int crc32) {
-    if (s_valid_crc_count < MAX_VALID_CRCS) {
-        s_valid_crcs[s_valid_crc_count++] = crc32;
-    }
 }
 
 void launcher_init(void) {
@@ -119,7 +106,13 @@ static int file_exists(const char *path) {
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 static int verify_rom_crc(const char *path) {
-    if (s_expected_crc32 == 0 && s_valid_crc_count == 0) return 1;
+    /* Pull expected CRC(s) from the game's extras.c hooks. */
+    int valid_count = 0;
+    const uint32_t *valid_list = game_get_valid_crcs(&valid_count);
+    uint32_t expected_single = (valid_count == 0) ? game_get_expected_crc32() : 0;
+
+    /* No CRC declared → skip validation entirely. */
+    if (valid_count == 0 && expected_single == 0) return 1;
 
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -135,12 +128,11 @@ static int verify_rom_crc(const char *path) {
     unsigned int actual = crc32_compute(data, (unsigned int)sz);
     free(data);
 
-    /* Check against valid CRC list first */
-    if (s_valid_crc_count > 0) {
-        for (int i = 0; i < s_valid_crc_count; i++) {
-            if (actual == s_valid_crcs[i]) return 1;
+    if (valid_count > 0 && valid_list) {
+        for (int i = 0; i < valid_count; i++) {
+            if (actual == valid_list[i]) return 1;
         }
-    } else if (actual == s_expected_crc32) {
+    } else if (actual == expected_single) {
         return 1;
     }
 

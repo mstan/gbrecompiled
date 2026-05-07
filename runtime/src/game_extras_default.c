@@ -29,3 +29,8 @@ WEAK_FUNC const char *game_get_name(void) { return "GB Recompiled"; }
 WEAK_FUNC int  game_handle_arg(const char *arg, const char *next_arg) {
     (void)arg; (void)next_arg; return 0;
 }
+WEAK_FUNC uint32_t game_get_expected_crc32(void) { return 0; }
+WEAK_FUNC const uint32_t *game_get_valid_crcs(int *out_count) {
+    if (out_count) *out_count = 0;
+    return 0;
+}

@@ -57,6 +57,18 @@ const char *game_get_name(void);
 /* Handle a CLI argument. Return 1 if consumed, 0 to ignore. */
 int game_handle_arg(const char *arg, const char *next_arg);
 
+/* ---- ROM identity hooks (NES-style) ---- */
+
+/* Return the game's expected ROM CRC32. Return 0 to skip CRC validation.
+ * Used when there's a single canonical ROM version. */
+uint32_t game_get_expected_crc32(void);
+
+/* Return a static array of valid ROM CRC32s for multi-version games
+ * (e.g. Pokemon Red + Blue share code; only data differs).
+ * Set *out_count to the array length. Return NULL to defer to
+ * game_get_expected_crc32(). */
+const uint32_t *game_get_valid_crcs(int *out_count);
+
 #ifdef __cplusplus
 }
 #endif

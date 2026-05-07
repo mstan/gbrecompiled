@@ -54,6 +54,9 @@ logs/
 tools/mgbdis
 imgui.ini
 
+# Vendored third-party libraries (fetched by build scripts; not tracked)
+runtime/third_party/
+
 # Python
 __pycache__/
 *.pyc

@@ -1,8 +1,12 @@
-# GB Recompiled (Fork)
+# GB Recompiled — Development Fork
 
 A **static recompiler** for original Game Boy ROMs that translates SM83 assembly into portable C code. Run classic Game Boy games as native executables — no traditional emulator required.
 
-> **This is a fork of [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled).** All original recompiler design, analysis engine, and code generation architecture is the work of [arcanite24](https://github.com/arcanite24). This fork adds runtime improvements, PPU fixes, and game-specific enhancements developed while building [PokemonRedAndBlueRecomp](https://github.com/mstan/PokemonRedAndBlueRecomp).
+> ### ⚠ This is a development fork. The canonical project is [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled) — go there for stable use.
+>
+> This repository (`mstan/gbrecompiled`) is a **personal development fork** maintained by [@mstan](https://github.com/mstan) to support work on [PokemonRedAndBlueRecomp](https://github.com/mstan/PokemonRedAndBlueRecomp) and related projects. It carries unmerged, in-progress, or game-specific changes that may diverge from upstream at any time.
+>
+> **For general use, prefer the upstream repository — it is the source of authority.** All original recompiler design, analysis engine, and code generation architecture is the work of [arcanite24](https://github.com/arcanite24); this fork adds runtime improvements, PPU fixes, and game-specific enhancements on top.
 
 ![Compatibility](https://img.shields.io/badge/compatibility-98.9%25-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)

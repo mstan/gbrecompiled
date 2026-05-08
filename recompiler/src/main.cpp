@@ -938,49 +938,6 @@ static const GBLauncherGame* prompt_for_game(void) {
     return find_game_by_id(selection);
 }
 
-static bool draw_game_row(const GBLauncherGame* game, int index, bool is_selected, bool* out_double_clicked) {
-    const float row_height = ImGui::GetTextLineHeight() * 2.8f + 10.0f;
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-
-    ImGui::PushID(index);
-    ImVec2 size = ImVec2(ImGui::GetContentRegionAvail().x, row_height);
-    if (size.x < 1.0f) {
-        size.x = 1.0f;
-    }
-
-    ImVec2 min = ImGui::GetCursorScreenPos();
-    bool activated = ImGui::InvisibleButton("game_row", size);
-    bool hovered = ImGui::IsItemHovered();
-    bool held = ImGui::IsItemActive();
-    bool double_clicked = hovered && ImGui::IsMouseDoubleClicked(0);
-    ImVec2 max = ImGui::GetItemRectMax();
-    ImVec2 title_pos = ImVec2(min.x + 12.0f, min.y + 8.0f);
-    ImVec2 id_pos = ImVec2(title_pos.x, title_pos.y + ImGui::GetTextLineHeight() + 4.0f);
-
-    ImU32 bg_color = ImGui::GetColorU32(is_selected ? ImGuiCol_Header : hovered ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg);
-    if (held) {
-        bg_color = ImGui::GetColorU32(ImGuiCol_HeaderActive);
-    }
-    draw_list->AddRectFilled(min, max, bg_color, 10.0f);
-    if (is_selected) {
-        draw_list->AddRectFilled(ImVec2(min.x + 2.0f, min.y + 6.0f),
-                                 ImVec2(min.x + 6.0f, max.y - 6.0f),
-                                 ImGui::GetColorU32(ImGuiCol_Button),
-                                 3.0f);
-    }
-
-    ImGui::PushClipRect(ImVec2(min.x + 10.0f, min.y), ImVec2(max.x - 10.0f, max.y), true);
-    draw_list->AddText(title_pos, ImGui::GetColorU32(ImGuiCol_Text), game->title);
-    draw_list->AddText(id_pos, ImGui::GetColorU32(ImGuiCol_TextDisabled), game->id);
-    ImGui::PopClipRect();
-    ImGui::PopID();
-
-    if (out_double_clicked) {
-        *out_double_clicked = double_clicked;
-    }
-    return activated;
-}
-
 static void apply_launcher_style(void) {
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
@@ -1116,66 +1073,62 @@ static int run_graphical_launcher(const GBLauncherGame** out_selected) {
                                         ImGuiWindowFlags_NoSavedSettings;
 
         if (ImGui::Begin("Launcher", NULL, window_flags)) {
-            const GBLauncherGame* game = &g_games[selected_index];
-            float list_width = ImGui::GetContentRegionAvail().x * 0.46f;
+            /* Keyboard / D-pad navigation. */
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown) ||
+                ImGui::IsKeyPressed(ImGuiKey_S)) {
+                selected_index = (selected_index + 1) % (int)g_game_count;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp) ||
+                ImGui::IsKeyPressed(ImGuiKey_W)) {
+                selected_index = (selected_index - 1 + (int)g_game_count) % (int)g_game_count;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+                ImGui::IsKeyPressed(ImGuiKey_KeypadEnter) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown) ||
+                ImGui::IsKeyPressed(ImGuiKey_Z)) {
+                accepted = true;
+                running = false;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+                running = false;
+            }
 
-            ImGui::TextUnformatted("GameBoy Recompiled");
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", g_launcher_name);
-            ImGui::Separator();
-            ImGui::TextWrapped("Choose one of the generated ROMs and press Launch Game. Any additional command line arguments will be forwarded to the selected runtime.");
+            const float content_w = ImGui::GetContentRegionAvail().x;
+            const float content_h = ImGui::GetContentRegionAvail().y;
+
+            ImGui::TextDisabled("GameBoy Recompiled  ·  %s", g_launcher_name);
             ImGui::Spacing();
 
-            ImGui::BeginChild("game_list", ImVec2(list_width, -72.0f), true);
-            ImGui::TextDisabled("Available Games");
-            ImGui::Separator();
+            const float list_width = content_w > 480.0f ? 420.0f : content_w * 0.9f;
+            const float list_x = (content_w - list_width) * 0.5f;
+            const float footer_h = ImGui::GetTextLineHeightWithSpacing() * 1.6f;
+
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + list_x);
+            ImGui::BeginChild("games", ImVec2(list_width, content_h - footer_h - 32.0f), false);
             for (size_t i = 0; i < g_game_count; i++) {
-                bool is_selected = selected_index == (int)i;
-                bool double_clicked = false;
-                if (draw_game_row(&g_games[i], (int)i, is_selected, &double_clicked)) {
+                bool selected = (int)i == selected_index;
+                ImGui::PushID((int)i);
+                if (ImGui::Selectable(g_games[i].title, selected,
+                                      ImGuiSelectableFlags_AllowDoubleClick,
+                                      ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing() * 1.4f))) {
                     selected_index = (int)i;
-                    if (double_clicked) {
+                    if (ImGui::IsMouseDoubleClicked(0)) {
                         accepted = true;
                         running = false;
                     }
                 }
+                ImGui::PopID();
             }
             ImGui::EndChild();
 
-            ImGui::SameLine();
-            ImGui::BeginChild("game_details", ImVec2(0.0f, -72.0f), true);
-            ImGui::TextDisabled("Selected Game");
-            ImGui::Separator();
-            ImGui::Text("%s", game->title);
-            ImGui::Spacing();
-            ImGui::TextDisabled("Game ID");
-            ImGui::TextUnformatted(game->id);
-            ImGui::Spacing();
-            ImGui::TextDisabled("Source ROM");
-            ImGui::TextWrapped("%s", game->rom_path);
-            ImGui::Spacing();
-            ImGui::TextDisabled("Controls");
-            ImGui::BulletText("Double-click a game to launch immediately.");
-            ImGui::BulletText("Press Enter to launch the current selection.");
-            ImGui::BulletText("Press Escape or Quit to close the launcher.");
-            ImGui::EndChild();
-
-            if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
-                accepted = true;
-                running = false;
-            }
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                running = false;
-            }
-
-            if (ImGui::Button("Launch Game", ImVec2(180.0f, 0.0f))) {
-                accepted = true;
-                running = false;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Quit", ImVec2(120.0f, 0.0f))) {
-                running = false;
-            }
+            ImGui::SetCursorPosY(content_h + ImGui::GetStyle().WindowPadding.y - footer_h);
+            const char* hint = "Up/Down select   |   Enter / A launch   |   Esc / B quit";
+            const float hint_w = ImGui::CalcTextSize(hint).x;
+            ImGui::SetCursorPosX((content_w - hint_w) * 0.5f);
+            ImGui::TextDisabled("%s", hint);
         }
         ImGui::End();
 

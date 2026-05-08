@@ -6,6 +6,7 @@
 #include "ppu.h"
 #include "gbrt.h"
 #include "gbrt_debug.h"
+#include "sgb.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -774,6 +775,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 if (ppu->ly >= VISIBLE_SCANLINES) {
                     ppu->mode = PPU_MODE_VBLANK;
                     if (!ppu->frame_ready) {
+                        gb_sgb_apply_to_frame(ctx);
                         convert_to_rgb(ppu);
                         ppu->frame_ready = true;
                         ctx->frame_done = 1;

@@ -9,6 +9,7 @@
 #include "audio_stats.h"
 #include "gbrt_debug.h"
 #include "serial_link.h"
+#include "sgb.h"
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -79,6 +80,14 @@ static int g_border_idx = 0;
 static std::string g_border_dir;
 static std::string g_border_loaded_filename;
 static SDL_Texture* g_border_texture = NULL;
+
+/* SGB cart-supplied border (CHR_TRN+PCT_TRN). Rebuilt from sgb engine
+ * data whenever the revision counter advances. Default enabled — most
+ * SGB carts ship with a border specifically authored for them. */
+static bool g_sgb_cart_border_enabled = true;
+static SDL_Texture* g_sgb_cart_border_texture = NULL;
+static uint32_t g_sgb_cart_border_revision = 0;
+static std::vector<uint32_t> g_sgb_cart_border_pixels;  /* scratch RGBA buffer */
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
 static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
@@ -1019,6 +1028,10 @@ static void load_runtime_preferences(void) {
                     g_border_enabled = (strcmp(value, "0") != 0);
                     continue;
                 }
+                if (strcmp(key, "sgb.cart_border") == 0) {
+                    g_sgb_cart_border_enabled = (strcmp(value, "0") != 0);
+                    continue;
+                }
                 if (strcmp(key, "border.file") == 0) {
                     g_border_loaded_filename = value; /* index resolved later */
                     continue;
@@ -1142,6 +1155,7 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
+    fprintf(file, "sgb.cart_border=%d\n", g_sgb_cart_border_enabled ? 1 : 0);
     if (g_border_enabled && !g_border_files.empty() &&
         g_border_idx >= 0 && g_border_idx < (int)g_border_files.size()) {
         fprintf(file, "border.file=%s\n", g_border_files[g_border_idx].c_str());
@@ -1596,12 +1610,22 @@ static int round_to_int(double value) {
  * Custom SGB borders (optional, opt-in via menu)
  * ========================================================================== */
 
+static bool sgb_cart_border_active(void) {
+    return g_sgb_cart_border_enabled && g_sgb_cart_border_texture != NULL;
+}
+
 static int border_content_width(void) {
-    return (g_border_enabled && g_border_texture) ? GB_BORDER_FULL_W : GB_SCREEN_WIDTH;
+    if ((g_border_enabled && g_border_texture) || sgb_cart_border_active()) {
+        return GB_BORDER_FULL_W;
+    }
+    return GB_SCREEN_WIDTH;
 }
 
 static int border_content_height(void) {
-    return (g_border_enabled && g_border_texture) ? GB_BORDER_FULL_H : GB_SCREEN_HEIGHT;
+    if ((g_border_enabled && g_border_texture) || sgb_cart_border_active()) {
+        return GB_BORDER_FULL_H;
+    }
+    return GB_SCREEN_HEIGHT;
 }
 
 static void unload_border_texture(void) {
@@ -1610,6 +1634,76 @@ static void unload_border_texture(void) {
         g_border_texture = NULL;
     }
     g_border_loaded_filename.clear();
+}
+
+/* Forward declarations: apply_window_scale_preset rescales the window
+ * when the border layout flips between 160x144 and 256x224.
+ * unload_sgb_cart_border_texture lives just below refresh_*. */
+static void apply_window_scale_preset(void);
+static void unload_sgb_cart_border_texture(void);
+
+/* Rebuild g_sgb_cart_border_texture from the current SGB engine state if
+ * the cart has just shipped fresh CHR_TRN/PCT_TRN data. Cheap when the
+ * revision counter hasn't changed, so it's safe to call every frame. */
+static void refresh_sgb_cart_border_texture(void) {
+    if (!g_renderer) return;
+    if (!g_registered_ctx) {
+        unload_sgb_cart_border_texture();
+        return;
+    }
+    GBSgbState* sgb = (GBSgbState*)g_registered_ctx->sgb;
+    if (!gb_sgb_border_ready(sgb)) {
+        /* Engine has been reset (revision 0) but we still hold a texture
+         * from a previous cart — drop it so we don't render stale art. */
+        if (g_sgb_cart_border_texture) {
+            unload_sgb_cart_border_texture();
+            apply_window_scale_preset();
+        }
+        return;
+    }
+    uint32_t rev = gb_sgb_border_revision(sgb);
+    if (rev == g_sgb_cart_border_revision && g_sgb_cart_border_texture) return;
+
+    if (g_sgb_cart_border_pixels.size() != (size_t)(GB_SGB_BORDER_W * GB_SGB_BORDER_H)) {
+        g_sgb_cart_border_pixels.assign((size_t)GB_SGB_BORDER_W * GB_SGB_BORDER_H, 0);
+    } else {
+        std::fill(g_sgb_cart_border_pixels.begin(), g_sgb_cart_border_pixels.end(), 0u);
+    }
+    if (!gb_sgb_render_border(sgb, g_sgb_cart_border_pixels.data())) return;
+
+    bool first_creation = false;
+    if (!g_sgb_cart_border_texture) {
+        g_sgb_cart_border_texture = SDL_CreateTexture(g_renderer,
+                                                      SDL_PIXELFORMAT_ABGR8888,
+                                                      SDL_TEXTUREACCESS_STATIC,
+                                                      GB_SGB_BORDER_W, GB_SGB_BORDER_H);
+        if (!g_sgb_cart_border_texture) {
+            fprintf(stderr, "[SGB] cart border SDL_CreateTexture failed: %s\n",
+                    SDL_GetError());
+            return;
+        }
+        SDL_SetTextureBlendMode(g_sgb_cart_border_texture, SDL_BLENDMODE_BLEND);
+        first_creation = true;
+    }
+    SDL_UpdateTexture(g_sgb_cart_border_texture, NULL,
+                      g_sgb_cart_border_pixels.data(),
+                      GB_SGB_BORDER_W * (int)sizeof(uint32_t));
+    g_sgb_cart_border_revision = rev;
+
+    /* The first time the cart border lands, the content area jumps from
+     * 160x144 to 256x224, so the window/viewport need to be rescaled. */
+    if (first_creation && g_sgb_cart_border_enabled) {
+        apply_window_scale_preset();
+    }
+}
+
+static void unload_sgb_cart_border_texture(void) {
+    if (g_sgb_cart_border_texture) {
+        SDL_DestroyTexture(g_sgb_cart_border_texture);
+        g_sgb_cart_border_texture = NULL;
+    }
+    g_sgb_cart_border_revision = 0;
+    g_sgb_cart_border_pixels.clear();
 }
 
 /* Load the PNG `<g_border_dir>/<filename>` into g_border_texture. Returns true
@@ -2179,10 +2273,18 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     double compose_start_ms = sdl_now_ms();
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
-    if (g_border_enabled && g_border_texture) {
-        /* Border fills the viewport (256x224 aspect); GB framebuffer goes
-         * into the centered 160x144 inset. */
-        SDL_RenderCopy(g_renderer, g_border_texture, NULL, &g_game_viewport);
+    refresh_sgb_cart_border_texture();
+    /* Pick the border source: the cart-supplied SGB border wins when it's
+     * available and enabled, otherwise fall back to the user PNG border,
+     * otherwise no border at all. */
+    SDL_Texture* active_border = NULL;
+    if (sgb_cart_border_active()) {
+        active_border = g_sgb_cart_border_texture;
+    } else if (g_border_enabled && g_border_texture) {
+        active_border = g_border_texture;
+    }
+    if (active_border) {
+        SDL_RenderCopy(g_renderer, active_border, NULL, &g_game_viewport);
         const double sx = (double)g_game_viewport.w / (double)GB_BORDER_FULL_W;
         const double sy = (double)g_game_viewport.h / (double)GB_BORDER_FULL_H;
         SDL_Rect gb_rect;
@@ -2265,9 +2367,27 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::TextDisabled("Look");
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
 
-        /* Custom SGB border (optional). Toggle picks whether to draw any
-         * border at all; the cycler picks which PNG from borders/. */
-        if (ImGui::Checkbox("Custom SGB Border", &g_border_enabled)) {
+        /* SGB cart border: the actual border the cart ships in its ROM,
+         * decoded from CHR_TRN/PCT_TRN. Default on when SGB is enabled
+         * — the alternative is one less reason to play this on SGB. */
+        if (ImGui::Checkbox("SGB Cart Border", &g_sgb_cart_border_enabled)) {
+            apply_window_scale_preset();
+            save_runtime_preferences();
+        }
+        if (g_registered_ctx) {
+            GBSgbState* sgb_state = (GBSgbState*)g_registered_ctx->sgb;
+            if (!gb_sgb_is_enabled(sgb_state)) {
+                ImGui::TextDisabled("(cart does not advertise SGB support)");
+            } else if (!gb_sgb_border_ready(sgb_state)) {
+                ImGui::TextDisabled("(waiting for cart border data)");
+            }
+        }
+
+        /* Custom SGB border (optional, opt-in). Toggle picks whether to
+         * draw a user-supplied PNG border; the cycler selects which one
+         * from borders/. The cart border above takes precedence when
+         * both are active. */
+        if (ImGui::Checkbox("Custom PNG Border", &g_border_enabled)) {
             apply_border_change();
             save_runtime_preferences();
         }
@@ -2636,6 +2756,7 @@ void gb_platform_shutdown(void) {
         g_texture = NULL;
     }
     unload_border_texture();
+    unload_sgb_cart_border_texture();
     if (g_renderer) {
         SDL_DestroyRenderer(g_renderer);
         g_renderer = NULL;

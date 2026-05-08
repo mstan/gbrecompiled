@@ -38,6 +38,7 @@ typedef struct {
     bool cgb_compatibility_mode; /**< Run CGB hardware in DMG compatibility mode */
     bool cartridge_supports_cgb; /**< Cartridge advertises CGB support */
     bool cartridge_requires_cgb; /**< Cartridge is CGB-only */
+    bool cartridge_supports_sgb; /**< Cart byte 0x146 == 0x03 (uses SGB functions) */
     bool enable_bootrom;
     bool enable_audio;
     bool enable_serial;
@@ -263,6 +264,7 @@ typedef struct GBContext {
     void* timer;          /**< Timer unit */
     void* serial;         /**< Serial port */
     void* joypad;         /**< Joypad input */
+    void* sgb;            /**< Super GameBoy state (NULL when disabled) */
     uint8_t last_joypad;  /**< Last joypad state for interrupt generation */
     uint8_t used_dispatch_fallback; /**< Generated path fell back to interpreter */
     uint8_t dispatch_fallback_bank; /**< Bank used for the most recent fallback */

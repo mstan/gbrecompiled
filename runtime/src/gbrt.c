@@ -3,6 +3,7 @@
 #include "audio.h"
 #include "audio_stats.h"
 #include "platform_sdl.h"
+#include "sgb.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -883,6 +884,7 @@ GBContext* gb_context_create(const GBConfig* config) {
     }
     
     ctx->apu = gb_audio_create();
+    ctx->sgb = gb_sgb_create();
     audio_stats_init();
     gb_context_reset(ctx, true);
 
@@ -928,6 +930,7 @@ void gb_context_destroy(GBContext* ctx) {
     
     if (ctx->ppu) free(ctx->ppu);
     if (ctx->apu) gb_audio_destroy(ctx->apu);
+    if (ctx->sgb) gb_sgb_destroy(ctx->sgb);
     if (ctx->rom) free(ctx->rom);
     free(ctx);
 }
@@ -1110,6 +1113,30 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
     memcpy(ctx->rom, data, size);
     ctx->rom_size = size;
     
+    /* Auto-enable SGB when the cart advertises it. The user can still flip
+     * it off at runtime via gb_sgb_set_enabled. */
+    bool sgb_active = false;
+    if (ctx->sgb) {
+        gb_sgb_reset((GBSgbState*)ctx->sgb);
+        sgb_active = gb_sgb_cart_supports(ctx->rom, ctx->rom_size);
+        gb_sgb_set_enabled((GBSgbState*)ctx->sgb, sgb_active);
+    }
+
+    /* SGB and CGB are mutually exclusive on real hardware (the SGB IS a
+     * DMG with a SNES wrapper — there's no CGB-on-SGB device). When a
+     * cart supports both (e.g. Pokemon Yellow: 0x143=0x80, 0x146=0x03)
+     * and it isn't CGB-required, treating ourselves as CGB makes the
+     * cart's SGB setup code fall into its CGB-palette path, which then
+     * clobbers HL/DE mid-CHR_TRN/PCT_TRN and the border data never
+     * lands in VRAM. Downgrade to DMG when SGB is in play so the cart
+     * takes the SGB-safe path. The user can override with --model cgb
+     * if they prefer CGB colors over SGB borders. */
+    if (sgb_active && gb_is_cgb_hardware(ctx) && !ctx->config.cartridge_requires_cgb) {
+        ctx->config.model = GB_MODEL_DMG;
+        ctx->config.cgb_compatibility_mode = false;
+        gb_context_reset(ctx, true);
+    }
+
     /* Parse Header for RAM/Battery info */
     if (size > 0x149) {
         uint8_t type = ctx->rom[0x147];
@@ -1641,7 +1668,7 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
             uint8_t res = 0xC0 | (joyp & 0x30) | 0x0F;
             if (!(joyp & 0x10)) res &= dpad;
             if (!(joyp & 0x20)) res &= buttons;
-            return res;
+            return gb_sgb_modify_joyp_read(ctx, res);
         }
         if (addr == 0xFF04) return (uint8_t)(ctx->div_counter >> 8);
         if (addr == 0xFF4D) {
@@ -1949,6 +1976,14 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
     }
     if (addr < 0xFF00) return;
     if (addr < 0xFF80) {
+        if (addr == 0xFF00) {
+            /* SGB watches every JOYP write for its packet protocol. The
+             * regular DMG semantics still apply: only bits 4-5 are writable
+             * (the low nibble is the input mux output). */
+            ctx->io[0x00] = (uint8_t)((ctx->io[0x00] & 0x0F) | (value & 0x30) | 0xC0);
+            gb_sgb_on_joyp_write(ctx, value);
+            return;
+        }
         if (addr == 0xFF46) {
             gb_sync(ctx);
             /* OAM DMA: start transfer and expose the written source page. */

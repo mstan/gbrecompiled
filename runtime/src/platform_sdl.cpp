@@ -2224,68 +2224,46 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                          ImGuiWindowFlags_NoCollapse);
         ImGui::Text("GameBoy Recompiled");
         ImGui::TextDisabled("Settings");
+        ImGui::Separator();
+        ImGui::BeginChild("SettingsScroll", ImVec2(0.0f, -footer_height), false, ImGuiWindowFlags_NavFlattened);
+
+        /* ============================================================
+         * Front-of-house: things you reach for during normal play.
+         * Each subgroup is tagged with a small dim heading so the menu
+         * doesn't read as one undifferentiated block.
+         * ========================================================== */
+
+        ImGui::TextDisabled("Playback");
+        if (ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500, "%d", ImGuiSliderFlags_NoInput)) {
+            reset_audio_output_buffer(true);
+        }
+        if (ImGui::Button("Reset Speed")) {
+            g_speed_percent = 100;
+            g_max_speed_mode = false;
+            reset_audio_output_buffer(true);
+        }
         ImGui::SameLine();
-        if (ImGui::Button("Resume")) {
-            g_show_menu = false;
-        }
-        ImGui::Separator();
-        ImGui::TextWrapped("Toggle menu: %s", controller_menu_hint_text());
-#if defined(__ANDROID__)
-        ImGui::TextWrapped("Android Back / Escape also opens or closes the menu.");
-#else
-        ImGui::TextWrapped("Escape also opens or closes the menu.");
-#endif
-        ImGui::Separator();
-        ImGui::BeginChild("SettingsScroll", ImVec2(0.0f, -footer_height), false);
-        ImGui::Text("Performance: %.1f FPS", ImGui::GetIO().Framerate);
-
-        int window_w = 0;
-        int window_h = 0;
-        SDL_GetWindowSize(g_window, &window_w, &window_h);
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Graphics");
-        ImGui::Text("Window: %d x %d", window_w, window_h);
-        ImGui::Text("Viewport: %d x %d (%.2fx)",
-                    g_game_viewport.w,
-                    g_game_viewport.h,
-                    (double)g_game_viewport.w / (double)GB_SCREEN_WIDTH);
-
-        bool fullscreen = g_fullscreen;
-        if (ImGui::Checkbox("Fullscreen", &fullscreen)) {
-            set_fullscreen_enabled(fullscreen);
+        ImGui::TextDisabled("Effective: %d%%", effective_speed_percent());
+        if (g_fast_forward_active) {
+            ImGui::TextDisabled("Fast forward shortcut is active.");
+        } else if (g_max_speed_mode) {
+            ImGui::TextDisabled("Max speed shortcut is active.");
         }
 
-        int scaling_mode = (int)g_render_scaling_mode;
-        if (ImGui::Combo("Scaling Mode",
-                         &scaling_mode,
-                         g_render_scaling_mode_names,
-                         IM_ARRAYSIZE(g_render_scaling_mode_names))) {
-            g_render_scaling_mode = (GBRenderScalingMode)scaling_mode;
-            update_game_viewport();
+        ImGui::Spacing();
+        ImGui::TextDisabled("Audio");
+        if (ImGui::Checkbox("Mute", &g_audio_muted)) {
+            save_runtime_preferences();
+        }
+        int audio_volume_percent = (int)g_audio_volume_percent;
+        if (ImGui::SliderInt("Master Volume (%)", &audio_volume_percent, 0, 200, "%d", ImGuiSliderFlags_NoInput)) {
+            g_audio_volume_percent = (uint32_t)audio_volume_percent;
+            save_runtime_preferences();
         }
 
-        int filter_mode = (int)g_render_filter_mode;
-        if (ImGui::Combo("Scale Filter",
-                         &filter_mode,
-                         g_render_filter_names,
-                         IM_ARRAYSIZE(g_render_filter_names))) {
-            g_render_filter_mode = (GBRenderFilterMode)filter_mode;
-            update_render_filter();
-        }
-
-        if (!g_fullscreen) {
-            int scale_idx = g_scale - 1;
-            if (ImGui::Combo("Window Size",
-                             &scale_idx,
-                             g_scale_names,
-                             IM_ARRAYSIZE(g_scale_names))) {
-                g_scale = scale_idx + 1;
-                apply_window_scale_preset();
-            }
-        } else {
-            ImGui::TextDisabled("Window Size is disabled while fullscreen is active.");
-        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("Look");
+        ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
 
         /* Custom SGB border (optional). Toggle picks whether to draw any
          * border at all; the cycler picks which PNG from borders/. */
@@ -2320,108 +2298,10 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             if (!cycler_enabled) ImGui::EndDisabled();
         }
 
-        ImGui::Separator();
-        ImGui::TextDisabled("Runtime");
-        if (ImGui::Checkbox("V-Sync", &g_vsync)) {
-            SDL_RenderSetVSync(g_renderer, g_vsync ? 1 : 0);
-        }
-
-        ImGui::Checkbox("Show Overlay", &g_show_overlay);
-        ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
-        if (ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500)) {
-            reset_audio_output_buffer(true);
-        }
-        if (ImGui::Button("Reset Speed")) {
-            g_speed_percent = 100;
-            g_max_speed_mode = false;
-            reset_audio_output_buffer(true);
-        }
-        ImGui::Text("Effective Speed: %d%%", effective_speed_percent());
-        if (g_fast_forward_active) {
-            ImGui::TextDisabled("Fast forward shortcut is active.");
-        } else if (g_max_speed_mode) {
-            ImGui::TextDisabled("Max speed shortcut is active.");
-        }
-        ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Audio");
-        if (ImGui::Checkbox("Enable Audio Output", &g_audio_output_enabled)) {
-            reset_audio_output_buffer(true);
-            save_runtime_preferences();
-        }
-        if (ImGui::Checkbox("Mute", &g_audio_muted)) {
-            save_runtime_preferences();
-        }
-        int audio_volume_percent = (int)g_audio_volume_percent;
-        if (ImGui::SliderInt("Master Volume (%)", &audio_volume_percent, 0, 200)) {
-            g_audio_volume_percent = (uint32_t)audio_volume_percent;
-            save_runtime_preferences();
-        }
-        if (ImGui::BeginCombo("Output Device", current_audio_output_device_label())) {
-            bool selected_default = g_audio_target_device_name.empty();
-            if (ImGui::Selectable("System Default", selected_default)) {
-                g_audio_target_device_name.clear();
-                save_runtime_preferences();
-                reopen_audio_output_device(true);
-            }
-            if (selected_default) {
-                ImGui::SetItemDefaultFocus();
-            }
-
-            for (size_t i = 0; i < g_audio_output_devices.size(); i++) {
-                const bool selected = g_audio_output_devices[i] == g_audio_target_device_name;
-                if (ImGui::Selectable(g_audio_output_devices[i].c_str(), selected)) {
-                    g_audio_target_device_name = g_audio_output_devices[i];
-                    save_runtime_preferences();
-                    reopen_audio_output_device(true);
-                }
-                if (selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        int audio_latency_ms = (int)g_audio_latency_ms;
-        if (ImGui::SliderInt("Target Audio Latency (ms)", &audio_latency_ms, 20, 250)) {
-            g_audio_latency_ms = (uint32_t)audio_latency_ms;
-            recompute_audio_targets();
-            reset_audio_output_buffer(true);
-            save_runtime_preferences();
-        }
-        if (ImGui::Button("Refresh Devices")) {
-            refresh_audio_output_devices();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Reconnect Audio")) {
-            reopen_audio_output_device(true);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Clear Audio Buffer")) {
-            reset_audio_output_buffer(true);
-        }
-        ImGui::Text("Requested Output: %s", current_audio_output_device_label());
-        ImGui::Text("Active Output: %s", g_audio_active_device_name.empty() ? "Unavailable" : g_audio_active_device_name.c_str());
-        if (!current_audio_output_device_available()) {
-            ImGui::TextDisabled("Requested device is unavailable. Using the default output when possible.");
-        }
-        ImGui::Text("Ring Buffer: %u / %u samples", current_audio_ring_fill_samples(), current_audio_ring_capacity());
-        ImGui::Text("Device: %u Hz, device buffer %u, start %u, low-water %u",
-                    g_audio_device_sample_rate,
-                    g_audio_device_buffer_samples,
-                    g_audio_start_threshold,
-                    g_audio_low_watermark);
-        if (effective_speed_percent() != 100) {
-            ImGui::TextDisabled("Audio output pauses while Speed %% is not 100.");
-        }
-        if (ImGui::Button("Reset Audio")) {
-            reset_runtime_audio_defaults();
-        }
-
-        ImGui::Separator();
+        ImGui::Spacing();
         ImGui::TextDisabled("Savestates");
         int savestate_slot = g_savestate_slot + 1;
-        if (ImGui::SliderInt("Active Slot", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT)) {
+        if (ImGui::SliderInt("Active Slot", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT, "%d", ImGuiSliderFlags_NoInput)) {
             g_savestate_slot = savestate_slot - 1;
             save_runtime_preferences();
         }
@@ -2439,97 +2319,210 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         {
             std::string savestate_path;
             const bool slot_exists = savestate_slot_exists(g_registered_ctx, g_savestate_slot, &savestate_path);
-            ImGui::Text("Slot File: %s", savestate_path.empty() ? "(unavailable)" : savestate_path.c_str());
-            ImGui::Text("Slot Status: %s", slot_exists ? "Present" : "Empty");
+            ImGui::TextDisabled("Slot %d: %s", g_savestate_slot + 1, slot_exists ? "Present" : "Empty");
         }
         if (!g_savestate_status.empty()) {
             ImGui::TextWrapped("%s", g_savestate_status.c_str());
         }
 
+        ImGui::Spacing();
         ImGui::Separator();
-        ImGui::TextDisabled("Controls");
-        if (!g_controller_name.empty()) {
-            ImGui::Text("Detected Controller: %s", g_controller_name.c_str());
-            ImGui::TextDisabled("Profile: %s", controller_type_name(g_controller_type));
-        } else {
-#if defined(__ANDROID__)
-            ImGui::TextDisabled("No controller detected. Controller mappings will apply when one is connected.");
-#else
-            ImGui::TextDisabled("No controller detected.");
-#endif
-        }
-        render_binding_editor("Keyboard Gameplay",
-                              GB_CAPTURE_DEVICE_KEYBOARD,
-                              g_keyboard_bindings,
-                              GB_INPUT_ACTION_RIGHT,
-                              GB_INPUT_ACTION_FAST_FORWARD);
-        ImGui::Spacing();
-        render_binding_editor("Controller Gameplay",
-                              GB_CAPTURE_DEVICE_CONTROLLER,
-                              g_controller_bindings,
-                              GB_INPUT_ACTION_RIGHT,
-                              GB_INPUT_ACTION_FAST_FORWARD);
-        ImGui::Spacing();
-        render_binding_editor("Keyboard Shortcuts",
-                              GB_CAPTURE_DEVICE_KEYBOARD,
-                              g_keyboard_bindings,
-                              GB_INPUT_ACTION_FAST_FORWARD,
-                              GB_INPUT_ACTION_COUNT);
-        ImGui::Spacing();
-        render_binding_editor("Controller Shortcuts",
-                              GB_CAPTURE_DEVICE_CONTROLLER,
-                              g_controller_bindings,
-                              GB_INPUT_ACTION_FAST_FORWARD,
-                              GB_INPUT_ACTION_COUNT);
-        if (g_binding_capture_active) {
-            ImGui::Separator();
-            ImGui::TextDisabled("Waiting for %s input for %s slot %d",
-                                g_binding_capture_device == GB_CAPTURE_DEVICE_KEYBOARD ? "keyboard" : "controller",
-                                g_input_action_names[g_binding_capture_action],
-                                g_binding_capture_slot + 1);
-            if (ImGui::Button("Cancel Capture")) {
-                cancel_binding_capture();
-            }
-        }
-        if (ImGui::Button("Reset Controls")) {
-            reset_runtime_control_defaults();
-        }
-        ImGui::TextDisabled("Shortcut bindings can also control fast forward, max speed, savestates, overlay, mute, and the menu.");
-        ImGui::BulletText("%s", controller_menu_hint_text());
-#if defined(__ANDROID__)
-        ImGui::BulletText("Android Back / Escape: Settings Menu");
-#else
-        ImGui::BulletText("Escape: Settings Menu");
-#endif
 
-        if (has_interpreter_activity(g_registered_ctx)) {
-            const GBInterpreterHotspot* hotspot = &g_registered_ctx->interpreter_hotspots[0];
-            ImGui::Separator();
-            ImGui::TextDisabled("Interpreter Fallback");
-            ImGui::Text("Frame Fallbacks: %u", g_registered_ctx->frame_dispatch_fallbacks);
-            ImGui::Text("Interp Entries: %llu",
-                        (unsigned long long)g_registered_ctx->total_interpreter_entries);
-            ImGui::Text("Total Fallbacks: %llu",
-                        (unsigned long long)g_registered_ctx->total_dispatch_fallbacks);
-            ImGui::Text("Interp Instr: frame %llu total %llu",
-                        (unsigned long long)g_registered_ctx->frame_interpreter_instructions,
-                        (unsigned long long)g_registered_ctx->total_interpreter_instructions);
-            ImGui::Text("Interp Cycles: frame %llu total %llu",
-                        (unsigned long long)g_registered_ctx->frame_interpreter_cycles,
-                        (unsigned long long)g_registered_ctx->total_interpreter_cycles);
-            if (hotspot->valid && hotspot->entries > 0) {
-                ImGui::Text("Top Hotspot: %03X:%04X", hotspot->bank, hotspot->addr);
-                ImGui::Text("Hits %llu Instr %llu Cycles %llu",
-                            (unsigned long long)hotspot->entries,
-                            (unsigned long long)hotspot->instructions,
-                            (unsigned long long)hotspot->cycles);
+        /* ============================================================
+         * Advanced: tucked away. Display, audio plumbing, key bindings,
+         * diagnostics. Open it once to remap keys or pick an output
+         * device, then forget it exists.
+         * ========================================================== */
+        if (ImGui::CollapsingHeader("Advanced")) {
+            int window_w = 0;
+            int window_h = 0;
+            SDL_GetWindowSize(g_window, &window_w, &window_h);
+
+            ImGui::TextDisabled("Display");
+            bool fullscreen = g_fullscreen;
+            if (ImGui::Checkbox("Fullscreen", &fullscreen)) {
+                set_fullscreen_enabled(fullscreen);
             }
-            if (g_registered_ctx->has_unimplemented_interpreter_opcode) {
-                ImGui::Text("Coverage Gap: %02X at %03X:%04X",
-                            g_registered_ctx->last_unimplemented_opcode,
-                            g_registered_ctx->last_unimplemented_bank,
-                            g_registered_ctx->last_unimplemented_addr);
+            int scaling_mode = (int)g_render_scaling_mode;
+            if (ImGui::Combo("Scaling Mode",
+                             &scaling_mode,
+                             g_render_scaling_mode_names,
+                             IM_ARRAYSIZE(g_render_scaling_mode_names))) {
+                g_render_scaling_mode = (GBRenderScalingMode)scaling_mode;
+                update_game_viewport();
             }
+            int filter_mode = (int)g_render_filter_mode;
+            if (ImGui::Combo("Scale Filter",
+                             &filter_mode,
+                             g_render_filter_names,
+                             IM_ARRAYSIZE(g_render_filter_names))) {
+                g_render_filter_mode = (GBRenderFilterMode)filter_mode;
+                update_render_filter();
+            }
+            if (!g_fullscreen) {
+                int scale_idx = g_scale - 1;
+                if (ImGui::Combo("Window Size",
+                                 &scale_idx,
+                                 g_scale_names,
+                                 IM_ARRAYSIZE(g_scale_names))) {
+                    g_scale = scale_idx + 1;
+                    apply_window_scale_preset();
+                }
+            } else {
+                ImGui::TextDisabled("Window Size disabled while fullscreen.");
+            }
+            if (ImGui::Checkbox("V-Sync", &g_vsync)) {
+                SDL_RenderSetVSync(g_renderer, g_vsync ? 1 : 0);
+            }
+            ImGui::Checkbox("Show Overlay", &g_show_overlay);
+            ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Audio");
+            if (ImGui::Checkbox("Enable Audio Output", &g_audio_output_enabled)) {
+                reset_audio_output_buffer(true);
+                save_runtime_preferences();
+            }
+            if (ImGui::BeginCombo("Output Device", current_audio_output_device_label())) {
+                bool selected_default = g_audio_target_device_name.empty();
+                if (ImGui::Selectable("System Default", selected_default)) {
+                    g_audio_target_device_name.clear();
+                    save_runtime_preferences();
+                    reopen_audio_output_device(true);
+                }
+                if (selected_default) {
+                    ImGui::SetItemDefaultFocus();
+                }
+                for (size_t i = 0; i < g_audio_output_devices.size(); i++) {
+                    const bool selected = g_audio_output_devices[i] == g_audio_target_device_name;
+                    if (ImGui::Selectable(g_audio_output_devices[i].c_str(), selected)) {
+                        g_audio_target_device_name = g_audio_output_devices[i];
+                        save_runtime_preferences();
+                        reopen_audio_output_device(true);
+                    }
+                    if (selected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            int audio_latency_ms = (int)g_audio_latency_ms;
+            if (ImGui::SliderInt("Target Audio Latency (ms)", &audio_latency_ms, 20, 250, "%d", ImGuiSliderFlags_NoInput)) {
+                g_audio_latency_ms = (uint32_t)audio_latency_ms;
+                recompute_audio_targets();
+                reset_audio_output_buffer(true);
+                save_runtime_preferences();
+            }
+            if (ImGui::Button("Refresh Devices")) {
+                refresh_audio_output_devices();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reconnect Audio")) {
+                reopen_audio_output_device(true);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Audio Buffer")) {
+                reset_audio_output_buffer(true);
+            }
+            ImGui::TextDisabled("Active: %s", g_audio_active_device_name.empty() ? "Unavailable" : g_audio_active_device_name.c_str());
+            if (!current_audio_output_device_available()) {
+                ImGui::TextDisabled("Requested device unavailable; using default.");
+            }
+            ImGui::TextDisabled("Ring %u / %u  ·  %u Hz buf %u",
+                                current_audio_ring_fill_samples(), current_audio_ring_capacity(),
+                                g_audio_device_sample_rate, g_audio_device_buffer_samples);
+            if (effective_speed_percent() != 100) {
+                ImGui::TextDisabled("Audio paused while Speed %% != 100.");
+            }
+            if (ImGui::Button("Reset Audio")) {
+                reset_runtime_audio_defaults();
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Controls");
+            if (!g_controller_name.empty()) {
+                ImGui::Text("Controller: %s", g_controller_name.c_str());
+                ImGui::TextDisabled("Profile: %s", controller_type_name(g_controller_type));
+            } else {
+#if defined(__ANDROID__)
+                ImGui::TextDisabled("No controller detected. Controller mappings apply when one is connected.");
+#else
+                ImGui::TextDisabled("No controller detected.");
+#endif
+            }
+            render_binding_editor("Keyboard Gameplay",
+                                  GB_CAPTURE_DEVICE_KEYBOARD,
+                                  g_keyboard_bindings,
+                                  GB_INPUT_ACTION_RIGHT,
+                                  GB_INPUT_ACTION_FAST_FORWARD);
+            ImGui::Spacing();
+            render_binding_editor("Controller Gameplay",
+                                  GB_CAPTURE_DEVICE_CONTROLLER,
+                                  g_controller_bindings,
+                                  GB_INPUT_ACTION_RIGHT,
+                                  GB_INPUT_ACTION_FAST_FORWARD);
+            ImGui::Spacing();
+            render_binding_editor("Keyboard Shortcuts",
+                                  GB_CAPTURE_DEVICE_KEYBOARD,
+                                  g_keyboard_bindings,
+                                  GB_INPUT_ACTION_FAST_FORWARD,
+                                  GB_INPUT_ACTION_COUNT);
+            ImGui::Spacing();
+            render_binding_editor("Controller Shortcuts",
+                                  GB_CAPTURE_DEVICE_CONTROLLER,
+                                  g_controller_bindings,
+                                  GB_INPUT_ACTION_FAST_FORWARD,
+                                  GB_INPUT_ACTION_COUNT);
+            if (g_binding_capture_active) {
+                ImGui::Separator();
+                ImGui::TextDisabled("Waiting for %s input for %s slot %d",
+                                    g_binding_capture_device == GB_CAPTURE_DEVICE_KEYBOARD ? "keyboard" : "controller",
+                                    g_input_action_names[g_binding_capture_action],
+                                    g_binding_capture_slot + 1);
+                if (ImGui::Button("Cancel Capture")) {
+                    cancel_binding_capture();
+                }
+            }
+            if (ImGui::Button("Reset Controls")) {
+                reset_runtime_control_defaults();
+            }
+            ImGui::TextDisabled("Shortcuts: fast forward, max speed, savestates, overlay, mute, menu.");
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Diagnostics");
+            ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+            ImGui::Text("Window: %d x %d  ·  Viewport: %d x %d (%.2fx)",
+                        window_w, window_h,
+                        g_game_viewport.w, g_game_viewport.h,
+                        (double)g_game_viewport.w / (double)GB_SCREEN_WIDTH);
+            if (has_interpreter_activity(g_registered_ctx)) {
+                const GBInterpreterHotspot* hotspot = &g_registered_ctx->interpreter_hotspots[0];
+                ImGui::Text("Frame Fallbacks: %u", g_registered_ctx->frame_dispatch_fallbacks);
+                ImGui::Text("Total Fallbacks: %llu",
+                            (unsigned long long)g_registered_ctx->total_dispatch_fallbacks);
+                ImGui::Text("Interp Instr: frame %llu total %llu",
+                            (unsigned long long)g_registered_ctx->frame_interpreter_instructions,
+                            (unsigned long long)g_registered_ctx->total_interpreter_instructions);
+                if (hotspot->valid && hotspot->entries > 0) {
+                    ImGui::Text("Top Hotspot: %03X:%04X (%llu hits)",
+                                hotspot->bank, hotspot->addr,
+                                (unsigned long long)hotspot->entries);
+                }
+                if (g_registered_ctx->has_unimplemented_interpreter_opcode) {
+                    ImGui::Text("Coverage Gap: %02X at %03X:%04X",
+                                g_registered_ctx->last_unimplemented_opcode,
+                                g_registered_ctx->last_unimplemented_bank,
+                                g_registered_ctx->last_unimplemented_addr);
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Toggle menu: %s", controller_menu_hint_text());
+#if defined(__ANDROID__)
+            ImGui::TextDisabled("Android Back / Escape also opens or closes the menu.");
+#else
+            ImGui::TextDisabled("Escape also opens or closes the menu.");
+#endif
         }
 
         ImGui::EndChild();
@@ -2539,8 +2532,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         const float footer_button_width =
             (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * (footer_button_count - 1)) /
             (float)footer_button_count;
-        if (ImGui::Button("Reset Display", ImVec2(footer_button_width, 0.0f))) {
-            reset_runtime_display_defaults();
+        if (ImGui::Button("Resume", ImVec2(footer_button_width, 0.0f))) {
+            g_show_menu = false;
         }
 
         if (g_launcher_return_enabled) {
@@ -3072,6 +3065,9 @@ bool gb_platform_init(int scale) {
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
+    /* Subtle nav focus rectangle so you can see what's selected without it
+     * being a glaring white outline. */
+    ImGui::GetStyle().Colors[ImGuiCol_NavHighlight] = ImVec4(0.45f, 0.65f, 0.95f, 0.65f);
 
     // Setup Platform/Renderer backends
     ImGui_ImplSDL2_InitForSDLRenderer(g_window, g_renderer);

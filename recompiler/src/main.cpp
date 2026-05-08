@@ -1415,17 +1415,53 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
         gbrecomp::print_rom_info(rom);
     }
 
+    /* Resolve per-ROM symbols / annotations.
+     *
+     * Precedence:
+     *   1. The exact path passed via --symbols / --annotations on the CLI
+     *      (`options.*_file_path`) — only meaningful for single-ROM mode or a
+     *      directory containing one ROM, since the same file would otherwise
+     *      be applied to every ROM.
+     *   2. A sibling file next to the ROM: `<stem>.sym` / `<stem>.annotations`.
+     *      This makes "drop your .sym next to your .gb" Just Work in directory
+     *      mode without per-ROM CLI plumbing.
+     */
+    std::string effective_symbol_file = options.symbol_file_path;
+    if (effective_symbol_file.empty()) {
+        fs::path candidate = rom_path;
+        candidate.replace_extension(".sym");
+        std::error_code ec;
+        if (fs::exists(candidate, ec) && fs::is_regular_file(candidate, ec)) {
+            effective_symbol_file = candidate.string();
+            std::ostringstream ss;
+            ss << "[" << output_prefix << "] Auto-discovered symbol file: " << candidate.filename();
+            log_multi_rom_line(ss.str());
+        }
+    }
+    std::string effective_annotation_file = options.annotation_file_path;
+    if (effective_annotation_file.empty()) {
+        fs::path candidate = rom_path;
+        candidate.replace_extension(".annotations");
+        std::error_code ec;
+        if (fs::exists(candidate, ec) && fs::is_regular_file(candidate, ec)) {
+            effective_annotation_file = candidate.string();
+            std::ostringstream ss;
+            ss << "[" << output_prefix << "] Auto-discovered annotation file: " << candidate.filename();
+            log_multi_rom_line(ss.str());
+        }
+    }
+
     gbrecomp::SymbolTable symbol_table;
-    if (!options.symbol_file_path.empty()) {
+    if (!effective_symbol_file.empty()) {
         std::string error;
-        if (!symbol_table.load_sym_file(options.symbol_file_path, &rom, &error)) {
+        if (!symbol_table.load_sym_file(effective_symbol_file, &rom, &error)) {
             std::cerr << "Error: " << error << "\n";
             return false;
         }
     }
-    if (!options.annotation_file_path.empty()) {
+    if (!effective_annotation_file.empty()) {
         std::string error;
-        if (!symbol_table.load_annotation_file(options.annotation_file_path, &error)) {
+        if (!symbol_table.load_annotation_file(effective_annotation_file, &error)) {
             std::cerr << "Error: " << error << "\n";
             return false;
         }
@@ -1662,10 +1698,16 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: Directory mode does not support --bank or --add-entry-point\n";
             return 1;
         }
-        if (!trace_file_path.empty() || !symbol_file_path.empty() || !annotation_file_path.empty()) {
-            std::cerr << "Error: Directory mode does not support --use-trace, --symbols, or --annotations\n";
+        if (!trace_file_path.empty()) {
+            std::cerr << "Error: Directory mode does not support --use-trace\n";
             return 1;
         }
+        /* --symbols / --annotations in directory mode now apply to every ROM
+         * the same way single-ROM mode does. In addition, generate_multi_rom_module
+         * auto-discovers <rom>.sym / <rom>.annotations next to each ROM, so the
+         * idiomatic usage is to drop those files into the directory and let
+         * per-ROM symbols pick themselves up. The CLI flag remains as an
+         * override (mostly useful for a directory with a single ROM). */
 
         if (output_dir.empty()) {
             output_dir = input_path.filename().string() + "_output";

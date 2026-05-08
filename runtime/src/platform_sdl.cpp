@@ -940,10 +940,12 @@ static void set_default_input_bindings(void) {
 }
 
 static std::string runtime_preferences_path(void) {
-    const std::string pref_dir = make_pref_storage_dir("runtime");
-    if (!pref_dir.empty()) {
-        fs::path resolved = fs::path(pref_dir) / "runtime_prefs.ini";
-        ensure_parent_directory(resolved);
+    /* Co-locate runtime prefs with the binary (same place .sav / .rtc /
+     * .stateN files live) so the whole game folder is portable. */
+    char* base_path = SDL_GetBasePath();
+    if (base_path) {
+        fs::path resolved = fs::path(base_path) / "runtime_prefs.ini";
+        SDL_free(base_path);
         return resolved.lexically_normal().string();
     }
     return fs::path("runtime_prefs.ini").lexically_normal().string();

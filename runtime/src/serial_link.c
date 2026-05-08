@@ -60,6 +60,7 @@ static struct {
     LinkMode mode;
     int      listen_fd;
     int      peer_fd;
+    char     peer_ip[64];   /* remote IP set on connect/accept; cleared on shutdown */
 
     /* Net thread state. Booleans are read by the main thread without
      * synchronization; on x86/ARM aligned byte loads/stores are atomic in
@@ -192,8 +193,9 @@ static void* net_thread_main(void* arg) {
             return NULL;
         }
         g.peer_fd = peer;
+        snprintf(g.peer_ip, sizeof(g.peer_ip), "%s", inet_ntoa(client.sin_addr));
         link_log("Peer connected from %s:%d",
-                 inet_ntoa(client.sin_addr), (int)ntohs(client.sin_port));
+                 g.peer_ip, (int)ntohs(client.sin_port));
     }
     /* For LINK_CONNECT, peer_fd was set by start_connect(). */
 
@@ -334,6 +336,7 @@ bool gb_serial_link_start_connect(const char* host, uint16_t port) {
 
     g.peer_fd = fd;
     g.mode = LINK_CONNECT;
+    snprintf(g.peer_ip, sizeof(g.peer_ip), "%s", host);
     link_log("Connected to %s:%d (BGB protocol)", host, (int)port);
 
     if (pthread_create(&g.thread, NULL, net_thread_main, NULL) != 0) {
@@ -376,6 +379,11 @@ void gb_serial_link_shutdown(void) {
     g.peer_ready = false;
     g.master_pending = false;
     g.initial_handshake_done = false;
+    g.peer_ip[0] = '\0';
+}
+
+const char* gb_serial_link_peer_ip(void) {
+    return g.peer_ip;
 }
 
 void gb_serial_link_init_from_env(void) {

@@ -28,6 +28,11 @@ void gb_serial_link_init_from_env(void);
 bool gb_serial_link_is_active(void);
 bool gb_serial_link_is_ready(void);
 
+/* Returns the remote peer's IP as a printable string while a link is up,
+ * or an empty string when there's no active connection. The pointer is
+ * valid until the next start_listen / start_connect / shutdown call. */
+const char* gb_serial_link_peer_ip(void);
+
 /* Set as the GBPlatformCallbacks.on_serial_byte handler. Called by the runtime
  * when a master-mode (internal clock) transfer's countdown reaches zero — we
  * forward the outgoing byte as a BGB sync1 packet and mark the transfer

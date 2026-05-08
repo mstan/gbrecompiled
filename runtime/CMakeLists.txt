@@ -11,6 +11,7 @@ add_library(gbrt STATIC
     src/platform_sdl.cpp
     src/gbcam.c
     src/serial_link.c
+    src/network_discovery.c
 )
 
 # pthread for the BGB link recv thread

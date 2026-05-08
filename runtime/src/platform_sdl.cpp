@@ -12,6 +12,7 @@
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <filesystem>
@@ -21,7 +22,19 @@
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#include "stb_image.h"
+
 namespace fs = std::filesystem;
+
+/* SGB border geometry — the 256x224 SGB frame surrounds a 160x144 GB screen
+ * centered with 48px horizontal and 40px vertical insets. */
+static constexpr int GB_BORDER_FULL_W = 256;
+static constexpr int GB_BORDER_FULL_H = 224;
+static constexpr int GB_BORDER_INSET_X = 48;
+static constexpr int GB_BORDER_INSET_Y = 40;
+static constexpr const char* GB_BORDER_DIR_NAME = "borders";
 
 /* ============================================================================
  * SDL State
@@ -58,6 +71,14 @@ static bool g_benchmark_mode = false;
 static bool g_fullscreen = false;
 static bool g_app_suspended = false;
 static bool g_renderer_reset_pending = false;
+
+/* Custom SGB border state */
+static bool g_border_enabled = false;
+static std::vector<std::string> g_border_files;
+static int g_border_idx = 0;
+static std::string g_border_dir;
+static std::string g_border_loaded_filename;
+static SDL_Texture* g_border_texture = NULL;
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
 static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
@@ -992,6 +1013,14 @@ static void load_runtime_preferences(void) {
                     }
                     continue;
                 }
+                if (strcmp(key, "border.enabled") == 0) {
+                    g_border_enabled = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "border.file") == 0) {
+                    g_border_loaded_filename = value; /* index resolved later */
+                    continue;
+                }
 
                 bool is_keyboard = strncmp(key, "keyboard.", 9) == 0;
                 bool is_controller = strncmp(key, "controller.", 11) == 0;
@@ -1110,6 +1139,11 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.volume_percent=%u\n", g_audio_volume_percent);
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
+    fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
+    if (g_border_enabled && !g_border_files.empty() &&
+        g_border_idx >= 0 && g_border_idx < (int)g_border_files.size()) {
+        fprintf(file, "border.file=%s\n", g_border_files[g_border_idx].c_str());
+    }
 
     for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
         for (int slot = 0; slot < 2; slot++) {
@@ -1556,6 +1590,105 @@ static int round_to_int(double value) {
     return (int)(value + 0.5);
 }
 
+/* ============================================================================
+ * Custom SGB borders (optional, opt-in via menu)
+ * ========================================================================== */
+
+static int border_content_width(void) {
+    return (g_border_enabled && g_border_texture) ? GB_BORDER_FULL_W : GB_SCREEN_WIDTH;
+}
+
+static int border_content_height(void) {
+    return (g_border_enabled && g_border_texture) ? GB_BORDER_FULL_H : GB_SCREEN_HEIGHT;
+}
+
+static void unload_border_texture(void) {
+    if (g_border_texture) {
+        SDL_DestroyTexture(g_border_texture);
+        g_border_texture = NULL;
+    }
+    g_border_loaded_filename.clear();
+}
+
+/* Load the PNG `<g_border_dir>/<filename>` into g_border_texture. Returns true
+ * on success. Frees the previous texture either way. The PNG must be
+ * 256x224 RGB(A) — anything else is rejected. */
+static bool load_border_texture(const std::string& filename) {
+    unload_border_texture();
+    if (!g_renderer || filename.empty() || g_border_dir.empty()) {
+        return false;
+    }
+    fs::path full = fs::path(g_border_dir) / filename;
+    int w = 0, h = 0, channels = 0;
+    stbi_uc* pixels = stbi_load(full.string().c_str(), &w, &h, &channels, 4);
+    if (!pixels) {
+        fprintf(stderr, "[BORDER] stbi_load failed for %s: %s\n",
+                full.string().c_str(), stbi_failure_reason());
+        return false;
+    }
+    if (w != GB_BORDER_FULL_W || h != GB_BORDER_FULL_H) {
+        fprintf(stderr, "[BORDER] %s is %dx%d, expected %dx%d — skipping\n",
+                full.string().c_str(), w, h, GB_BORDER_FULL_W, GB_BORDER_FULL_H);
+        stbi_image_free(pixels);
+        return false;
+    }
+    SDL_Texture* tex = SDL_CreateTexture(g_renderer,
+                                         SDL_PIXELFORMAT_ABGR8888,
+                                         SDL_TEXTUREACCESS_STATIC,
+                                         w, h);
+    if (!tex) {
+        fprintf(stderr, "[BORDER] SDL_CreateTexture failed: %s\n", SDL_GetError());
+        stbi_image_free(pixels);
+        return false;
+    }
+    SDL_UpdateTexture(tex, NULL, pixels, w * 4);
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+    stbi_image_free(pixels);
+    g_border_texture = tex;
+    g_border_loaded_filename = filename;
+    return true;
+}
+
+/* Find a borders/ directory next to the cwd or next to the executable, scan
+ * it for .png files, and populate g_border_files. Idempotent — call again to
+ * pick up newly-added PNGs. */
+static void scan_border_directory(void) {
+    g_border_files.clear();
+    g_border_dir.clear();
+
+    std::vector<fs::path> candidates;
+    candidates.push_back(fs::current_path() / GB_BORDER_DIR_NAME);
+    char* base_path = SDL_GetBasePath();
+    if (base_path) {
+        candidates.push_back(fs::path(base_path) / GB_BORDER_DIR_NAME);
+        SDL_free(base_path);
+    }
+
+    for (const fs::path& candidate : candidates) {
+        std::error_code ec;
+        if (!fs::is_directory(candidate, ec)) continue;
+        for (const auto& entry : fs::directory_iterator(candidate, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+            if (ext != ".png") continue;
+            g_border_files.push_back(entry.path().filename().string());
+        }
+        if (!g_border_files.empty()) {
+            std::sort(g_border_files.begin(), g_border_files.end());
+            g_border_dir = candidate.string();
+            fprintf(stderr, "[BORDER] Found %zu border(s) in %s\n",
+                    g_border_files.size(), g_border_dir.c_str());
+            return;
+        }
+    }
+
+    fprintf(stderr, "[BORDER] No borders/ directory found (looked in cwd and exe dir)\n");
+}
+
+static void apply_border_change(void); /* forward */
+
 static void update_render_filter(void) {
     if (!g_renderer) {
         return;
@@ -1575,55 +1708,58 @@ static void update_render_filter(void) {
 }
 
 static void update_game_viewport(void) {
+    const int content_w = border_content_width();
+    const int content_h = border_content_height();
+
     if (!g_window) {
         g_game_viewport.x = 0;
         g_game_viewport.y = 0;
-        g_game_viewport.w = GB_SCREEN_WIDTH * g_scale;
-        g_game_viewport.h = GB_SCREEN_HEIGHT * g_scale;
+        g_game_viewport.w = content_w * g_scale;
+        g_game_viewport.h = content_h * g_scale;
         return;
     }
 
     int window_w = 0;
     int window_h = 0;
     SDL_GetWindowSize(g_window, &window_w, &window_h);
-    if (window_w <= 0) window_w = GB_SCREEN_WIDTH;
-    if (window_h <= 0) window_h = GB_SCREEN_HEIGHT;
+    if (window_w <= 0) window_w = content_w;
+    if (window_h <= 0) window_h = content_h;
 
     int viewport_w = window_w;
     int viewport_h = window_h;
 
     switch (g_render_scaling_mode) {
         case GB_RENDER_SCALING_PIXEL_PERFECT: {
-            int scale_x = window_w / GB_SCREEN_WIDTH;
-            int scale_y = window_h / GB_SCREEN_HEIGHT;
+            int scale_x = window_w / content_w;
+            int scale_y = window_h / content_h;
             int integer_scale = (scale_x < scale_y) ? scale_x : scale_y;
             if (integer_scale < 1) {
                 integer_scale = 1;
             }
-            viewport_w = GB_SCREEN_WIDTH * integer_scale;
-            viewport_h = GB_SCREEN_HEIGHT * integer_scale;
+            viewport_w = content_w * integer_scale;
+            viewport_h = content_h * integer_scale;
             break;
         }
         case GB_RENDER_SCALING_ASPECT_FIT: {
-            double scale_x = (double)window_w / (double)GB_SCREEN_WIDTH;
-            double scale_y = (double)window_h / (double)GB_SCREEN_HEIGHT;
+            double scale_x = (double)window_w / (double)content_w;
+            double scale_y = (double)window_h / (double)content_h;
             double scale = (scale_x < scale_y) ? scale_x : scale_y;
             if (scale <= 0.0) {
                 scale = 1.0;
             }
-            viewport_w = round_to_int((double)GB_SCREEN_WIDTH * scale);
-            viewport_h = round_to_int((double)GB_SCREEN_HEIGHT * scale);
+            viewport_w = round_to_int((double)content_w * scale);
+            viewport_h = round_to_int((double)content_h * scale);
             break;
         }
         case GB_RENDER_SCALING_ASPECT_FILL: {
-            double scale_x = (double)window_w / (double)GB_SCREEN_WIDTH;
-            double scale_y = (double)window_h / (double)GB_SCREEN_HEIGHT;
+            double scale_x = (double)window_w / (double)content_w;
+            double scale_y = (double)window_h / (double)content_h;
             double scale = (scale_x > scale_y) ? scale_x : scale_y;
             if (scale <= 0.0) {
                 scale = 1.0;
             }
-            viewport_w = round_to_int((double)GB_SCREEN_WIDTH * scale);
-            viewport_h = round_to_int((double)GB_SCREEN_HEIGHT * scale);
+            viewport_w = round_to_int((double)content_w * scale);
+            viewport_h = round_to_int((double)content_h * scale);
             break;
         }
         case GB_RENDER_SCALING_STRETCH:
@@ -1643,14 +1779,43 @@ static void update_game_viewport(void) {
 }
 
 static void apply_window_scale_preset(void) {
-    g_windowed_width = GB_SCREEN_WIDTH * g_scale;
-    g_windowed_height = GB_SCREEN_HEIGHT * g_scale;
+    g_windowed_width = border_content_width() * g_scale;
+    g_windowed_height = border_content_height() * g_scale;
 
     if (g_window && !g_fullscreen) {
         SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
         SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
     update_game_viewport();
+}
+
+/* Reload texture for the currently-selected border and resize the window so
+ * the border (or lack of one) fits at the chosen integer scale. Called when
+ * the user toggles the master switch or cycles to a different file. */
+static void apply_border_change(void) {
+    if (g_border_enabled && !g_border_files.empty()) {
+        /* If a filename was pulled from saved prefs and we haven't picked an
+         * index yet, look it up in the scanned list. */
+        if (!g_border_loaded_filename.empty() && g_border_texture == NULL) {
+            for (size_t i = 0; i < g_border_files.size(); i++) {
+                if (g_border_files[i] == g_border_loaded_filename) {
+                    g_border_idx = (int)i;
+                    break;
+                }
+            }
+            g_border_loaded_filename.clear();
+        }
+        if (g_border_idx < 0 || g_border_idx >= (int)g_border_files.size()) {
+            g_border_idx = 0;
+        }
+        const std::string& filename = g_border_files[g_border_idx];
+        if (filename != g_border_loaded_filename) {
+            load_border_texture(filename);
+        }
+    } else {
+        unload_border_texture();
+    }
+    apply_window_scale_preset();
 }
 
 static void set_fullscreen_enabled(bool enabled) {
@@ -2012,7 +2177,21 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     double compose_start_ms = sdl_now_ms();
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
-    SDL_RenderCopy(g_renderer, g_texture, NULL, &g_game_viewport);
+    if (g_border_enabled && g_border_texture) {
+        /* Border fills the viewport (256x224 aspect); GB framebuffer goes
+         * into the centered 160x144 inset. */
+        SDL_RenderCopy(g_renderer, g_border_texture, NULL, &g_game_viewport);
+        const double sx = (double)g_game_viewport.w / (double)GB_BORDER_FULL_W;
+        const double sy = (double)g_game_viewport.h / (double)GB_BORDER_FULL_H;
+        SDL_Rect gb_rect;
+        gb_rect.x = g_game_viewport.x + round_to_int(GB_BORDER_INSET_X * sx);
+        gb_rect.y = g_game_viewport.y + round_to_int(GB_BORDER_INSET_Y * sy);
+        gb_rect.w = round_to_int(GB_SCREEN_WIDTH  * sx);
+        gb_rect.h = round_to_int(GB_SCREEN_HEIGHT * sy);
+        SDL_RenderCopy(g_renderer, g_texture, NULL, &gb_rect);
+    } else {
+        SDL_RenderCopy(g_renderer, g_texture, NULL, &g_game_viewport);
+    }
 
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
@@ -2104,6 +2283,39 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         } else {
             ImGui::TextDisabled("Window Size is disabled while fullscreen is active.");
+        }
+
+        /* Custom SGB border (optional). Toggle picks whether to draw any
+         * border at all; the cycler picks which PNG from borders/. */
+        if (ImGui::Checkbox("Custom SGB Border", &g_border_enabled)) {
+            apply_border_change();
+            save_runtime_preferences();
+        }
+        if (g_border_files.empty()) {
+            ImGui::TextDisabled("Drop 256x224 PNGs into a borders/ folder next to the executable or working directory, then restart.");
+        } else {
+            const bool cycler_enabled = g_border_enabled && (int)g_border_files.size() > 0;
+            if (!cycler_enabled) ImGui::BeginDisabled();
+            const int count = (int)g_border_files.size();
+            if (ImGui::ArrowButton("##border_prev", ImGuiDir_Left)) {
+                g_border_idx = (g_border_idx - 1 + count) % count;
+                apply_border_change();
+                save_runtime_preferences();
+            }
+            ImGui::SameLine();
+            const std::string& current_name =
+                (g_border_idx >= 0 && g_border_idx < count)
+                    ? g_border_files[g_border_idx]
+                    : std::string("(none)");
+            ImGui::Text("Border: %s  (%d/%d)", current_name.c_str(),
+                        g_border_idx + 1, count);
+            ImGui::SameLine();
+            if (ImGui::ArrowButton("##border_next", ImGuiDir_Right)) {
+                g_border_idx = (g_border_idx + 1) % count;
+                apply_border_change();
+                save_runtime_preferences();
+            }
+            if (!cycler_enabled) ImGui::EndDisabled();
         }
 
         ImGui::Separator();
@@ -2428,6 +2640,7 @@ void gb_platform_shutdown(void) {
         SDL_DestroyTexture(g_texture);
         g_texture = NULL;
     }
+    unload_border_texture();
     if (g_renderer) {
         SDL_DestroyRenderer(g_renderer);
         g_renderer = NULL;
@@ -2842,6 +3055,11 @@ bool gb_platform_init(int scale) {
     }
     
     update_render_filter();
+
+    /* Custom SGB borders: scan optional borders/ dir and honor any saved
+     * border preference (resizes the window to 256x224*scale if enabled). */
+    scan_border_directory();
+    apply_border_change();
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();

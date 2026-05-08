@@ -41,6 +41,7 @@ endif()
 
 target_include_directories(gbrt PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
 
 target_compile_features(gbrt PUBLIC c_std_11 cxx_std_17)

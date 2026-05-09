@@ -43,9 +43,25 @@ void gb_sgb_reset(GBSgbState* sgb);
  */
 bool gb_sgb_cart_supports(const uint8_t* rom, size_t rom_size);
 
-/** Enable / disable SGB processing at runtime. */
+/** Enable / disable the SGB engine at runtime. The engine has two layers:
+ *
+ *   1. ENGINE — packet RX, MLT_REQ probe response, palette/border state
+ *      accumulation. Driven by `enabled`. The cart's CheckSGB sees the
+ *      engine via the JOYP read shim, so this must be on for `wOnSGB`
+ *      to latch to 1 at boot. Once on, leave it on.
+ *
+ *   2. DISPLAY — applying captured palettes to the framebuffer and
+ *      drawing the SGB cart border. Driven by `display_active`. Free to
+ *      flip at any time without disturbing what the cart has loaded.
+ *
+ * Splitting them lets a user toggle SGB visuals on/off mid-game without
+ * losing the per-scene palette updates Pokemon sends only when wOnSGB=1.
+ */
 void gb_sgb_set_enabled(GBSgbState* sgb, bool enabled);
 bool gb_sgb_is_enabled(const GBSgbState* sgb);
+
+void gb_sgb_set_display_active(GBSgbState* sgb, bool active);
+bool gb_sgb_is_display_active(const GBSgbState* sgb);
 
 /**
  * Hook called from gb_write8 whenever the CPU writes JOYP (FF00). Drives

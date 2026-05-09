@@ -47,6 +47,10 @@ typedef enum {
 
 struct GBSgbState {
     bool enabled;
+    /* Independent of `enabled`. When false, the engine still receives
+     * packets and accumulates palette/border state, but the apply-to-
+     * framebuffer pass and border render are skipped. See sgb.h. */
+    bool display_active;
 
     /* Last value written to JOYP (top two bits, the SGB-relevant nibble).
      * Used to detect bit-pulse transitions: each "active" pulse (0x10 or
@@ -118,6 +122,12 @@ struct GBSgbState {
 GBSgbState* gb_sgb_create(void) {
     GBSgbState* sgb = (GBSgbState*)calloc(1, sizeof(GBSgbState));
     if (!sgb) return NULL;
+    /* Default the user-facing display layer on — the platform's
+     * register_context applies the saved pref over the top. We seed it
+     * here (not in gb_sgb_reset) because gb_context_load_rom calls
+     * reset every time the ROM is (re)loaded, and we want the user's
+     * pref to survive those resets. */
+    sgb->display_active = true;
     gb_sgb_reset(sgb);
     return sgb;
 }
@@ -130,10 +140,13 @@ void gb_sgb_destroy(GBSgbState* sgb) {
 
 void gb_sgb_reset(GBSgbState* sgb) {
     if (!sgb) return;
+    /* Preserve the user-facing flags across ROM reloads. */
     bool was_enabled = sgb->enabled;
+    bool was_display_active = sgb->display_active;
     free(sgb->freeze_buffer);
     memset(sgb, 0, sizeof(*sgb));
     sgb->enabled = was_enabled;
+    sgb->display_active = was_display_active;
     sgb->rx_state = SGB_RX_IDLE;
     sgb->prev_joyp = 0x30;
     sgb->mlt_req_players = 1;
@@ -164,6 +177,15 @@ void gb_sgb_set_enabled(GBSgbState* sgb, bool enabled) {
 
 bool gb_sgb_is_enabled(const GBSgbState* sgb) {
     return sgb && sgb->enabled;
+}
+
+void gb_sgb_set_display_active(GBSgbState* sgb, bool active) {
+    if (!sgb) return;
+    sgb->display_active = active;
+}
+
+bool gb_sgb_is_display_active(const GBSgbState* sgb) {
+    return sgb && sgb->display_active;
 }
 
 uint32_t gb_sgb_packet_count(const GBSgbState* sgb) {
@@ -469,6 +491,7 @@ void gb_sgb_apply_to_frame(GBContext* ctx) {
     if (!ctx) return;
     GBSgbState* sgb = (GBSgbState*)ctx->sgb;
     if (!gb_sgb_is_enabled(sgb)) return;
+    if (!gb_sgb_is_display_active(sgb)) return;
     if (!sgb->palettes_active) return;
 
     GBPPU* ppu = (GBPPU*)ctx->ppu;

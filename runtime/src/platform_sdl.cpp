@@ -89,6 +89,10 @@ static std::string g_border_dir;
 static std::string g_border_loaded_filename;
 static GLuint g_border_texture = 0;
 
+/* User toggle for the SGB engine. Default true; cart still has to
+ * advertise SGB support (byte 0x146 == 0x03) for it to actually run. */
+static bool g_sgb_enabled_pref = true;
+
 /* SGB cart-supplied border (CHR_TRN+PCT_TRN). Rebuilt from sgb engine
  * data whenever the revision counter advances. Default enabled — most
  * SGB carts ship with a border specifically authored for them. */
@@ -1076,6 +1080,10 @@ static void load_runtime_preferences(void) {
                     g_border_enabled = (strcmp(value, "0") != 0);
                     continue;
                 }
+                if (strcmp(key, "sgb.enabled") == 0) {
+                    g_sgb_enabled_pref = (strcmp(value, "0") != 0);
+                    continue;
+                }
                 if (strcmp(key, "sgb.cart_border") == 0) {
                     g_sgb_cart_border_enabled = (strcmp(value, "0") != 0);
                     continue;
@@ -1232,6 +1240,7 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
+    fprintf(file, "sgb.enabled=%d\n", g_sgb_enabled_pref ? 1 : 0);
     fprintf(file, "sgb.cart_border=%d\n", g_sgb_cart_border_enabled ? 1 : 0);
     if (!g_active_shader_pref.empty()) {
         fprintf(file, "shader.active=%s\n", g_active_shader_pref.c_str());
@@ -1697,7 +1706,16 @@ static int round_to_int(double value) {
  * ========================================================================== */
 
 static bool sgb_cart_border_active(void) {
-    return g_sgb_cart_border_enabled && g_sgb_cart_border_texture != NULL;
+    if (!g_sgb_cart_border_enabled) return false;
+    if (!g_sgb_cart_border_texture) return false;
+    /* The cart border follows the user's display toggle. The engine
+     * keeps capturing CHR_TRN/PCT_TRN updates regardless, so toggling
+     * display back on shows the latest border without a restart. */
+    if (g_registered_ctx) {
+        GBSgbState* sgb = (GBSgbState*)g_registered_ctx->sgb;
+        if (!gb_sgb_is_display_active(sgb)) return false;
+    }
+    return true;
 }
 
 static int border_content_width(void) {
@@ -2316,7 +2334,14 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     static uint32_t s_upload_buf[GB_FRAMEBUFFER_SIZE];
     {
         const uint32_t* src = framebuffer;
-        const uint32_t orig[4] = { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 };
+        /* Match the actual post-conversion DMG-green values produced by
+         * ppu.c's rgb555_to_rgba (which uses *255/31 with integer
+         * truncation), not the dmg_palette_rgba constants — those are
+         * only used directly on the very first reset frame, every other
+         * frame goes through the rgb555 round-trip and lands a few LSBs
+         * away. Comparing against the wrong constants made the palette
+         * dropdown a silent no-op. */
+        const uint32_t orig[4] = { 0xFFE6F6CDu, 0xFF73BD62u, 0xFF319C52u, 0xFF081010u };
         const uint32_t* pal = (g_palette_idx == 0) ? NULL : g_palettes[g_palette_idx];
         for (int i = 0; i < GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT; i++) {
             uint32_t c = src[i];
@@ -2476,21 +2501,73 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::TextDisabled("Look");
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
 
+        /* Post-process shader (sharp / smooth / lcd / dmg-green plus any
+         * shaders/<name>.frag.glsl on disk). Active selection persists
+         * in runtime_prefs.ini. Reload re-compiles every entry — handy
+         * when iterating on a custom shader without rebuilding. */
+        if (g_shader_pipeline) {
+            const int count = gb_shader_pipeline_count(g_shader_pipeline);
+            int active = gb_shader_pipeline_active(g_shader_pipeline);
+            if (active < 0) active = 0;
+            const char* preview = gb_shader_pipeline_name(g_shader_pipeline, active);
+            if (ImGui::BeginCombo("Shader", preview ? preview : "(none)")) {
+                for (int i = 0; i < count; i++) {
+                    const char* name = gb_shader_pipeline_name(g_shader_pipeline, i);
+                    bool selected = (i == active);
+                    if (ImGui::Selectable(name, selected)) {
+                        if (gb_shader_pipeline_set_active(g_shader_pipeline, i)) {
+                            g_active_shader_pref = name ? name : "";
+                            save_runtime_preferences();
+                        }
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reload##shader")) {
+                gb_shader_pipeline_reload(g_shader_pipeline);
+            }
+        }
+
+        /* SGB master toggle. Off → packet engine ignores JOYP writes,
+         * recolor pass becomes a no-op, border decode skipped. Lets the
+         * Palette dropdown above actually do something on SGB-aware
+         * carts, since their post-SGB pixels never match the original
+         * DMG green palette the swap looks for. */
+        /* This drives the SGB *display* layer (palette application +
+         * cart border). The engine itself stays enabled the whole
+         * session so the cart keeps thinking it's on SGB and keeps
+         * sending packets — toggling this back on instantly picks up
+         * the latest captured state without a restart. */
+        if (ImGui::Checkbox("Enable SGB", &g_sgb_enabled_pref)) {
+            if (g_registered_ctx && g_registered_ctx->sgb) {
+                gb_sgb_set_display_active((GBSgbState*)g_registered_ctx->sgb,
+                                          g_sgb_enabled_pref);
+            }
+            save_runtime_preferences();
+        }
+
         /* SGB cart border: the actual border the cart ships in its ROM,
-         * decoded from CHR_TRN/PCT_TRN. Default on when SGB is enabled
-         * — the alternative is one less reason to play this on SGB. */
+         * decoded from CHR_TRN/PCT_TRN. Greyed out when the user has
+         * disabled the SGB display — the border is part of the SGB
+         * presentation layer and turns off with the rest of it. */
+        const bool sgb_display_on = g_registered_ctx &&
+            gb_sgb_is_display_active((GBSgbState*)g_registered_ctx->sgb);
+        if (!sgb_display_on) ImGui::BeginDisabled();
         if (ImGui::Checkbox("SGB Cart Border", &g_sgb_cart_border_enabled)) {
             apply_window_scale_preset();
             save_runtime_preferences();
         }
-        if (g_registered_ctx) {
+        if (sgb_display_on && g_registered_ctx) {
             GBSgbState* sgb_state = (GBSgbState*)g_registered_ctx->sgb;
-            if (!gb_sgb_is_enabled(sgb_state)) {
-                ImGui::TextDisabled("(cart does not advertise SGB support)");
-            } else if (!gb_sgb_border_ready(sgb_state)) {
+            if (!gb_sgb_border_ready(sgb_state)) {
                 ImGui::TextDisabled("(waiting for cart border data)");
             }
+        } else if (!sgb_display_on) {
+            ImGui::TextDisabled("(Enable SGB above to use)");
         }
+        if (!sgb_display_on) ImGui::EndDisabled();
 
         /* Custom SGB border (optional, opt-in). Toggle picks whether to
          * draw a user-supplied PNG border; the cycler selects which one
@@ -2939,34 +3016,6 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 update_render_filter();
             }
 
-            /* Shader dropdown — pulls names from the shader pipeline so
-             * user-supplied .frag.glsl overrides appear automatically.
-             * Reload re-compiles all entries from disk (handy while
-             * tweaking a shader). */
-            if (g_shader_pipeline) {
-                const int count = gb_shader_pipeline_count(g_shader_pipeline);
-                int active = gb_shader_pipeline_active(g_shader_pipeline);
-                if (active < 0) active = 0;
-                const char* preview = gb_shader_pipeline_name(g_shader_pipeline, active);
-                if (ImGui::BeginCombo("Shader", preview ? preview : "(none)")) {
-                    for (int i = 0; i < count; i++) {
-                        const char* name = gb_shader_pipeline_name(g_shader_pipeline, i);
-                        bool selected = (i == active);
-                        if (ImGui::Selectable(name, selected)) {
-                            if (gb_shader_pipeline_set_active(g_shader_pipeline, i)) {
-                                g_active_shader_pref = name ? name : "";
-                                save_runtime_preferences();
-                            }
-                        }
-                        if (selected) ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Reload##shader")) {
-                    gb_shader_pipeline_reload(g_shader_pipeline);
-                }
-            }
             if (!g_fullscreen) {
                 int scale_idx = g_scale - 1;
                 if (ImGui::Combo("Window Size",
@@ -4373,6 +4422,14 @@ void gb_platform_register_context(GBContext* ctx) {
         .save_rtc_data = sdl_save_rtc_data
     };
     gb_set_platform_callbacks(ctx, &callbacks);
+
+    /* gb_context_load_rom auto-enabled the SGB engine based on the cart
+     * header. We leave the engine on (so the cart's CheckSGB latches
+     * wOnSGB=1 and palette/border packets keep flowing) and only flip
+     * the display layer to match the user's pref. */
+    if (ctx && ctx->sgb) {
+        gb_sgb_set_display_active((GBSgbState*)ctx->sgb, g_sgb_enabled_pref);
+    }
 
     /* Bring up the BGB-protocol link if GB_LINK_LISTEN or GB_LINK_CONNECT
      * is set in the environment. No-op otherwise. */

@@ -84,28 +84,6 @@ void main() {
 }
 )GLSL";
 
-/* DMG green — remap luminance onto the four-shade green palette of an
- * original Game Boy LCD. Use after SGB recolor by deriving a luma. */
-constexpr const char* FS_DMG_GREEN = R"GLSL(
-#version 100
-precision mediump float;
-uniform sampler2D u_tex;
-varying vec2 v_uv;
-void main() {
-    vec3 src = texture2D(u_tex, v_uv).rgb;
-    float luma = dot(src, vec3(0.299, 0.587, 0.114));
-    vec3 c0 = vec3(0.612, 0.737, 0.063);
-    vec3 c1 = vec3(0.545, 0.675, 0.059);
-    vec3 c2 = vec3(0.188, 0.384, 0.188);
-    vec3 c3 = vec3(0.059, 0.220, 0.059);
-    vec3 col;
-    if      (luma > 0.75) col = c0;
-    else if (luma > 0.50) col = c1;
-    else if (luma > 0.25) col = c2;
-    else                  col = c3;
-    gl_FragColor = vec4(col, 1.0);
-}
-)GLSL";
 
 struct ShaderEntry {
     std::string name;
@@ -211,10 +189,9 @@ struct GBShaderPipeline {
 
 GBShaderPipeline* gb_shader_pipeline_create(void) {
     GBShaderPipeline* p = new GBShaderPipeline();
-    p->shaders.push_back({"sharp",     FS_SHARP,     0, -1, -1, -1, -1, -1, -1, -1, true,  false});
-    p->shaders.push_back({"smooth",    FS_SMOOTH,    0, -1, -1, -1, -1, -1, -1, -1, false, false});
-    p->shaders.push_back({"lcd",       FS_LCD,       0, -1, -1, -1, -1, -1, -1, -1, false, false});
-    p->shaders.push_back({"dmg-green", FS_DMG_GREEN, 0, -1, -1, -1, -1, -1, -1, -1, false, false});
+    p->shaders.push_back({"sharp",  FS_SHARP,  0, -1, -1, -1, -1, -1, -1, -1, true,  false});
+    p->shaders.push_back({"smooth", FS_SMOOTH, 0, -1, -1, -1, -1, -1, -1, -1, false, false});
+    p->shaders.push_back({"lcd",    FS_LCD,    0, -1, -1, -1, -1, -1, -1, -1, false, false});
     glGenBuffers(1, &p->quad_vbo);
     p->active = 0;
     return p;

@@ -143,7 +143,13 @@ static void generate_random_room_code(char* out, size_t cap) {
 static uint32_t g_sgb_cart_border_revision = 0;
 static std::vector<uint32_t> g_sgb_cart_border_pixels;  /* scratch RGBA buffer */
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
-static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
+static const char* g_palette_names[] = {
+    "DMG",
+    "Game Boy Pocket",
+    "Game Boy Light",
+    "Black & White",
+    "Amber (Phosphor)",
+};
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
 typedef enum GBRenderScalingMode {
     GB_RENDER_SCALING_PIXEL_PERFECT = 0,
@@ -229,9 +235,16 @@ static const char* g_render_filter_names[] = {
     "Linear",
 };
 static const uint32_t g_palettes[][4] = {
-    { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 }, // Original
+    { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 }, // DMG
+    /* Game Boy Pocket — cool, slightly blue-tinted greyscale, mimicking
+     * the Pocket's reflective LCD against its silver shell. */
+    { 0xFFC9D2D5, 0xFF8B95A0, 0xFF4C5562, 0xFF181C20 }, // GB Pocket
+    /* Game Boy Light — warm yellow-green, tuned to evoke the Light's
+     * indiglo-style backlit panel (essentially a Pocket with a glowing
+     * EL backlight). */
+    { 0xFFCFE07A, 0xFF8AA34A, 0xFF45612A, 0xFF131D11 }, // GB Light
     { 0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000 }, // B&W
-    { 0xFFFFB000, 0xFFCB4F0E, 0xFF800000, 0xFF330000 }  // Amber
+    { 0xFFFFB000, 0xFFCB4F0E, 0xFF800000, 0xFF330000 }, // Amber (Phosphor)
 };
 static uint32_t g_lcd_off_framebuffer[GB_FRAMEBUFFER_SIZE];
 static uint32_t g_last_guest_framebuffer[GB_FRAMEBUFFER_SIZE];

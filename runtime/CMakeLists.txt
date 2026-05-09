@@ -16,6 +16,8 @@ add_library(gbrt STATIC
     src/relay_client.c
     src/shader_pipeline.cpp
     src/gb_printer.c
+    src/gb_asset_loader.c
+    src/gb_sha1.c
 )
 
 # pthread for the BGB link recv thread

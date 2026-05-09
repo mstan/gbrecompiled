@@ -11,11 +11,15 @@ add_executable(gbrecomp
     src/ir/ir_builder.cpp
     src/ir/ir_optimizer.cpp
     src/codegen/c_emitter.cpp
+    # Reuse the runtime's SHA-1 so c_emitter can hash the ROM at
+    # generation time and bake the digest into the asset-loader hooks.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/gb_sha1.c
 )
 
 target_include_directories(gbrecomp
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include
 )
 
 # Enable position-independent code for shared library support

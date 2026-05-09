@@ -40,6 +40,19 @@ struct GeneratorOptions {
     bool embed_rom_data = true;          // Embed ROM data in output
     bool debug_mode = false;             // Extra debug output
     size_t parallel_codegen_jobs = 0;    // 0 = auto, 1 = disabled
+
+    // Asset-loader integration. When true, the emitted <prefix>_main.c
+    // includes gb_asset_loader.h, defines a static GBGameAssets struct
+    // populated from the cart's header (file extension from byte 0x143,
+    // size from the actual ROM length, SHA-1 computed at generation
+    // time), and calls gb_chdir_to_exe_dir() + gb_load_assets() right
+    // before <prefix>_init(ctx). Replaces the downstream patch_main.py
+    // post-processing the pg1recomp project used to do.
+    //
+    // Requires an "assets_manifest_<prefix>.h" header on the include
+    // path at build time — that file is generated separately by the
+    // project's asset-extraction tooling.
+    bool emit_asset_loader = false;
     
     // Cycle counting
     bool emit_cycle_counting = true;

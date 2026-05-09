@@ -4,6 +4,7 @@
  */
 
 #include "recompiler/codegen/c_emitter.h"
+#include "gb_sha1.h"
 #include <iomanip>
 #include <iostream>
 #include <fstream>
@@ -3364,6 +3365,50 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "#define GB_DUP2 dup2\n";
     main_ss << "#define GB_FILENO fileno\n";
     main_ss << "#endif\n\n";
+
+    // Asset-loader integration. Emits the includes + extern decls + a
+    // static GBGameAssets struct populated from the cart's own header
+    // (file extension by byte 0x143, ROM size from rom_size, SHA-1
+    // computed at generation time). Replaces what pg1recomp's
+    // patch_main.py used to do post-hoc.
+    if (options.emit_asset_loader) {
+        SHA1_CTX sha;
+        SHA1Init(&sha);
+        SHA1Update(&sha, rom_data, rom_size);
+        uint8_t digest[20];
+        SHA1Final(digest, &sha);
+
+        const std::string game_id = options.output_prefix;
+        std::string game_id_upper = game_id;
+        std::transform(game_id_upper.begin(), game_id_upper.end(),
+                       game_id_upper.begin(),
+                       [](unsigned char c) { return (char)std::toupper(c); });
+        const char* rom_ext =
+            (rom_size > 0x143 && (rom_data[0x143] == 0x80 || rom_data[0x143] == 0xC0))
+                ? "gbc" : "gb";
+
+        main_ss << "/* === gb_asset_loader integration === */\n";
+        main_ss << "#include \"gb_asset_loader.h\"\n";
+        main_ss << "#include \"assets_manifest_" << game_id << ".h\"\n";
+        main_ss << "extern uint8_t " << rom_data_symbol_name(options) << "[];\n";
+        main_ss << "extern const size_t " << rom_size_symbol_name(options) << ";\n";
+        main_ss << "static const GBGameAssets GB_" << game_id_upper << "_GAME = {\n";
+        main_ss << "    .game_id = \"" << game_id << "\",\n";
+        main_ss << "    .rom_filename = \"" << game_id << "." << rom_ext << "\",\n";
+        main_ss << "    .rom_data = " << rom_data_symbol_name(options) << ",\n";
+        main_ss << "    .rom_size = " << rom_size << "u,\n";
+        main_ss << "    .expected_sha1 = {";
+        for (int i = 0; i < 20; i++) {
+            if (i) main_ss << ",";
+            main_ss << " 0x" << std::hex << std::setw(2) << std::setfill('0')
+                    << (unsigned)digest[i] << std::dec << std::setfill(' ');
+        }
+        main_ss << " },\n";
+        main_ss << "    .manifest = " << game_id_upper << "_ASSETS_MANIFEST,\n";
+        main_ss << "    .manifest_count = " << game_id_upper << "_ASSETS_MANIFEST_COUNT,\n";
+        main_ss << "};\n\n";
+    }
+
     main_ss << "static bool gb_redirect_logs(const char* path) {\n";
     main_ss << "    if (!path || !path[0]) {\n";
     main_ss << "        return true;\n";
@@ -3658,6 +3703,22 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        gb_platform_set_smooth_lcd_transitions(smooth_lcd_transitions_override != 0);\n";
     main_ss << "    }\n";
     main_ss << "#endif\n";
+    if (options.emit_asset_loader) {
+        std::string game_id_upper = options.output_prefix;
+        std::transform(game_id_upper.begin(), game_id_upper.end(),
+                       game_id_upper.begin(),
+                       [](unsigned char c) { return (char)std::toupper(c); });
+        main_ss << "    if (!gb_chdir_to_exe_dir()) {\n";
+        main_ss << "        fprintf(stderr, \"[" << options.output_prefix
+                << "] chdir to exe dir failed\\n\");\n";
+        main_ss << "        return 1;\n";
+        main_ss << "    }\n";
+        main_ss << "    if (!gb_load_assets(&GB_" << game_id_upper << "_GAME)) {\n";
+        main_ss << "        fprintf(stderr, \"[" << options.output_prefix
+                << "] failed to load ROM/assets\\n\");\n";
+        main_ss << "        return 1;\n";
+        main_ss << "    }\n";
+    }
     main_ss << "    " << options.output_prefix << "_init(ctx);\n";
     main_ss << "    int exit_code = 0;\n";
     main_ss << "\n";

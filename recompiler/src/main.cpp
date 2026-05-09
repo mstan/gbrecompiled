@@ -200,6 +200,7 @@ struct GenerationOptions {
     bool emit_android_project = false;
     std::string android_package;
     std::string android_app_name;
+    bool emit_asset_loader = false;
 };
 
 struct MultiRomModule {
@@ -1477,6 +1478,7 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     gen_opts.emit_main_entry_point = false;
     gen_opts.emit_cmake = false;
     gen_opts.parallel_codegen_jobs = options.codegen_jobs;
+    gen_opts.emit_asset_loader = options.emit_asset_loader;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
     auto output = gbrecomp::codegen::generate_output(
@@ -1521,7 +1523,8 @@ int main(int argc, char* argv[]) {
     bool emit_android_project = false;
     std::string android_package;
     std::string android_app_name;
-    
+    bool emit_asset_loader = false;
+
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         
@@ -1597,6 +1600,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 annotation_file_path = argv[++i];
             }
+        } else if (arg == "--emit-asset-loader") {
+            emit_asset_loader = true;
         } else if (arg[0] != '-') {
             rom_path = arg;
         } else {
@@ -1634,7 +1639,8 @@ int main(int argc, char* argv[]) {
     generation_opts.emit_android_project = emit_android_project;
     generation_opts.android_package = android_package;
     generation_opts.android_app_name = android_app_name;
-    
+    generation_opts.emit_asset_loader = emit_asset_loader;
+
     print_banner();
 
     fs::path input_path = rom_path;
@@ -1911,6 +1917,7 @@ int main(int argc, char* argv[]) {
     gen_opts.emit_comments = emit_comments;
     gen_opts.single_function_mode = single_function;
     gen_opts.parallel_codegen_jobs = requested_jobs;
+    gen_opts.emit_asset_loader = emit_asset_loader;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
     
     auto output = gbrecomp::codegen::generate_output(

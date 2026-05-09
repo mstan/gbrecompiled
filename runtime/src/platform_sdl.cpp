@@ -15,6 +15,7 @@
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
+#include <SDL_opengles2.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -23,7 +24,10 @@
 #include <vector>
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
-#include "backends/imgui_impl_sdlrenderer2.h"
+#define IMGUI_IMPL_OPENGL_ES2
+#include "backends/imgui_impl_opengl3.h"
+
+#include "shader_pipeline.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -44,8 +48,10 @@ static constexpr const char* GB_BORDER_DIR_NAME = "borders";
  * ========================================================================== */
 
 static SDL_Window* g_window = NULL;
-static SDL_Renderer* g_renderer = NULL;
-static SDL_Texture* g_texture = NULL;
+static SDL_GLContext g_gl_context = NULL;
+static GLuint g_game_tex = 0;
+static GBShaderPipeline* g_shader_pipeline = NULL;
+static std::string g_active_shader_pref = "sharp";
 static int g_scale = 5;
 static int g_windowed_width = GB_SCREEN_WIDTH * 5;
 static int g_windowed_height = GB_SCREEN_HEIGHT * 5;
@@ -81,13 +87,13 @@ static std::vector<std::string> g_border_files;
 static int g_border_idx = 0;
 static std::string g_border_dir;
 static std::string g_border_loaded_filename;
-static SDL_Texture* g_border_texture = NULL;
+static GLuint g_border_texture = 0;
 
 /* SGB cart-supplied border (CHR_TRN+PCT_TRN). Rebuilt from sgb engine
  * data whenever the revision counter advances. Default enabled — most
  * SGB carts ship with a border specifically authored for them. */
 static bool g_sgb_cart_border_enabled = true;
-static SDL_Texture* g_sgb_cart_border_texture = NULL;
+static GLuint g_sgb_cart_border_texture = 0;
 
 /* LAN auto-discovery + direct-link state. The discovery engine itself
  * lives in network_discovery.{c,h}; these are just the menu-side
@@ -1074,6 +1080,10 @@ static void load_runtime_preferences(void) {
                     g_sgb_cart_border_enabled = (strcmp(value, "0") != 0);
                     continue;
                 }
+                if (strcmp(key, "shader.active") == 0) {
+                    g_active_shader_pref = value;
+                    continue;
+                }
                 if (strcmp(key, "lan.enabled") == 0) {
                     g_lan_enabled_pref = (strcmp(value, "0") != 0);
                     continue;
@@ -1223,6 +1233,9 @@ static void save_runtime_preferences(void) {
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
     fprintf(file, "sgb.cart_border=%d\n", g_sgb_cart_border_enabled ? 1 : 0);
+    if (!g_active_shader_pref.empty()) {
+        fprintf(file, "shader.active=%s\n", g_active_shader_pref.c_str());
+    }
     fprintf(file, "lan.enabled=%d\n", g_lan_enabled_pref ? 1 : 0);
     if (!g_lan_uuid_pref.empty())     fprintf(file, "lan.uuid=%s\n", g_lan_uuid_pref.c_str());
     if (!g_lan_nickname_pref.empty()) fprintf(file, "lan.nickname=%s\n", g_lan_nickname_pref.c_str());
@@ -1703,8 +1716,8 @@ static int border_content_height(void) {
 
 static void unload_border_texture(void) {
     if (g_border_texture) {
-        SDL_DestroyTexture(g_border_texture);
-        g_border_texture = NULL;
+        glDeleteTextures(1, &g_border_texture);
+        g_border_texture = 0;
     }
     g_border_loaded_filename.clear();
 }
@@ -1719,15 +1732,13 @@ static void unload_sgb_cart_border_texture(void);
  * the cart has just shipped fresh CHR_TRN/PCT_TRN data. Cheap when the
  * revision counter hasn't changed, so it's safe to call every frame. */
 static void refresh_sgb_cart_border_texture(void) {
-    if (!g_renderer) return;
+    if (!g_gl_context) return;
     if (!g_registered_ctx) {
         unload_sgb_cart_border_texture();
         return;
     }
     GBSgbState* sgb = (GBSgbState*)g_registered_ctx->sgb;
     if (!gb_sgb_border_ready(sgb)) {
-        /* Engine has been reset (revision 0) but we still hold a texture
-         * from a previous cart — drop it so we don't render stale art. */
         if (g_sgb_cart_border_texture) {
             unload_sgb_cart_border_texture();
             apply_window_scale_preset();
@@ -1746,25 +1757,24 @@ static void refresh_sgb_cart_border_texture(void) {
 
     bool first_creation = false;
     if (!g_sgb_cart_border_texture) {
-        g_sgb_cart_border_texture = SDL_CreateTexture(g_renderer,
-                                                      SDL_PIXELFORMAT_ABGR8888,
-                                                      SDL_TEXTUREACCESS_STATIC,
-                                                      GB_SGB_BORDER_W, GB_SGB_BORDER_H);
-        if (!g_sgb_cart_border_texture) {
-            fprintf(stderr, "[SGB] cart border SDL_CreateTexture failed: %s\n",
-                    SDL_GetError());
-            return;
-        }
-        SDL_SetTextureBlendMode(g_sgb_cart_border_texture, SDL_BLENDMODE_BLEND);
+        glGenTextures(1, &g_sgb_cart_border_texture);
+        glBindTexture(GL_TEXTURE_2D, g_sgb_cart_border_texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                     GB_SGB_BORDER_W, GB_SGB_BORDER_H, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         first_creation = true;
+    } else {
+        glBindTexture(GL_TEXTURE_2D, g_sgb_cart_border_texture);
     }
-    SDL_UpdateTexture(g_sgb_cart_border_texture, NULL,
-                      g_sgb_cart_border_pixels.data(),
-                      GB_SGB_BORDER_W * (int)sizeof(uint32_t));
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                    GB_SGB_BORDER_W, GB_SGB_BORDER_H,
+                    GL_RGBA, GL_UNSIGNED_BYTE,
+                    g_sgb_cart_border_pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
     g_sgb_cart_border_revision = rev;
 
-    /* The first time the cart border lands, the content area jumps from
-     * 160x144 to 256x224, so the window/viewport need to be rescaled. */
     if (first_creation && g_sgb_cart_border_enabled) {
         apply_window_scale_preset();
     }
@@ -1772,8 +1782,8 @@ static void refresh_sgb_cart_border_texture(void) {
 
 static void unload_sgb_cart_border_texture(void) {
     if (g_sgb_cart_border_texture) {
-        SDL_DestroyTexture(g_sgb_cart_border_texture);
-        g_sgb_cart_border_texture = NULL;
+        glDeleteTextures(1, &g_sgb_cart_border_texture);
+        g_sgb_cart_border_texture = 0;
     }
     g_sgb_cart_border_revision = 0;
     g_sgb_cart_border_pixels.clear();
@@ -1784,7 +1794,7 @@ static void unload_sgb_cart_border_texture(void) {
  * 256x224 RGB(A) — anything else is rejected. */
 static bool load_border_texture(const std::string& filename) {
     unload_border_texture();
-    if (!g_renderer || filename.empty() || g_border_dir.empty()) {
+    if (!g_gl_context || filename.empty() || g_border_dir.empty()) {
         return false;
     }
     fs::path full = fs::path(g_border_dir) / filename;
@@ -1801,17 +1811,14 @@ static bool load_border_texture(const std::string& filename) {
         stbi_image_free(pixels);
         return false;
     }
-    SDL_Texture* tex = SDL_CreateTexture(g_renderer,
-                                         SDL_PIXELFORMAT_ABGR8888,
-                                         SDL_TEXTUREACCESS_STATIC,
-                                         w, h);
-    if (!tex) {
-        fprintf(stderr, "[BORDER] SDL_CreateTexture failed: %s\n", SDL_GetError());
-        stbi_image_free(pixels);
-        return false;
-    }
-    SDL_UpdateTexture(tex, NULL, pixels, w * 4);
-    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
     stbi_image_free(pixels);
     g_border_texture = tex;
     g_border_loaded_filename = filename;
@@ -1859,21 +1866,10 @@ static void scan_border_directory(void) {
 static void apply_border_change(void); /* forward */
 
 static void update_render_filter(void) {
-    if (!g_renderer) {
-        return;
-    }
-
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-    if (g_texture) {
-        SDL_SetTextureScaleMode(g_texture,
-                                g_render_filter_mode == GB_RENDER_FILTER_LINEAR
-                                    ? SDL_ScaleModeLinear
-                                    : SDL_ScaleModeNearest);
-    }
-#else
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
-                g_render_filter_mode == GB_RENDER_FILTER_LINEAR ? "linear" : "nearest");
-#endif
+    /* Filtering is now decided per shader at draw time
+     * (gb_shader_pipeline_draw chooses NEAREST or LINEAR based on the
+     * active shader). The legacy SDL_Renderer scale-mode toggle is
+     * gone, so this is a no-op kept around for the existing call sites. */
 }
 
 static void update_game_viewport(void) {
@@ -2009,28 +2005,30 @@ static void set_fullscreen_enabled(bool enabled) {
 }
 
 static bool recreate_streaming_texture(void) {
-    if (!g_renderer || g_benchmark_mode) {
+    if (!g_gl_context || g_benchmark_mode) {
         return true;
     }
 
-    if (g_texture) {
-        SDL_DestroyTexture(g_texture);
-        g_texture = NULL;
+    if (g_game_tex) {
+        glDeleteTextures(1, &g_game_tex);
+        g_game_tex = 0;
     }
 
-    g_texture = SDL_CreateTexture(
-        g_renderer,
-        SDL_PIXELFORMAT_ARGB8888,
-        SDL_TEXTUREACCESS_STREAMING,
-        GB_SCREEN_WIDTH,
-        GB_SCREEN_HEIGHT
-    );
-    if (!g_texture) {
-        fprintf(stderr, "[SDL] Failed to recreate texture: %s\n", SDL_GetError());
-        return false;
-    }
+    glGenTextures(1, &g_game_tex);
+    glBindTexture(GL_TEXTURE_2D, g_game_tex);
+    /* RGBA8 storage — the GB framebuffer is uint32 ARGB; we re-pack to
+     * RGBA on upload. Filter and wrap are reset every shader draw, but
+     * set sane defaults so even pre-shader code paths see a usable
+     * texture. */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                 GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
 
-    update_render_filter();
     g_renderer_reset_pending = false;
     return true;
 }
@@ -2064,8 +2062,8 @@ static void reset_runtime_display_defaults(void) {
     g_render_filter_mode = GB_RENDER_FILTER_NEAREST;
     update_render_filter();
 
-    if (g_renderer) {
-        SDL_RenderSetVSync(g_renderer, 0);
+    if (g_gl_context) {
+        SDL_GL_SetSwapInterval(0);
     }
 
     const bool want_fullscreen = platform_default_fullscreen();
@@ -2226,8 +2224,8 @@ static void ensure_lcd_off_framebuffer(void) {
 
 static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_frame) {
     if (!framebuffer) {
-        DBG_FRAME("Platform render_frame: SKIPPED (null: texture=%d, renderer=%d, fb=%d)",
-                  g_texture == NULL, g_renderer == NULL, framebuffer == NULL);
+        DBG_FRAME("Platform render_frame: SKIPPED (null: tex=%d, gl=%d, fb=%d)",
+                  g_game_tex == 0, g_gl_context == NULL, framebuffer == NULL);
         return;
     }
     g_present_count++;
@@ -2257,11 +2255,10 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
     }
 
-    if (g_benchmark_mode || g_app_suspended || !g_renderer) {
-        DBG_FRAME("Platform render_frame: host render skipped (benchmark=%d texture=%d renderer=%d)",
+    if (g_benchmark_mode || g_app_suspended || !g_gl_context) {
+        DBG_FRAME("Platform render_frame: host render skipped (benchmark=%d gl=%d)",
                   g_benchmark_mode ? 1 : 0,
-                  g_texture == NULL,
-                  g_renderer == NULL);
+                  g_gl_context == NULL);
         g_last_timing.upload_ms = 0.0;
         g_last_timing.compose_ms = 0.0;
         g_last_timing.present_ms = 0.0;
@@ -2269,7 +2266,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         return;
     }
 
-    if ((!g_texture || g_renderer_reset_pending) && !recreate_streaming_texture()) {
+    if ((!g_game_tex || g_renderer_reset_pending) && !recreate_streaming_texture()) {
         g_last_timing.upload_ms = 0.0;
         g_last_timing.compose_ms = 0.0;
         g_last_timing.present_ms = 0.0;
@@ -2309,68 +2306,107 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         SDL_SetWindowTitle(g_window, title);
     }
 
-    /* Update texture */
+    /* Upload framebuffer to the GL game texture. The PPU stores pixels
+     * as 0xAARRGGBB (CPU-side ARGB), which on a little-endian host is
+     * BGRA in memory. GL ES 2.0 doesn't reliably expose GL_BGRA, so
+     * shuffle into RGBA byte order on the way in. The optional palette
+     * override (Original / Pocket / Plasma) is applied during the same
+     * pass since we're touching every pixel anyway. */
     double upload_start_ms = sdl_now_ms();
-    void* pixels;
-    int pitch;
-    SDL_LockTexture(g_texture, NULL, &pixels, &pitch);
-
-    const uint32_t* src = framebuffer;
-    uint32_t* dst = (uint32_t*)pixels;
-
-    if (g_palette_idx == 0) {
-        memcpy(dst, src, GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT * sizeof(uint32_t));
-    } else {
-        uint32_t original_palette[4] = { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 };
-
+    static uint32_t s_upload_buf[GB_FRAMEBUFFER_SIZE];
+    {
+        const uint32_t* src = framebuffer;
+        const uint32_t orig[4] = { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 };
+        const uint32_t* pal = (g_palette_idx == 0) ? NULL : g_palettes[g_palette_idx];
         for (int i = 0; i < GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT; i++) {
             uint32_t c = src[i];
-            int color_idx = -1;
-            if (c == original_palette[0]) color_idx = 0;
-            else if (c == original_palette[1]) color_idx = 1;
-            else if (c == original_palette[2]) color_idx = 2;
-            else if (c == original_palette[3]) color_idx = 3;
-
-            if (color_idx >= 0) {
-                dst[i] = g_palettes[g_palette_idx][color_idx];
-            } else {
-                dst[i] = c;
+            if (pal) {
+                if      (c == orig[0]) c = pal[0];
+                else if (c == orig[1]) c = pal[1];
+                else if (c == orig[2]) c = pal[2];
+                else if (c == orig[3]) c = pal[3];
             }
+            /* ARGB → RGBA: swap R<->B, keep G and A. */
+            uint32_t a = c & 0xFF000000u;
+            uint32_t r = (c >> 16) & 0xFFu;
+            uint32_t g = (c >>  8) & 0xFFu;
+            uint32_t b =  c        & 0xFFu;
+            s_upload_buf[i] = a | (b << 16) | (g << 8) | r;
         }
     }
-
-    SDL_UnlockTexture(g_texture);
+    glBindTexture(GL_TEXTURE_2D, g_game_tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                    GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
+                    GL_RGBA, GL_UNSIGNED_BYTE, s_upload_buf);
+    glBindTexture(GL_TEXTURE_2D, 0);
     g_last_timing.upload_ms = sdl_now_ms() - upload_start_ms;
 
-    /* Clear and render */
+    /* Clear + compose. */
     double compose_start_ms = sdl_now_ms();
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(g_renderer);
+    int draw_w = 0, draw_h = 0;
+    SDL_GL_GetDrawableSize(g_window, &draw_w, &draw_h);
+    glViewport(0, 0, draw_w, draw_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     refresh_sgb_cart_border_texture();
-    /* Pick the border source: the cart-supplied SGB border wins when it's
-     * available and enabled, otherwise fall back to the user PNG border,
-     * otherwise no border at all. */
-    SDL_Texture* active_border = NULL;
+    GLuint active_border = 0;
     if (sgb_cart_border_active()) {
         active_border = g_sgb_cart_border_texture;
     } else if (g_border_enabled && g_border_texture) {
         active_border = g_border_texture;
     }
-    if (active_border) {
-        SDL_RenderCopy(g_renderer, active_border, NULL, &g_game_viewport);
-        const double sx = (double)g_game_viewport.w / (double)GB_BORDER_FULL_W;
-        const double sy = (double)g_game_viewport.h / (double)GB_BORDER_FULL_H;
-        SDL_Rect gb_rect;
-        gb_rect.x = g_game_viewport.x + round_to_int(GB_BORDER_INSET_X * sx);
-        gb_rect.y = g_game_viewport.y + round_to_int(GB_BORDER_INSET_Y * sy);
-        gb_rect.w = round_to_int(GB_SCREEN_WIDTH  * sx);
-        gb_rect.h = round_to_int(GB_SCREEN_HEIGHT * sy);
-        SDL_RenderCopy(g_renderer, g_texture, NULL, &gb_rect);
-    } else {
-        SDL_RenderCopy(g_renderer, g_texture, NULL, &g_game_viewport);
+
+    /* Convert the SDL_Rect-style game viewport (window-pixel coords)
+     * into drawable-pixel coords for HiDPI consistency. */
+    int win_w = 0, win_h = 0;
+    SDL_GetWindowSize(g_window, &win_w, &win_h);
+    const double dpr_x = (double)draw_w / (double)(win_w > 0 ? win_w : 1);
+    const double dpr_y = (double)draw_h / (double)(win_h > 0 ? win_h : 1);
+    int vp_x = (int)(g_game_viewport.x * dpr_x);
+    int vp_y = (int)(g_game_viewport.y * dpr_y);
+    int vp_w = (int)(g_game_viewport.w * dpr_x);
+    int vp_h = (int)(g_game_viewport.h * dpr_y);
+
+    if (g_shader_pipeline) {
+        const int active_shader = gb_shader_pipeline_active(g_shader_pipeline);
+        if (active_border) {
+            /* Border is always drawn with the passthrough "sharp" shader
+             * — the user-selected effect applies to the game pixels
+             * only, which is the visually-right thing for an LCD-style
+             * filter. */
+            gb_shader_pipeline_set_active_by_name(g_shader_pipeline, "sharp");
+            gb_shader_pipeline_draw(g_shader_pipeline,
+                                    active_border,
+                                    GB_BORDER_FULL_W, GB_BORDER_FULL_H,
+                                    vp_x, vp_y, vp_w, vp_h,
+                                    draw_w, draw_h);
+            const double sx = (double)g_game_viewport.w / (double)GB_BORDER_FULL_W;
+            const double sy = (double)g_game_viewport.h / (double)GB_BORDER_FULL_H;
+            int gb_x = (int)((g_game_viewport.x + GB_BORDER_INSET_X * sx) * dpr_x);
+            int gb_y = (int)((g_game_viewport.y + GB_BORDER_INSET_Y * sy) * dpr_y);
+            int gb_w = (int)((GB_SCREEN_WIDTH  * sx) * dpr_x);
+            int gb_h = (int)((GB_SCREEN_HEIGHT * sy) * dpr_y);
+            if (active_shader >= 0) {
+                gb_shader_pipeline_set_active(g_shader_pipeline, active_shader);
+            }
+            gb_shader_pipeline_draw(g_shader_pipeline,
+                                    g_game_tex,
+                                    GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
+                                    gb_x, gb_y, gb_w, gb_h,
+                                    draw_w, draw_h);
+        } else {
+            gb_shader_pipeline_draw(g_shader_pipeline,
+                                    g_game_tex,
+                                    GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
+                                    vp_x, vp_y, vp_w, vp_h,
+                                    draw_w, draw_h);
+        }
     }
 
-    ImGui_ImplSDLRenderer2_NewFrame();
+    ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     ImGuiIO& imgui_io = ImGui::GetIO();
@@ -2902,6 +2938,35 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 g_render_filter_mode = (GBRenderFilterMode)filter_mode;
                 update_render_filter();
             }
+
+            /* Shader dropdown — pulls names from the shader pipeline so
+             * user-supplied .frag.glsl overrides appear automatically.
+             * Reload re-compiles all entries from disk (handy while
+             * tweaking a shader). */
+            if (g_shader_pipeline) {
+                const int count = gb_shader_pipeline_count(g_shader_pipeline);
+                int active = gb_shader_pipeline_active(g_shader_pipeline);
+                if (active < 0) active = 0;
+                const char* preview = gb_shader_pipeline_name(g_shader_pipeline, active);
+                if (ImGui::BeginCombo("Shader", preview ? preview : "(none)")) {
+                    for (int i = 0; i < count; i++) {
+                        const char* name = gb_shader_pipeline_name(g_shader_pipeline, i);
+                        bool selected = (i == active);
+                        if (ImGui::Selectable(name, selected)) {
+                            if (gb_shader_pipeline_set_active(g_shader_pipeline, i)) {
+                                g_active_shader_pref = name ? name : "";
+                                save_runtime_preferences();
+                            }
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Reload##shader")) {
+                    gb_shader_pipeline_reload(g_shader_pipeline);
+                }
+            }
             if (!g_fullscreen) {
                 int scale_idx = g_scale - 1;
                 if (ImGui::Combo("Window Size",
@@ -2915,7 +2980,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 ImGui::TextDisabled("Window Size disabled while fullscreen.");
             }
             if (ImGui::Checkbox("V-Sync", &g_vsync)) {
-                SDL_RenderSetVSync(g_renderer, g_vsync ? 1 : 0);
+                SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
             }
             ImGui::Checkbox("Show Overlay", &g_show_overlay);
             ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
@@ -3144,11 +3209,11 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     }
 
     ImGui::Render();
-    ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     g_last_timing.compose_ms = sdl_now_ms() - compose_start_ms;
 
     double present_start_ms = sdl_now_ms();
-    SDL_RenderPresent(g_renderer);
+    SDL_GL_SwapWindow(g_window);
     g_last_timing.present_ms = sdl_now_ms() - present_start_ms;
     g_last_timing.total_render_ms = sdl_now_ms() - total_render_start_ms;
     g_timing_render_total += g_last_timing.total_render_ms;
@@ -3170,20 +3235,25 @@ void gb_platform_shutdown(void) {
     g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
     
     if (ImGui::GetCurrentContext() != NULL) {
-        ImGui_ImplSDLRenderer2_Shutdown();
+        ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplSDL2_Shutdown();
         ImGui::DestroyContext();
     }
 
-    if (g_texture) {
-        SDL_DestroyTexture(g_texture);
-        g_texture = NULL;
+    /* Tear down GL-owned objects before the context goes away. */
+    if (g_shader_pipeline) {
+        gb_shader_pipeline_destroy(g_shader_pipeline);
+        g_shader_pipeline = NULL;
+    }
+    if (g_game_tex) {
+        glDeleteTextures(1, &g_game_tex);
+        g_game_tex = 0;
     }
     unload_border_texture();
     unload_sgb_cart_border_texture();
-    if (g_renderer) {
-        SDL_DestroyRenderer(g_renderer);
-        g_renderer = NULL;
+    if (g_gl_context) {
+        SDL_GL_DeleteContext(g_gl_context);
+        g_gl_context = NULL;
     }
     if (g_window) {
         SDL_DestroyWindow(g_window);
@@ -3557,16 +3627,25 @@ bool gb_platform_init(int scale) {
     reopen_audio_output_device(false);
     
     fprintf(stderr, "[SDL] Creating window...\n");
+    /* Request a GLES 2.0 context — same code path on desktop Mesa
+     * (which advertises a compatible profile) and embedded Mali / Adreno
+     * GPUs. SDL_WINDOW_OPENGL must be set BEFORE SDL_CreateWindow. */
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+
     g_window = SDL_CreateWindow(
         "GameBoy Recompiled",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         g_windowed_width,
         g_windowed_height,
-        SDL_WINDOW_SHOWN |
+        SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL |
         (g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE)
     );
-    
+
     if (!g_window) {
         fprintf(stderr, "[SDL] SDL_CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
@@ -3574,27 +3653,19 @@ bool gb_platform_init(int scale) {
     }
     fprintf(stderr, "[SDL] Window created.\n");
     SDL_SetWindowMinimumSize(g_window, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
-    
-    fprintf(stderr, "[SDL] Creating renderer...\n");
-    /* 
-     * NO VSync - we use wall-clock timing to run at exactly 59.7 FPS.
-     * This is essential for non-60Hz monitors (like 100Hz).
-     */
-    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
-        
-    if (!g_renderer) {
-        fprintf(stderr, "[SDL] Hardware renderer failed, trying software fallback...\n");
-        g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
-    }
-        
-    if (!g_renderer) {
-        fprintf(stderr, "[SDL] SDL_CreateRenderer failed: %s\n", SDL_GetError());
+
+    fprintf(stderr, "[SDL] Creating GL context...\n");
+    g_gl_context = SDL_GL_CreateContext(g_window);
+    if (!g_gl_context) {
+        fprintf(stderr, "[SDL] SDL_GL_CreateContext failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(g_window);
         SDL_Quit();
         return false;
     }
-    
-    update_render_filter();
+    SDL_GL_MakeCurrent(g_window, g_gl_context);
+    /* No vsync — we drive timing in wall-clock to hit 59.7 FPS exactly,
+     * including on non-60Hz monitors. */
+    SDL_GL_SetSwapInterval(0);
 
     /* Custom SGB borders: scan optional borders/ dir and honor any saved
      * border preference (resizes the window to 256x224*scale if enabled). */
@@ -3605,21 +3676,28 @@ bool gb_platform_init(int scale) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
-    // Setup Dear ImGui style
     ImGui::StyleColorsDark();
-    /* Subtle nav focus rectangle so you can see what's selected without it
-     * being a glaring white outline. */
     ImGui::GetStyle().Colors[ImGuiCol_NavHighlight] = ImVec4(0.45f, 0.65f, 0.95f, 0.65f);
 
-    // Setup Platform/Renderer backends
-    ImGui_ImplSDL2_InitForSDLRenderer(g_window, g_renderer);
-    ImGui_ImplSDLRenderer2_Init(g_renderer);
+    /* GLES 2 backend — `#version 100` GLSL, no VAOs, runs anywhere. */
+    ImGui_ImplSDL2_InitForOpenGL(g_window, g_gl_context);
+    ImGui_ImplOpenGL3_Init("#version 100");
+
+    /* Build the post-process shader pipeline now that GL is current. */
+    g_shader_pipeline = gb_shader_pipeline_create();
+    if (g_shader_pipeline) {
+        if (!gb_shader_pipeline_set_active_by_name(g_shader_pipeline,
+                                                    g_active_shader_pref.c_str())) {
+            gb_shader_pipeline_set_active_by_name(g_shader_pipeline, "sharp");
+        }
+    }
 
     if (!recreate_streaming_texture()) {
-        SDL_DestroyRenderer(g_renderer);
+        SDL_GL_DeleteContext(g_gl_context);
+        g_gl_context = NULL;
         SDL_DestroyWindow(g_window);
         SDL_Quit();
         return false;

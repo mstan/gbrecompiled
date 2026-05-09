@@ -14,6 +14,7 @@ add_library(gbrt STATIC
     src/network_discovery.c
     src/sgb.c
     src/relay_client.c
+    src/shader_pipeline.cpp
 )
 
 # pthread for the BGB link recv thread
@@ -39,7 +40,14 @@ if(SDL2_FOUND)
         vendor/imgui/imgui_tables.cpp
         vendor/imgui/imgui_widgets.cpp
         vendor/imgui/backends/imgui_impl_sdl2.cpp
-        vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp
+        vendor/imgui/backends/imgui_impl_opengl3.cpp
+    )
+    # imgui_impl_opengl3 is dialect-selected at compile time. Force the
+    # GLES 2.0 path so one binary covers desktop Mesa, Mali, Adreno,
+    # everything we care about.
+    set_source_files_properties(
+        vendor/imgui/backends/imgui_impl_opengl3.cpp
+        PROPERTIES COMPILE_DEFINITIONS "IMGUI_IMPL_OPENGL_ES2"
     )
     target_include_directories(gbrt PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui
@@ -91,4 +99,22 @@ endif()
 if(SDL2_FOUND)
     target_link_libraries(gbrt PUBLIC SDL2::SDL2)
     target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)
+
+    # GL stack for the post-process shader pipeline + ImGui's opengl3
+    # backend. We compile against the GLES 2.0 subset so the same code
+    # runs on desktop Mesa and embedded GLES (Mali on Orange Pi).
+    if(APPLE)
+        target_link_libraries(gbrt PUBLIC "-framework OpenGL")
+    elseif(WIN32)
+        target_link_libraries(gbrt PUBLIC opengl32)
+    else()
+        find_package(OpenGL QUIET)
+        if(TARGET OpenGL::GL)
+            target_link_libraries(gbrt PUBLIC OpenGL::GL)
+        elseif(TARGET OpenGL::OpenGL)
+            target_link_libraries(gbrt PUBLIC OpenGL::OpenGL)
+        else()
+            target_link_libraries(gbrt PUBLIC GL)
+        endif()
+    endif()
 endif()

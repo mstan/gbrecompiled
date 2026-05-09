@@ -12,6 +12,7 @@
 #include "network_discovery.h"
 #include "sgb.h"
 #include "relay_client.h"
+#include "gb_printer.h"
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -88,6 +89,8 @@ static int g_border_idx = 0;
 static std::string g_border_dir;
 static std::string g_border_loaded_filename;
 static GLuint g_border_texture = 0;
+
+static GBPrinter* g_printer = NULL;
 
 /* User toggle for the SGB engine. Default true; cart still has to
  * advertise SGB support (byte 0x146 == 0x03) for it to actually run. */
@@ -4481,17 +4484,73 @@ static bool sdl_save_rtc_data(GBContext* ctx, const char* rom_name, const void* 
     return written == size;
 }
 
+/* Serial-byte fan-out: BGB peer link gets first refusal (it claims the
+ * transfer when a peer is connected), and otherwise the virtual Game
+ * Boy Printer hooks any traffic that matches its packet protocol.
+ * Stray bytes outside both protocols fall through to the runtime's
+ * "cable unplugged" 0xFF default. */
+static bool g_printer_prefix_resolved = false;
+static void cart_title_to_prefix(const GBContext* ctx, char* out, size_t cap);
+static void resolve_printer_prefix_if_needed(GBContext* ctx) {
+    if (g_printer_prefix_resolved || !g_printer) return;
+    if (!ctx || !ctx->rom) return;
+    std::string prints_dir = (fs::current_path() / "prints").string();
+    char prefix[64];
+    cart_title_to_prefix(ctx, prefix, sizeof(prefix));
+    gb_printer_set_output(g_printer, prints_dir.c_str(), prefix);
+    fprintf(stderr, "[PRINTER] Output: %s/%s_NNNN.png\n",
+            prints_dir.c_str(), prefix);
+    g_printer_prefix_resolved = true;
+}
+static void platform_on_serial_byte(GBContext* ctx, uint8_t outgoing) {
+    gb_serial_link_on_serial_byte(ctx, outgoing);
+    if (ctx->serial_transfer.deferred) return;
+    resolve_printer_prefix_if_needed(ctx);
+    if (g_printer && gb_printer_on_serial_byte(g_printer, ctx, outgoing)) return;
+}
+
+/* Sanitize cart-title bytes (0x134-0x143) into a safe filename prefix
+ * — lowercase, [a-z0-9_] only, max 32 chars. */
+static void cart_title_to_prefix(const GBContext* ctx, char* out, size_t cap) {
+    if (cap == 0) return;
+    out[0] = '\0';
+    if (!ctx || !ctx->rom || ctx->rom_size < 0x144) {
+        snprintf(out, cap, "print");
+        return;
+    }
+    size_t n = 0;
+    for (int i = 0; i < 16 && n + 1 < cap; i++) {
+        uint8_t b = ctx->rom[0x134 + i];
+        if (b == 0) break;
+        char c = (char)b;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        else if (c >= 'a' && c <= 'z') {}
+        else if (c >= '0' && c <= '9') {}
+        else c = '_';
+        out[n++] = c;
+    }
+    while (n > 0 && out[n - 1] == '_') n--;
+    out[n] = '\0';
+    if (n == 0) snprintf(out, cap, "print");
+}
+
 void gb_platform_register_context(GBContext* ctx) {
     g_registered_ctx = ctx;
     GBPlatformCallbacks callbacks = {
         .on_audio_sample = on_audio_sample,
-        .on_serial_byte = gb_serial_link_on_serial_byte,
+        .on_serial_byte = platform_on_serial_byte,
         .load_battery_ram = sdl_load_battery_ram,
         .save_battery_ram = sdl_save_battery_ram,
         .load_rtc_data = sdl_load_rtc_data,
         .save_rtc_data = sdl_save_rtc_data
     };
     gb_set_platform_callbacks(ctx, &callbacks);
+
+    /* Spin up the printer once. The actual output path/prefix is
+     * resolved lazily on the first serial byte — register_context runs
+     * before gb_context_load_rom, so ctx->rom is still NULL here. */
+    if (!g_printer) g_printer = gb_printer_create();
+    g_printer_prefix_resolved = false;
 
     /* gb_context_load_rom auto-enabled the SGB engine based on the cart
      * header. We leave the engine on (so the cart's CheckSGB latches

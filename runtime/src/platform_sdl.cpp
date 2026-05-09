@@ -93,6 +93,8 @@ static GLuint g_border_texture = 0;
  * advertise SGB support (byte 0x146 == 0x03) for it to actually run. */
 static bool g_sgb_enabled_pref = true;
 
+static bool g_show_fps = false;
+
 /* SGB cart-supplied border (CHR_TRN+PCT_TRN). Rebuilt from sgb engine
  * data whenever the revision counter advances. Default enabled — most
  * SGB carts ship with a border specifically authored for them. */
@@ -1088,6 +1090,10 @@ static void load_runtime_preferences(void) {
                     g_sgb_cart_border_enabled = (strcmp(value, "0") != 0);
                     continue;
                 }
+                if (strcmp(key, "diag.show_fps") == 0) {
+                    g_show_fps = (strcmp(value, "0") != 0);
+                    continue;
+                }
                 if (strcmp(key, "shader.active") == 0) {
                     g_active_shader_pref = value;
                     continue;
@@ -1242,6 +1248,7 @@ static void save_runtime_preferences(void) {
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
     fprintf(file, "sgb.enabled=%d\n", g_sgb_enabled_pref ? 1 : 0);
     fprintf(file, "sgb.cart_border=%d\n", g_sgb_cart_border_enabled ? 1 : 0);
+    fprintf(file, "diag.show_fps=%d\n", g_show_fps ? 1 : 0);
     if (!g_active_shader_pref.empty()) {
         fprintf(file, "shader.active=%s\n", g_active_shader_pref.c_str());
     }
@@ -1690,6 +1697,31 @@ static void save_ppm(const char* filename, const uint32_t* fb, int width, int he
 
 
 static int g_frame_count = 0;
+
+/* Guest-FPS sampler. We snapshot (g_frame_count, wall_clock_ms) once a
+ * second and compute FPS as the delta against the previous snapshot.
+ * That gives the rate the recompiled GB CPU is actually producing
+ * frames at — which under fast-forward / max-speed will exceed 60 even
+ * though the present rate stays pinned to the display. */
+static double g_guest_fps = 0.0;
+static int    g_guest_fps_last_count = 0;
+static uint32_t g_guest_fps_last_ms = 0;
+
+static void update_guest_fps(void) {
+    uint32_t now = SDL_GetTicks();
+    if (g_guest_fps_last_ms == 0) {
+        g_guest_fps_last_ms = now;
+        g_guest_fps_last_count = g_frame_count;
+        return;
+    }
+    uint32_t elapsed = now - g_guest_fps_last_ms;
+    if (elapsed >= 500) {  /* update twice a second */
+        int frames = g_frame_count - g_guest_fps_last_count;
+        g_guest_fps = (double)frames * 1000.0 / (double)elapsed;
+        g_guest_fps_last_ms = now;
+        g_guest_fps_last_count = g_frame_count;
+    }
+}
 
 static double sdl_now_ms(void) {
     uint64_t ticks = SDL_GetPerformanceCounter();
@@ -2249,6 +2281,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     g_present_count++;
     if (count_guest_frame) {
         g_frame_count++;
+        update_guest_fps();
         memcpy(g_last_guest_framebuffer, framebuffer, sizeof(g_last_guest_framebuffer));
         g_last_guest_framebuffer_valid = true;
     }
@@ -2484,6 +2517,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("Fast forward shortcut is active.");
         } else if (g_max_speed_mode) {
             ImGui::TextDisabled("Max speed shortcut is active.");
+        }
+        if (ImGui::Checkbox("Show FPS", &g_show_fps)) {
+            save_runtime_preferences();
         }
 
         ImGui::Spacing();
@@ -3255,6 +3291,27 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
             ImGui::End();
         }
+    }
+
+    /* FPS overlay last so it draws on top of the menu (and over any
+     * border/letterbox the game viewport leaves around the edges). */
+    if (g_show_fps) {
+        ImGuiIO& fps_io = ImGui::GetIO();
+        const float pad = 8.0f * fps_io.FontGlobalScale;
+        ImGui::SetNextWindowPos(ImVec2(fps_io.DisplaySize.x - pad, pad),
+                                ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::SetNextWindowBgAlpha(0.55f);
+        if (ImGui::Begin("##fps_overlay", NULL,
+                         ImGuiWindowFlags_NoDecoration |
+                         ImGuiWindowFlags_AlwaysAutoResize |
+                         ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoFocusOnAppearing |
+                         ImGuiWindowFlags_NoNav |
+                         ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_NoInputs)) {
+            ImGui::Text("%.1f FPS", g_guest_fps);
+        }
+        ImGui::End();
     }
 
     ImGui::Render();

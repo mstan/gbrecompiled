@@ -13,11 +13,16 @@ add_library(gbrt STATIC
     src/serial_link.c
     src/network_discovery.c
     src/sgb.c
+    src/relay_client.c
 )
 
 # pthread for the BGB link recv thread
 find_package(Threads REQUIRED)
 target_link_libraries(gbrt PUBLIC Threads::Threads)
+
+# libcurl for the rendezvous-server HTTP client
+find_package(CURL REQUIRED)
+target_link_libraries(gbrt PUBLIC CURL::libcurl)
 
 # macOS: add AVFoundation camera backend
 if(APPLE)

@@ -9,7 +9,9 @@
 #include "audio_stats.h"
 #include "gbrt_debug.h"
 #include "serial_link.h"
+#include "network_discovery.h"
 #include "sgb.h"
+#include "relay_client.h"
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -86,6 +88,46 @@ static SDL_Texture* g_border_texture = NULL;
  * SGB carts ship with a border specifically authored for them. */
 static bool g_sgb_cart_border_enabled = true;
 static SDL_Texture* g_sgb_cart_border_texture = NULL;
+
+/* LAN auto-discovery + direct-link state. The discovery engine itself
+ * lives in network_discovery.{c,h}; these are just the menu-side
+ * mirrors and the user's persisted preferences. */
+static bool g_lan_enabled_pref = false;       /* persisted user choice */
+static bool g_link_listening = false;         /* TCP listener up */
+static int  g_link_port_pref = 1989;
+static std::string g_lan_uuid_pref;           /* loaded from prefs (mirror of gb_lan_self_uuid) */
+static std::string g_lan_nickname_pref;       /* same for nickname */
+static char g_link_manual_host[128] = "";
+static char g_link_manual_port[16] = "1989";
+static char g_link_nickname_edit[GB_LAN_NICKNAME_LEN] = "";
+static std::string g_link_status_text;
+
+/* Rendezvous (relay) state — the nickname and host port come from the
+ * LAN side (g_link_nickname_edit / g_link_port_pref) so the user picks
+ * them once. Only the URL and room code are relay-specific. */
+static char g_relay_url[256]   = "";
+static char g_relay_code[GB_RELAY_ROOM_CODE_LEN] = "";
+static bool g_relay_hosting    = false;  /* set by Host via Relay; cleared
+                                            by Disconnect / Forget room */
+static bool g_relay_joined     = false;  /* set after Join via Relay
+                                            successfully connected */
+static std::string g_relay_status;
+/* Open-room list pulled from the server on demand. The selected index
+ * is what the dropdown is showing; -1 means "nothing picked yet". */
+static std::vector<GBRelayRoomInfo> g_relay_rooms;
+static int  g_relay_room_pick = -1;
+static std::string g_relay_list_status;
+
+static void generate_random_room_code(char* out, size_t cap) {
+    static const char alphabet[] = "abcdefghijkmnopqrstuvwxyz23456789";
+    if (cap == 0) return;
+    size_t letters = (cap > 7) ? 6 : (cap - 1);
+    for (size_t i = 0; i < letters; i++) {
+        int idx = rand() % (int)(sizeof(alphabet) - 1);
+        out[i] = alphabet[idx];
+    }
+    out[letters] = '\0';
+}
 static uint32_t g_sgb_cart_border_revision = 0;
 static std::vector<uint32_t> g_sgb_cart_border_pixels;  /* scratch RGBA buffer */
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
@@ -1032,6 +1074,31 @@ static void load_runtime_preferences(void) {
                     g_sgb_cart_border_enabled = (strcmp(value, "0") != 0);
                     continue;
                 }
+                if (strcmp(key, "lan.enabled") == 0) {
+                    g_lan_enabled_pref = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "lan.uuid") == 0) {
+                    g_lan_uuid_pref = value;
+                    continue;
+                }
+                if (strcmp(key, "lan.nickname") == 0) {
+                    g_lan_nickname_pref = value;
+                    continue;
+                }
+                if (strcmp(key, "link.port") == 0) {
+                    int parsed = atoi(value);
+                    if (parsed > 0 && parsed < 65536) g_link_port_pref = parsed;
+                    continue;
+                }
+                if (strcmp(key, "relay.url") == 0) {
+                    snprintf(g_relay_url, sizeof(g_relay_url), "%s", value);
+                    continue;
+                }
+                if (strcmp(key, "relay.code") == 0) {
+                    snprintf(g_relay_code, sizeof(g_relay_code), "%s", value);
+                    continue;
+                }
                 if (strcmp(key, "border.file") == 0) {
                     g_border_loaded_filename = value; /* index resolved later */
                     continue;
@@ -1156,6 +1223,12 @@ static void save_runtime_preferences(void) {
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
     fprintf(file, "sgb.cart_border=%d\n", g_sgb_cart_border_enabled ? 1 : 0);
+    fprintf(file, "lan.enabled=%d\n", g_lan_enabled_pref ? 1 : 0);
+    if (!g_lan_uuid_pref.empty())     fprintf(file, "lan.uuid=%s\n", g_lan_uuid_pref.c_str());
+    if (!g_lan_nickname_pref.empty()) fprintf(file, "lan.nickname=%s\n", g_lan_nickname_pref.c_str());
+    fprintf(file, "link.port=%d\n", g_link_port_pref);
+    fprintf(file, "relay.url=%s\n", g_relay_url);
+    fprintf(file, "relay.code=%s\n", g_relay_code);
     if (g_border_enabled && !g_border_files.empty() &&
         g_border_idx >= 0 && g_border_idx < (int)g_border_files.size()) {
         fprintf(file, "border.file=%s\n", g_border_files[g_border_idx].c_str());
@@ -2449,6 +2522,356 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::Separator();
 
         /* ============================================================
+         * Network: identity, LAN auto-discovery, direct host:port join,
+         * and rendezvous-server (relay) match-making. The actual link
+         * traffic always rides serial_link.{c,h}; this section is just
+         * the different ways of finding a peer.
+         * ========================================================== */
+        if (ImGui::CollapsingHeader("Network")) {
+            const float lan_ui_scale = imgui_io.FontGlobalScale;
+
+            /* Keep relay status flags in sync with the underlying link
+             * state so a dropped connection or stopped listener flips
+             * the labels back to "Not hosting" / "Not joined". */
+            if (!g_link_listening) g_relay_hosting = false;
+            if (!gb_serial_link_is_ready()) g_relay_joined = false;
+
+            /* Status line at the top so you always know where you stand. */
+            if (gb_serial_link_is_ready()) {
+                ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "Link active (BGB v1.4)");
+                if (ImGui::Button("Disconnect")) {
+                    gb_serial_link_shutdown();
+                    g_link_listening = false;
+                    g_relay_hosting = false;
+                    g_relay_joined = false;
+                    g_link_status_text.clear();
+                }
+            } else if (g_link_listening) {
+                ImGui::TextDisabled("Listening on TCP :%d — waiting for peer", g_link_port_pref);
+            } else if (!g_link_status_text.empty()) {
+                ImGui::TextDisabled("%s", g_link_status_text.c_str());
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("You");
+            if (ImGui::InputText("Nickname", g_link_nickname_edit, sizeof(g_link_nickname_edit),
+                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+                gb_lan_set_self_nickname(g_link_nickname_edit);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Apply")) {
+                gb_lan_set_self_nickname(g_link_nickname_edit);
+            }
+            ImGui::TextDisabled("UUID: %s", gb_lan_self_uuid());
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Local network");
+            bool lan_on = g_lan_enabled_pref;
+            if (ImGui::Checkbox("Auto-discover peers", &lan_on)) {
+                gb_lan_set_enabled(lan_on);
+                /* If turning on failed (no usable network interface, UDP
+                 * port already taken), gb_lan_set_enabled returns
+                 * silently and the engine stays off. Reflect the actual
+                 * state in our pref + show why so the user isn't left
+                 * staring at a forever-empty peer list. */
+                bool actual = gb_lan_is_enabled();
+                g_lan_enabled_pref = actual;
+                if (lan_on && !actual) {
+                    g_link_status_text =
+                        "Couldn't open the LAN discovery socket. Are you "
+                        "online and is UDP :8766 free?";
+                } else {
+                    g_link_status_text.clear();
+                }
+                save_runtime_preferences();
+            }
+            ImGui::TextDisabled("Broadcasts your nickname on UDP :8766. Off by default.");
+
+            int net_port = g_link_port_pref;
+            if (ImGui::InputInt("My TCP port", &net_port, 1, 100, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                if (net_port > 0 && net_port < 65536) {
+                    g_link_port_pref = net_port;
+                    gb_lan_set_advertised_port((uint16_t)net_port);
+                    save_runtime_preferences();
+                }
+            }
+            if (!g_link_listening) {
+                if (ImGui::Button("Host (start listening)")) {
+                    if (gb_serial_link_start_listen((uint16_t)g_link_port_pref)) {
+                        g_link_listening = true;
+                        g_link_status_text = "Listening, waiting for peer...";
+                    } else {
+                        g_link_status_text = "Failed to start listener (port in use?)";
+                    }
+                }
+            } else {
+                if (ImGui::Button("Stop hosting")) {
+                    gb_serial_link_shutdown();
+                    g_link_listening = false;
+                    g_link_status_text.clear();
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Discovered peers");
+            if (!gb_lan_is_enabled()) {
+                ImGui::TextDisabled("(turn on auto-discover to see peers)");
+            } else {
+                GBLanPeer net_peers[16];
+                size_t np = gb_lan_get_peers(net_peers, 16);
+                if (np == 0) {
+                    ImGui::TextDisabled("(searching... peers appear within a few seconds)");
+                } else if (ImGui::BeginTable("peers", 4,
+                                             ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+                    ImGui::TableSetupColumn("Nickname", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Address",  ImGuiTableColumnFlags_WidthFixed, 170.0f * lan_ui_scale);
+                    ImGui::TableSetupColumn("Status",   ImGuiTableColumnFlags_WidthFixed, 110.0f * lan_ui_scale);
+                    ImGui::TableSetupColumn("Action",   ImGuiTableColumnFlags_WidthFixed, 110.0f * lan_ui_scale);
+                    ImGui::TableHeadersRow();
+                    const bool any_link = gb_serial_link_is_ready();
+                    const char* current_peer_ip = gb_serial_link_peer_ip();
+                    for (size_t i = 0; i < np; i++) {
+                        const bool is_connected_peer = any_link && current_peer_ip && current_peer_ip[0] &&
+                                                       strcmp(current_peer_ip, net_peers[i].ip) == 0;
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn(); ImGui::TextUnformatted(net_peers[i].nickname);
+                        ImGui::TableNextColumn(); ImGui::Text("%s:%u", net_peers[i].ip, (unsigned)net_peers[i].bgb_port);
+                        ImGui::TableNextColumn();
+                        if (is_connected_peer) {
+                            ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "Connected");
+                        } else {
+                            ImGui::TextDisabled("Not connected");
+                        }
+                        ImGui::TableNextColumn();
+                        ImGui::PushID((int)i);
+                        if (is_connected_peer) {
+                            if (ImGui::Button("Disconnect")) {
+                                gb_serial_link_shutdown();
+                                g_link_listening = false;
+                                g_link_status_text.clear();
+                            }
+                        } else if (any_link) {
+                            ImGui::BeginDisabled();
+                            ImGui::Button("Connect");
+                            ImGui::EndDisabled();
+                        } else if (ImGui::Button("Connect")) {
+                            if (gb_serial_link_start_connect(net_peers[i].ip, net_peers[i].bgb_port)) {
+                                g_link_status_text = std::string("Connecting to ") + net_peers[i].nickname + "...";
+                            } else {
+                                g_link_status_text = std::string("Connect failed: ") + net_peers[i].ip;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndTable();
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Direct connect");
+            ImGui::PushItemWidth(180.0f * lan_ui_scale);
+            ImGui::InputText("Host", g_link_manual_host, sizeof(g_link_manual_host));
+            ImGui::SameLine();
+            ImGui::InputText("Port", g_link_manual_port, sizeof(g_link_manual_port));
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            if (ImGui::Button("Join##direct")) {
+                int mp = atoi(g_link_manual_port);
+                if (mp > 0 && mp < 65536 && g_link_manual_host[0]) {
+                    if (gb_serial_link_start_connect(g_link_manual_host, (uint16_t)mp)) {
+                        g_link_status_text = std::string("Connecting to ") + g_link_manual_host + "...";
+                    } else {
+                        g_link_status_text = "Connect failed";
+                    }
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Rendezvous server (internet play)");
+            ImGui::InputText("Server URL", g_relay_url, sizeof(g_relay_url));
+
+            const bool have_url = (g_relay_url[0] != '\0');
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Host Server");
+            ImGui::SameLine();
+            if (g_relay_hosting) {
+                ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "Hosting");
+            } else {
+                ImGui::TextUnformatted("Not hosting");
+            }
+            if (!have_url) ImGui::BeginDisabled();
+            ImGui::PushItemWidth(220.0f * lan_ui_scale);
+            ImGui::InputText("Room name", g_relay_code, sizeof(g_relay_code));
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            if (ImGui::Button("Random")) {
+                generate_random_room_code(g_relay_code, sizeof(g_relay_code));
+            }
+            ImGui::SameLine();
+            const bool can_host = have_url && (g_relay_code[0] != '\0');
+            if (ImGui::Button("Host via Relay")) {
+                if (!can_host) {
+                    g_relay_status = have_url
+                        ? "Type a room name (or click Random) before hosting."
+                        : "Set Server URL above first.";
+                } else {
+                    save_runtime_preferences();
+                    gb_serial_link_shutdown();
+                    g_relay_joined = false;
+                    if (!gb_serial_link_start_listen((uint16_t)g_link_port_pref)) {
+                        g_relay_status = "Failed to open local listener; pick another port above.";
+                        g_relay_hosting = false;
+                    } else {
+                        g_link_listening = true;
+                        GBRelayResult r = gb_relay_register(g_relay_url, g_relay_code,
+                                                           "host", g_link_port_pref,
+                                                           gb_lan_self_nickname(),
+                                                           gb_lan_self_uuid());
+                        if (!r.ok) {
+                            g_relay_status = std::string("Register failed: ") + r.error;
+                            gb_serial_link_shutdown();
+                            g_link_listening = false;
+                            g_relay_hosting = false;
+                        } else {
+                            g_relay_hosting = true;
+                            if (r.peer.has_peer) {
+                                g_relay_status = std::string("Listening on port ") +
+                                                 std::to_string(g_link_port_pref) +
+                                                 "; join already registered from " + r.peer.ip;
+                            } else {
+                                g_relay_status = std::string("Listening on port ") +
+                                                 std::to_string(g_link_port_pref) +
+                                                 "; share code '" + g_relay_code +
+                                                 "' and wait for the other side.";
+                            }
+                        }
+                    }
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Join Server");
+            ImGui::SameLine();
+            if (g_relay_joined) {
+                ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "Joined");
+            } else {
+                ImGui::TextUnformatted("Not joined");
+            }
+            if (ImGui::Button("Refresh list")) {
+                GBRelayRoomInfo rooms[64];
+                GBRelayListResult lr = gb_relay_list_rooms(g_relay_url, rooms, 64);
+                if (!lr.ok) {
+                    g_relay_list_status = std::string("List failed: ") + lr.error;
+                    g_relay_rooms.clear();
+                    g_relay_room_pick = -1;
+                } else {
+                    g_relay_rooms.assign(rooms, rooms + lr.count);
+                    g_relay_room_pick = g_relay_rooms.empty() ? -1 : 0;
+                    g_relay_list_status = std::string("Found ") +
+                                          std::to_string(lr.count) +
+                                          (lr.count == 1 ? " open room." : " open rooms.");
+                }
+            }
+            ImGui::SameLine();
+            ImGui::PushItemWidth(220.0f * lan_ui_scale);
+            std::string preview;
+            if (g_relay_room_pick >= 0 && g_relay_room_pick < (int)g_relay_rooms.size()) {
+                const GBRelayRoomInfo& r = g_relay_rooms[g_relay_room_pick];
+                preview = std::string(r.code) + (r.nickname[0] ? std::string(" — ") + r.nickname : std::string());
+            } else if (g_relay_rooms.empty()) {
+                preview = "(no open rooms)";
+            } else {
+                preview = "(pick one)";
+            }
+            if (ImGui::BeginCombo("##relay_rooms", preview.c_str())) {
+                for (int i = 0; i < (int)g_relay_rooms.size(); i++) {
+                    const GBRelayRoomInfo& r = g_relay_rooms[i];
+                    char label[160];
+                    if (r.nickname[0]) {
+                        snprintf(label, sizeof(label), "%s — %s (%ds ago)",
+                                 r.code, r.nickname, r.age_seconds);
+                    } else {
+                        snprintf(label, sizeof(label), "%s (%ds ago)",
+                                 r.code, r.age_seconds);
+                    }
+                    bool selected = (i == g_relay_room_pick);
+                    if (ImGui::Selectable(label, selected)) {
+                        g_relay_room_pick = i;
+                        snprintf(g_relay_code, sizeof(g_relay_code), "%s", r.code);
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            const bool can_join = have_url && g_relay_room_pick >= 0 &&
+                                  g_relay_room_pick < (int)g_relay_rooms.size();
+            if (ImGui::Button("Join##relay")) {
+                if (!can_join) {
+                    g_relay_status = have_url
+                        ? "Pick a room from the dropdown first (or hit Refresh list)."
+                        : "Set Server URL above first.";
+                } else {
+                    save_runtime_preferences();
+                    snprintf(g_relay_code, sizeof(g_relay_code), "%s",
+                             g_relay_rooms[g_relay_room_pick].code);
+                    g_relay_hosting = false;
+                    g_relay_joined = false;
+                    GBRelayResult r = gb_relay_register(g_relay_url, g_relay_code,
+                                                       "join", 1, gb_lan_self_nickname(),
+                                                       gb_lan_self_uuid());
+                    if (!r.ok) {
+                        g_relay_status = std::string("Register failed: ") + r.error;
+                    } else if (!r.peer.has_peer) {
+                        GBRelayResult lk = gb_relay_lookup(g_relay_url, g_relay_code, "join");
+                        if (lk.ok && lk.peer.has_peer) r = lk;
+                    }
+                    if (r.ok && r.peer.has_peer) {
+                        gb_serial_link_shutdown();
+                        if (gb_serial_link_start_connect(r.peer.ip, (uint16_t)r.peer.port)) {
+                            g_relay_status = std::string("Connecting to ") + r.peer.ip +
+                                             ":" + std::to_string(r.peer.port);
+                            g_relay_joined = true;
+                        } else {
+                            g_relay_status = std::string("Found host at ") + r.peer.ip +
+                                             ":" + std::to_string(r.peer.port) +
+                                             " but TCP connect failed (port not reachable).";
+                        }
+                    } else if (r.ok) {
+                        g_relay_status = "Host disappeared between list and join — refresh and try again.";
+                    }
+                }
+            }
+            if (!g_relay_list_status.empty()) {
+                ImGui::TextDisabled("%s", g_relay_list_status.c_str());
+            }
+            if (have_url) {
+                if (ImGui::SmallButton("Forget my room")) {
+                    if (g_relay_code[0]) {
+                        gb_relay_unregister(g_relay_url, g_relay_code, "host");
+                        gb_relay_unregister(g_relay_url, g_relay_code, "join");
+                    }
+                    g_relay_hosting = false;
+                    g_relay_joined = false;
+                    g_relay_status = "Removed from rendezvous server.";
+                }
+            }
+            if (!have_url) ImGui::EndDisabled();
+
+            if (!g_relay_status.empty()) {
+                ImGui::TextWrapped("%s", g_relay_status.c_str());
+            }
+            if (!have_url) {
+                ImGui::TextDisabled("Fill in server URL to enable.");
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        /* ============================================================
          * Advanced: tucked away. Display, audio plumbing, key bindings,
          * diagnostics. Open it once to remap keys or pick an output
          * device, then forget it exists.
@@ -2737,6 +3160,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
 void gb_platform_shutdown(void) {
     gb_serial_link_shutdown();
+    gb_lan_shutdown();
     close_input_record_file();
     close_audio_output_device();
     g_audio_output_devices.clear();
@@ -3201,9 +3625,36 @@ bool gb_platform_init(int scale) {
         return false;
     }
     update_game_viewport();
-    
+
+    /* LAN auto-discovery: load persisted UUID/nickname through hooks
+     * so the network_discovery module owns generation while we own the
+     * file-format. Auto-discover starts off — user toggles in the menu. */
+    static GBLanPrefsHooks lan_hooks = {
+        /* load_string */ [](const char* key, char* out, size_t out_size) -> bool {
+            if (strcmp(key, "lan.uuid") == 0 && !g_lan_uuid_pref.empty()) {
+                snprintf(out, out_size, "%s", g_lan_uuid_pref.c_str());
+                return true;
+            }
+            if (strcmp(key, "lan.nickname") == 0 && !g_lan_nickname_pref.empty()) {
+                snprintf(out, out_size, "%s", g_lan_nickname_pref.c_str());
+                return true;
+            }
+            return false;
+        },
+        /* save_string */ [](const char* key, const char* value) {
+            if (strcmp(key, "lan.uuid") == 0) g_lan_uuid_pref = value;
+            else if (strcmp(key, "lan.nickname") == 0) g_lan_nickname_pref = value;
+            save_runtime_preferences();
+        },
+    };
+    gb_lan_set_prefs_hooks(&lan_hooks);
+    gb_lan_init();
+    gb_lan_set_advertised_port((uint16_t)g_link_port_pref);
+    if (g_lan_enabled_pref) gb_lan_set_enabled(true);
+    snprintf(g_link_nickname_edit, sizeof(g_link_nickname_edit), "%s", gb_lan_self_nickname());
+
     g_last_frame_time = SDL_GetTicks();
-    
+
     return true;
 }
 

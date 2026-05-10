@@ -1494,6 +1494,16 @@ static void rebuild_manual_joypad_state_from_bindings(void) {
 
 static void update_effective_joypad_state(void) {
     rebuild_manual_joypad_state_from_bindings();
+    /* While the in-game menu is up, hide all joypad activity from the
+     * cart. The game keeps running (so NPCs walk, music plays, RTC
+     * advances), but arrow keys / A / Start used to navigate the
+     * menu don't bleed through and move the player or open the cart's
+     * own menu. Active-low: 0xFF = nothing pressed. */
+    if (g_show_menu) {
+        g_joypad_dpad = 0xFF;
+        g_joypad_buttons = 0xFF;
+        return;
+    }
     g_joypad_dpad = g_manual_joypad_dpad & g_script_joypad_dpad;
     g_joypad_buttons = g_manual_joypad_buttons & g_script_joypad_buttons;
 }

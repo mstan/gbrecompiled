@@ -2711,7 +2711,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     hardware_mode_pref_to_string(g_active_hardware_mode_pref);
                 save_runtime_preferences();
             }
-            ImGui::TextDisabled("(restart the game to apply)");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(restart needed)");
         }
 
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
@@ -2739,55 +2740,55 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 }
                 ImGui::EndCombo();
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Reload##shader")) {
-                gb_shader_pipeline_reload(g_shader_pipeline);
+        }
+
+        /* Three optional toggles laid out inline. Each only appears
+         * when it's actually applicable: SGB Colors only matters in
+         * SGB hardware mode; SGB Cart Border only when the engine has
+         * decoded one (or a cache loaded); Custom PNG Border only
+         * when there's at least one PNG in borders/. Hiding the
+         * irrelevant ones keeps the menu honest. */
+        const bool show_sgb_colors_toggle =
+            (g_active_hardware_mode_pref == GB_HARDWARE_MODE_SGB);
+        const bool show_sgb_border_toggle = g_sgb_cart_border_texture != 0;
+        const bool show_custom_border_toggle = !g_border_files.empty();
+        bool placed_any = false;
+
+        if (show_sgb_colors_toggle) {
+            placed_any = true;
+            if (ImGui::Checkbox("SGB Colors", &g_sgb_colors_pref)) {
+                if (g_registered_ctx && g_registered_ctx->sgb) {
+                    gb_sgb_set_display_palettes((GBSgbState*)g_registered_ctx->sgb,
+                                                g_sgb_colors_pref);
+                }
+                save_runtime_preferences();
+            }
+        }
+        if (show_sgb_border_toggle) {
+            if (placed_any) ImGui::SameLine();
+            placed_any = true;
+            if (ImGui::Checkbox("SGB Border", &g_sgb_cart_border_enabled)) {
+                if (g_registered_ctx && g_registered_ctx->sgb) {
+                    gb_sgb_set_display_border((GBSgbState*)g_registered_ctx->sgb,
+                                              g_sgb_cart_border_enabled);
+                }
+                apply_window_scale_preset();
+                save_runtime_preferences();
+            }
+        }
+        if (show_custom_border_toggle) {
+            if (placed_any) ImGui::SameLine();
+            placed_any = true;
+            if (ImGui::Checkbox("Custom Border", &g_border_enabled)) {
+                apply_border_change();
+                save_runtime_preferences();
             }
         }
 
-        /* SGB Colors: applies palette/attribute packets to the
-         * framebuffer (region tints). Independent of the cart-border
-         * toggle below — the engine itself keeps running either way so
-         * flipping these back on instantly picks up the latest state. */
-        if (ImGui::Checkbox("SGB Colors", &g_sgb_colors_pref)) {
-            if (g_registered_ctx && g_registered_ctx->sgb) {
-                gb_sgb_set_display_palettes((GBSgbState*)g_registered_ctx->sgb,
-                                            g_sgb_colors_pref);
-            }
-            save_runtime_preferences();
-        }
-
-        /* SGB cart border: the actual border the cart ships in its ROM,
-         * decoded from CHR_TRN/PCT_TRN. Independent of SGB Colors —
-         * having the cart's authored border around a plain DMG game
-         * frame is a valid combination. */
-        if (ImGui::Checkbox("SGB Cart Border", &g_sgb_cart_border_enabled)) {
-            if (g_registered_ctx && g_registered_ctx->sgb) {
-                gb_sgb_set_display_border((GBSgbState*)g_registered_ctx->sgb,
-                                          g_sgb_cart_border_enabled);
-            }
-            apply_window_scale_preset();
-            save_runtime_preferences();
-        }
-        if (g_registered_ctx) {
-            GBSgbState* sgb_state = (GBSgbState*)g_registered_ctx->sgb;
-            if (g_sgb_cart_border_enabled && !gb_sgb_border_ready(sgb_state)) {
-                ImGui::TextDisabled("(waiting for cart border data)");
-            }
-        }
-
-        /* Custom SGB border (optional, opt-in). Toggle picks whether to
-         * draw a user-supplied PNG border; the cycler selects which one
-         * from borders/. The cart border above takes precedence when
-         * both are active. */
-        if (ImGui::Checkbox("Custom PNG Border", &g_border_enabled)) {
-            apply_border_change();
-            save_runtime_preferences();
-        }
-        if (g_border_files.empty()) {
-            ImGui::TextDisabled("Drop 256x224 PNGs into a borders/ folder next to the executable or working directory, then restart.");
-        } else {
-            const bool cycler_enabled = g_border_enabled && (int)g_border_files.size() > 0;
+        /* Custom-border cycler. Only shown when at least one PNG is
+         * present and the toggle is on. */
+        if (show_custom_border_toggle) {
+            const bool cycler_enabled = g_border_enabled;
             if (!cycler_enabled) ImGui::BeginDisabled();
             const int count = (int)g_border_files.size();
             if (ImGui::ArrowButton("##border_prev", ImGuiDir_Left)) {
@@ -2809,6 +2810,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 save_runtime_preferences();
             }
             if (!cycler_enabled) ImGui::EndDisabled();
+        } else {
+            ImGui::TextDisabled("Drop 256x224 PNGs into a borders/ folder next to the executable or working directory, then restart for a custom screen border.");
         }
 
         ImGui::Spacing();

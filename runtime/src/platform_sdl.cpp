@@ -34,6 +34,10 @@
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #include "stb_image.h"
+/* Implementation lives in gb_printer.c (linked into gbrt). Including
+ * the header here (without STB_IMAGE_WRITE_IMPLEMENTATION) gives us
+ * just the function prototypes, no duplicate-symbol clash. */
+#include "stb_image_write.h"
 
 namespace fs = std::filesystem;
 
@@ -160,6 +164,16 @@ static void generate_random_room_code(char* out, size_t cap) {
 }
 static uint32_t g_sgb_cart_border_revision = 0;
 static std::vector<uint32_t> g_sgb_cart_border_pixels;  /* scratch RGBA buffer */
+
+/* Cross-session cache for the cart's authored SGB border. The cart
+ * only emits CHR_TRN/PCT_TRN packets while running with SGB hardware
+ * mode, but the resulting image is static — capture it once and
+ * replay forever. Lets the user switch a game to CGB hardware mode
+ * (which silences the SGB engine) and still get the cart border on
+ * top of full-color CGB output. Cache lives at
+ * <cwd>/sgb_borders/<game_id>.png. */
+static bool g_sgb_cart_border_from_cache = false;
+static bool g_sgb_cart_border_cache_saved = false;
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
 static const char* g_palette_names[] = {
     "DMG",
@@ -1829,9 +1843,12 @@ static void unload_border_texture(void) {
 
 /* Forward declarations: apply_window_scale_preset rescales the window
  * when the border layout flips between 160x144 and 256x224.
- * unload_sgb_cart_border_texture lives just below refresh_*. */
+ * unload_sgb_cart_border_texture lives just below refresh_*.
+ * save_sgb_cart_border_cache_if_new lives below too — needs to be
+ * callable from refresh_*. */
 static void apply_window_scale_preset(void);
 static void unload_sgb_cart_border_texture(void);
+static void save_sgb_cart_border_cache_if_new(void);
 
 /* Rebuild g_sgb_cart_border_texture from the current SGB engine state if
  * the cart has just shipped fresh CHR_TRN/PCT_TRN data. Cheap when the
@@ -1844,7 +1861,10 @@ static void refresh_sgb_cart_border_texture(void) {
     }
     GBSgbState* sgb = (GBSgbState*)g_registered_ctx->sgb;
     if (!gb_sgb_border_ready(sgb)) {
-        if (g_sgb_cart_border_texture) {
+        /* Engine hasn't received CHR_TRN/PCT_TRN this session. If we
+         * loaded a cached border earlier, leave it in place — it's
+         * the only thing the user has in non-SGB hardware modes. */
+        if (g_sgb_cart_border_texture && !g_sgb_cart_border_from_cache) {
             unload_sgb_cart_border_texture();
             apply_window_scale_preset();
         }
@@ -1879,9 +1899,87 @@ static void refresh_sgb_cart_border_texture(void) {
                     g_sgb_cart_border_pixels.data());
     glBindTexture(GL_TEXTURE_2D, 0);
     g_sgb_cart_border_revision = rev;
+    g_sgb_cart_border_from_cache = false;
+    /* First successful render this session — persist it so a later
+     * launch in CGB / DMG hardware mode (which silences the SGB
+     * engine) still has a border to show. */
+    save_sgb_cart_border_cache_if_new();
 
     if (first_creation && g_sgb_cart_border_enabled) {
         apply_window_scale_preset();
+    }
+}
+
+/* Path to the cross-session cached SGB border for the active game.
+ * Empty string when no game is loaded yet. */
+static std::string sgb_cart_border_cache_path(void) {
+    if (g_active_game_id.empty()) return "";
+    return (fs::current_path() / "sgb_borders" /
+            (g_active_game_id + ".png")).string();
+}
+
+/* Try to populate g_sgb_cart_border_texture from disk. Used when the
+ * SGB engine isn't running (CGB / DMG hardware mode) so the user can
+ * still see the cart border captured during a previous SGB-mode run.
+ * No-op if the file doesn't exist or doesn't decode to 256x224. */
+static void try_load_sgb_cart_border_cache(void) {
+    g_sgb_cart_border_from_cache = false;
+    g_sgb_cart_border_cache_saved = false;
+    std::string path = sgb_cart_border_cache_path();
+    if (path.empty() || !fs::exists(path)) return;
+
+    int w = 0, h = 0, ch = 0;
+    stbi_uc* pixels = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (!pixels) return;
+    if (w != GB_SGB_BORDER_W || h != GB_SGB_BORDER_H) {
+        stbi_image_free(pixels);
+        return;
+    }
+
+    if (g_gl_context) {
+        if (!g_sgb_cart_border_texture) {
+            glGenTextures(1, &g_sgb_cart_border_texture);
+            glBindTexture(GL_TEXTURE_2D, g_sgb_cart_border_texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                         GB_SGB_BORDER_W, GB_SGB_BORDER_H, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, g_sgb_cart_border_texture);
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                        GB_SGB_BORDER_W, GB_SGB_BORDER_H,
+                        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        g_sgb_cart_border_from_cache = true;
+        g_sgb_cart_border_cache_saved = true;
+        fprintf(stderr, "[SGB] Loaded cart border cache: %s\n", path.c_str());
+    }
+    stbi_image_free(pixels);
+}
+
+/* Persist the freshly-decoded RGBA buffer to disk. Called once per
+ * session as soon as the engine produces a complete border, so a
+ * later switch to CGB / DMG hardware mode can still display it. */
+static void save_sgb_cart_border_cache_if_new(void) {
+    if (g_sgb_cart_border_cache_saved) return;
+    if (g_active_game_id.empty()) return;
+    if (g_sgb_cart_border_pixels.size() !=
+        (size_t)(GB_SGB_BORDER_W * GB_SGB_BORDER_H)) return;
+
+    std::string path = sgb_cart_border_cache_path();
+    if (path.empty()) return;
+    std::error_code ec;
+    fs::create_directories(fs::path(path).parent_path(), ec);
+    if (stbi_write_png(path.c_str(),
+                       GB_SGB_BORDER_W, GB_SGB_BORDER_H, 4,
+                       g_sgb_cart_border_pixels.data(),
+                       GB_SGB_BORDER_W * 4)) {
+        g_sgb_cart_border_cache_saved = true;
+        fprintf(stderr, "[SGB] Saved cart border cache: %s\n", path.c_str());
     }
 }
 
@@ -1891,6 +1989,7 @@ static void unload_sgb_cart_border_texture(void) {
         g_sgb_cart_border_texture = 0;
     }
     g_sgb_cart_border_revision = 0;
+    g_sgb_cart_border_from_cache = false;
     g_sgb_cart_border_pixels.clear();
 }
 
@@ -4642,6 +4741,12 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
     if (ctx) {
         ctx->hardware_mode_pref = g_active_hardware_mode_pref;
     }
+
+    /* Look for a cached SGB cart border for this cart. Populates the
+     * texture even when the SGB engine isn't running this session
+     * (CGB/DMG modes), so the SGB Cart Border toggle still works on
+     * later launches. */
+    try_load_sgb_cart_border_cache();
 }
 
 void gb_platform_register_context(GBContext* ctx) {

@@ -3394,7 +3394,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         main_ss << "extern const size_t " << rom_size_symbol_name(options) << ";\n";
         main_ss << "static const GBGameAssets GB_" << game_id_upper << "_GAME = {\n";
         main_ss << "    .game_id = \"" << game_id << "\",\n";
-        main_ss << "    .rom_filename = \"" << game_id << "." << rom_ext << "\",\n";
+        main_ss << "    .rom_filename = \"roms/" << game_id << "." << rom_ext << "\",\n";
         main_ss << "    .rom_data = " << rom_data_symbol_name(options) << ",\n";
         main_ss << "    .rom_size = " << rom_size << "u,\n";
         main_ss << "    .expected_sha1 = {";

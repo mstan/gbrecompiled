@@ -151,8 +151,8 @@ static bool extract_from_rom(const GBGameAssets* game) {
     FILE* f = fopen(game->rom_filename, "rb");
     if (!f) {
         LOG("Cannot open ROM '%s': %s", game->rom_filename, strerror(errno));
-        LOG("Place a clean copy of your %s ROM next to the launcher and try again.",
-            game->game_id);
+        LOG("Place a clean copy of your %s ROM at '%s' and try again.",
+            game->game_id, game->rom_filename);
         return false;
     }
     size_t got = fread(game->rom_data, 1, game->rom_size, f);

@@ -4,6 +4,7 @@
 #include "audio_stats.h"
 #include "platform_sdl.h"
 #include "sgb.h"
+#include "ir.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -885,6 +886,7 @@ GBContext* gb_context_create(const GBConfig* config) {
     
     ctx->apu = gb_audio_create();
     ctx->sgb = gb_sgb_create();
+    ctx->ir = gb_ir_create();
     audio_stats_init();
     gb_context_reset(ctx, true);
 
@@ -931,6 +933,7 @@ void gb_context_destroy(GBContext* ctx) {
     if (ctx->ppu) free(ctx->ppu);
     if (ctx->apu) gb_audio_destroy(ctx->apu);
     if (ctx->sgb) gb_sgb_destroy(ctx->sgb);
+    if (ctx->ir) gb_ir_destroy(ctx->ir);
     if (ctx->rom) free(ctx->rom);
     free(ctx);
 }
@@ -1746,7 +1749,7 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
         }
         if (addr == 0xFF56) {
             if (!gb_is_cgb_mode(ctx)) return 0xFF;
-            return 0x3E;
+            return ctx->ir ? gb_ir_read_rp((GBIRState*)ctx->ir) : 0x3E;
         }
         if (addr == 0xFF6C) {
             if (!gb_is_cgb_mode(ctx)) return 0xFF;
@@ -2141,6 +2144,9 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         if (addr == 0xFF56) {
             if (gb_is_cgb_mode(ctx)) {
                 ctx->io[0x56] = (value & 0xC1) | 0x3E;
+                if (ctx->ir) {
+                    gb_ir_write_rp((GBIRState*)ctx->ir, value);
+                }
             }
             return;
         }

@@ -296,6 +296,7 @@ typedef struct GBContext {
     void* serial;         /**< Serial port */
     void* joypad;         /**< Joypad input */
     void* sgb;            /**< Super GameBoy state (NULL when disabled) */
+    void* ir;             /**< CGB infrared (RP) state. Always non-NULL on a running ctx. */
     uint8_t last_joypad;  /**< Last joypad state for interrupt generation */
     uint8_t used_dispatch_fallback; /**< Generated path fell back to interpreter */
     uint8_t dispatch_fallback_bank; /**< Bank used for the most recent fallback */

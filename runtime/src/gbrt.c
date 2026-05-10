@@ -1113,29 +1113,87 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
     memcpy(ctx->rom, data, size);
     ctx->rom_size = size;
     
-    /* Auto-enable SGB when the cart advertises it. The user can still flip
-     * it off at runtime via gb_sgb_set_enabled. */
+    /* Decide hardware mode for this cart. The platform sets
+     * ctx->hardware_mode_pref before this point (typically from a
+     * per-game pref in runtime_prefs.ini). Default AUTO picks the
+     * "right" mode per cart class:
+     *
+     *   • DMG-only carts that support SGB → DMG hardware + SGB engine.
+     *   • Dual-mode SGB+CGB carts (Yellow, Gold, Silver, Crystal, etc.)
+     *     → CGB hardware, SGB engine off. Real hardware can't run both
+     *     simultaneously: in CGB mode the cart's SGB init code path
+     *     clobbers registers mid-CHR_TRN/PCT_TRN, so we tell the SGB
+     *     engine to ignore the cart entirely and let CheckSGB fail.
+     *     Result: clean CGB color path, no SGB border.
+     *   • CGB-only carts → CGB hardware (SGB never applied).
+     *
+     * Explicit DMG/SGB/CGB modes override the AUTO logic. */
+    bool cart_supports_sgb = gb_sgb_cart_supports(ctx->rom, ctx->rom_size);
+    bool cart_supports_cgb = ctx->config.cartridge_supports_cgb;
+    bool cart_requires_cgb = ctx->config.cartridge_requires_cgb;
+
+    bool want_cgb = false;
+    bool want_sgb_engine = false;
+    switch (ctx->hardware_mode_pref) {
+        case GB_HARDWARE_MODE_DMG:
+            want_cgb = false;
+            want_sgb_engine = false;
+            break;
+        case GB_HARDWARE_MODE_SGB:
+            want_cgb = false;
+            want_sgb_engine = cart_supports_sgb;
+            break;
+        case GB_HARDWARE_MODE_CGB:
+            want_cgb = cart_supports_cgb || cart_requires_cgb;
+            want_sgb_engine = false;
+            break;
+        case GB_HARDWARE_MODE_AUTO:
+        default:
+            if (cart_requires_cgb) {
+                want_cgb = true;
+                want_sgb_engine = false;
+            } else if (cart_supports_sgb) {
+                /* Dual-mode and DMG-only-with-SGB carts default to
+                 * SGB so the user gets the cart's authored border
+                 * and region tints. CGB color is one dropdown flip
+                 * away. */
+                want_cgb = false;
+                want_sgb_engine = true;
+            } else if (cart_supports_cgb) {
+                want_cgb = true;
+                want_sgb_engine = false;
+            } else {
+                want_cgb = false;
+                want_sgb_engine = false;
+            }
+            break;
+    }
+
+    bool need_reset = false;
+    if (want_cgb) {
+        if (ctx->config.model != GB_MODEL_CGB || ctx->config.cgb_compatibility_mode) {
+            ctx->config.model = GB_MODEL_CGB;
+            ctx->config.cgb_compatibility_mode = !cart_supports_cgb;
+            need_reset = true;
+        }
+    } else {
+        if (ctx->config.model != GB_MODEL_DMG || ctx->config.cgb_compatibility_mode) {
+            ctx->config.model = GB_MODEL_DMG;
+            ctx->config.cgb_compatibility_mode = false;
+            need_reset = true;
+        }
+    }
+    if (need_reset) {
+        gb_context_reset(ctx, true);
+    }
+
     bool sgb_active = false;
     if (ctx->sgb) {
         gb_sgb_reset((GBSgbState*)ctx->sgb);
-        sgb_active = gb_sgb_cart_supports(ctx->rom, ctx->rom_size);
+        sgb_active = want_sgb_engine;
         gb_sgb_set_enabled((GBSgbState*)ctx->sgb, sgb_active);
     }
-
-    /* SGB and CGB are mutually exclusive on real hardware (the SGB IS a
-     * DMG with a SNES wrapper — there's no CGB-on-SGB device). When a
-     * cart supports both (e.g. Pokemon Yellow: 0x143=0x80, 0x146=0x03)
-     * and it isn't CGB-required, treating ourselves as CGB makes the
-     * cart's SGB setup code fall into its CGB-palette path, which then
-     * clobbers HL/DE mid-CHR_TRN/PCT_TRN and the border data never
-     * lands in VRAM. Downgrade to DMG when SGB is in play so the cart
-     * takes the SGB-safe path. The user can override with --model cgb
-     * if they prefer CGB colors over SGB borders. */
-    if (sgb_active && gb_is_cgb_hardware(ctx) && !ctx->config.cartridge_requires_cgb) {
-        ctx->config.model = GB_MODEL_DMG;
-        ctx->config.cgb_compatibility_mode = false;
-        gb_context_reset(ctx, true);
-    }
+    (void)sgb_active;  /* not used past this point — engine decides downstream */
 
     /* Parse Header for RAM/Battery info */
     if (size > 0x149) {

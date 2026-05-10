@@ -50,6 +50,20 @@ bool gb_platform_init(int scale);
 void gb_platform_register_context(GBContext* ctx);
 
 /**
+ * @brief Tell the platform which game owns this context.
+ *
+ * Called by the recompiled main between gb_platform_register_context
+ * and the cart's <game>_init. The platform uses this to apply per-game
+ * preferences from runtime_prefs.ini — currently the hardware-mode
+ * pref (sets ctx->hardware_mode_pref) and the printer-output prefix.
+ *
+ * `game_id` is the same string that goes into GBGameAssets (e.g.
+ * "pokered", "pokegold"). It's used both as a runtime_prefs.ini key
+ * prefix and as a filename prefix.
+ */
+void gb_platform_set_game_id(GBContext* ctx, const char* game_id);
+
+/**
  * @brief Enable a headless benchmark mode with no host pacing or UI work.
  */
 void gb_platform_set_benchmark_mode(bool enabled);

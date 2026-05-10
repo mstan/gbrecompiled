@@ -3718,6 +3718,13 @@ GeneratedOutput generate_output(const ir::Program& program,
                 << "] failed to load ROM/assets\\n\");\n";
         main_ss << "        return 1;\n";
         main_ss << "    }\n";
+        /* Hand the game_id to the platform so it can apply per-game
+         * prefs (hardware-mode pref, printer prefix) before the
+         * recompiled <game>_init runs gb_context_load_rom. */
+        main_ss << "#ifdef GB_HAS_SDL2\n";
+        main_ss << "    gb_platform_set_game_id(ctx, GB_" << game_id_upper
+                << "_GAME.game_id);\n";
+        main_ss << "#endif\n";
     }
     main_ss << "    " << options.output_prefix << "_init(ctx);\n";
     main_ss << "    int exit_code = 0;\n";

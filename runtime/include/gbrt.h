@@ -31,6 +31,30 @@ typedef enum {
 } GBModel;
 
 /**
+ * @brief User's preferred hardware mode for a given cart.
+ *
+ * Set on a GBContext by the platform before gb_context_load_rom runs.
+ * The runtime consults it instead of unconditionally downgrading dual-
+ * mode (SGB+CGB) carts to DMG.
+ *
+ *   AUTO — pick per cart:
+ *     • DMG-only carts that support SGB → DMG hardware + SGB engine
+ *     • Dual-mode SGB+CGB carts          → CGB hardware, SGB engine off
+ *     • CGB-only carts                    → CGB hardware
+ *
+ *   DMG  — force monochrome, disable SGB engine.
+ *   SGB  — force DMG hardware + SGB engine (works on any SGB cart).
+ *   CGB  — force CGB hardware (silently falls back to AUTO if the cart
+ *          doesn't support CGB).
+ */
+typedef enum {
+    GB_HARDWARE_MODE_AUTO = 0,
+    GB_HARDWARE_MODE_DMG,
+    GB_HARDWARE_MODE_SGB,
+    GB_HARDWARE_MODE_CGB,
+} GBHardwareModePref;
+
+/**
  * @brief Runtime configuration
  */
 typedef struct {
@@ -197,6 +221,13 @@ typedef struct GBContext {
     /* Runtime configuration */
     GBConfig config;
     char save_id[64];
+
+    /* User's hardware-mode preference for this cart. Default AUTO; the
+     * platform overwrites it (typically with a per-game value from
+     * runtime_prefs.ini) between gb_context_create and the recompiled
+     * <game>_init call. gb_context_load_rom honors it when deciding
+     * the SGB-vs-CGB conflict for dual-mode carts. */
+    GBHardwareModePref hardware_mode_pref;
     
     /* MBC state */
     uint8_t mbc_type;

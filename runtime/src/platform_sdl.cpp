@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <map>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -92,9 +93,23 @@ static GLuint g_border_texture = 0;
 
 static GBPrinter* g_printer = NULL;
 
-/* User toggle for the SGB engine. Default true; cart still has to
- * advertise SGB support (byte 0x146 == 0x03) for it to actually run. */
-static bool g_sgb_enabled_pref = true;
+static GBHardwareModePref hardware_mode_pref_from_string(const std::string& s);
+static const char* hardware_mode_pref_to_string(GBHardwareModePref mode);
+
+/* Per-game preferences keyed under "game.<id>." in runtime_prefs.ini.
+ * gb_platform_set_game_id reads from this when the recompiled main
+ * tells the platform which cart is loading, and the menu UI writes
+ * back here when the user changes a per-game option. */
+static std::map<std::string, std::map<std::string, std::string>> g_per_game_prefs;
+static std::string g_active_game_id;
+static GBHardwareModePref g_active_hardware_mode_pref = GB_HARDWARE_MODE_AUTO;
+
+/* SGB display preferences. Both default true. The engine itself runs
+ * any time the cart supports SGB; these flags only control what the
+ * platform renders from the engine's captured state. They're
+ * independent — you can have palette tints without the cart border, or
+ * the cart border without palette tints. */
+static bool g_sgb_colors_pref = true;
 
 static bool g_show_fps = false;
 
@@ -1036,6 +1051,7 @@ static void load_runtime_preferences(void) {
     g_savestate_slot = 0;
     g_savestate_status.clear();
     g_max_speed_mode = false;
+    g_per_game_prefs.clear();
 
     const std::string path = runtime_preferences_path();
     if (!path.empty()) {
@@ -1098,8 +1114,9 @@ static void load_runtime_preferences(void) {
                     g_border_enabled = (strcmp(value, "0") != 0);
                     continue;
                 }
-                if (strcmp(key, "sgb.enabled") == 0) {
-                    g_sgb_enabled_pref = (strcmp(value, "0") != 0);
+                if (strcmp(key, "sgb.colors") == 0 ||
+                    strcmp(key, "sgb.enabled") == 0 /* legacy name */) {
+                    g_sgb_colors_pref = (strcmp(value, "0") != 0);
                     continue;
                 }
                 if (strcmp(key, "sgb.cart_border") == 0) {
@@ -1141,6 +1158,19 @@ static void load_runtime_preferences(void) {
                 }
                 if (strcmp(key, "border.file") == 0) {
                     g_border_loaded_filename = value; /* index resolved later */
+                    continue;
+                }
+                /* Per-game prefs: "game.<id>.<key>=<value>". The
+                 * platform looks these up when gb_platform_set_game_id
+                 * is called by the recompiled main. */
+                if (strncmp(key, "game.", 5) == 0) {
+                    const char* after = key + 5;
+                    const char* dot = strchr(after, '.');
+                    if (dot && dot > after && dot[1]) {
+                        std::string game_id(after, (size_t)(dot - after));
+                        std::string game_key(dot + 1);
+                        g_per_game_prefs[game_id][game_key] = value;
+                    }
                     continue;
                 }
 
@@ -1262,7 +1292,7 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
-    fprintf(file, "sgb.enabled=%d\n", g_sgb_enabled_pref ? 1 : 0);
+    fprintf(file, "sgb.colors=%d\n", g_sgb_colors_pref ? 1 : 0);
     fprintf(file, "sgb.cart_border=%d\n", g_sgb_cart_border_enabled ? 1 : 0);
     fprintf(file, "diag.show_fps=%d\n", g_show_fps ? 1 : 0);
     if (!g_active_shader_pref.empty()) {
@@ -1277,6 +1307,14 @@ static void save_runtime_preferences(void) {
     if (g_border_enabled && !g_border_files.empty() &&
         g_border_idx >= 0 && g_border_idx < (int)g_border_files.size()) {
         fprintf(file, "border.file=%s\n", g_border_files[g_border_idx].c_str());
+    }
+
+    /* Per-game prefs: "game.<id>.<key>=<value>". Stable order so the
+     * file diffs cleanly across saves. */
+    for (const auto& [game_id, prefs] : g_per_game_prefs) {
+        for (const auto& [key, value] : prefs) {
+            fprintf(file, "game.%s.%s=%s\n", game_id.c_str(), key.c_str(), value.c_str());
+        }
     }
 
     for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
@@ -1756,12 +1794,13 @@ static int round_to_int(double value) {
 static bool sgb_cart_border_active(void) {
     if (!g_sgb_cart_border_enabled) return false;
     if (!g_sgb_cart_border_texture) return false;
-    /* The cart border follows the user's display toggle. The engine
-     * keeps capturing CHR_TRN/PCT_TRN updates regardless, so toggling
-     * display back on shows the latest border without a restart. */
+    /* Border render is gated on its own display flag — independent of
+     * the SGB Colors toggle. The engine keeps capturing CHR_TRN/
+     * PCT_TRN updates regardless, so toggling back on shows the latest
+     * border without a restart. */
     if (g_registered_ctx) {
         GBSgbState* sgb = (GBSgbState*)g_registered_ctx->sgb;
-        if (!gb_sgb_is_display_active(sgb)) return false;
+        if (!gb_sgb_is_display_border(sgb)) return false;
     }
     return true;
 }
@@ -2551,6 +2590,31 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
         ImGui::Spacing();
         ImGui::TextDisabled("Look");
+
+        /* Hardware Mode: per-game pref controlling how the cart's
+         * boot-time mode resolution shakes out. The cart's actual mode
+         * is locked at gb_context_load_rom time, so changes here only
+         * apply on the next launch. The dropdown shows the cart's
+         * resolved default until the user picks something else. */
+        if (!g_active_game_id.empty()) {
+            static const char* hw_mode_labels[] = { "DMG", "SGB", "CGB" };
+            static const GBHardwareModePref hw_mode_values[] = {
+                GB_HARDWARE_MODE_DMG, GB_HARDWARE_MODE_SGB, GB_HARDWARE_MODE_CGB,
+            };
+            int hw_mode_idx = 0;
+            for (int i = 0; i < (int)IM_ARRAYSIZE(hw_mode_values); i++) {
+                if (g_active_hardware_mode_pref == hw_mode_values[i]) { hw_mode_idx = i; break; }
+            }
+            if (ImGui::Combo("Hardware Mode", &hw_mode_idx,
+                             hw_mode_labels, IM_ARRAYSIZE(hw_mode_labels))) {
+                g_active_hardware_mode_pref = hw_mode_values[hw_mode_idx];
+                g_per_game_prefs[g_active_game_id]["hardware_mode"] =
+                    hardware_mode_pref_to_string(g_active_hardware_mode_pref);
+                save_runtime_preferences();
+            }
+            ImGui::TextDisabled("(restart the game to apply)");
+        }
+
         ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
 
         /* Post-process shader (sharp / smooth / lcd / dmg-green plus any
@@ -2582,44 +2646,36 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
 
-        /* SGB master toggle. Off → packet engine ignores JOYP writes,
-         * recolor pass becomes a no-op, border decode skipped. Lets the
-         * Palette dropdown above actually do something on SGB-aware
-         * carts, since their post-SGB pixels never match the original
-         * DMG green palette the swap looks for. */
-        /* This drives the SGB *display* layer (palette application +
-         * cart border). The engine itself stays enabled the whole
-         * session so the cart keeps thinking it's on SGB and keeps
-         * sending packets — toggling this back on instantly picks up
-         * the latest captured state without a restart. */
-        if (ImGui::Checkbox("Enable SGB", &g_sgb_enabled_pref)) {
+        /* SGB Colors: applies palette/attribute packets to the
+         * framebuffer (region tints). Independent of the cart-border
+         * toggle below — the engine itself keeps running either way so
+         * flipping these back on instantly picks up the latest state. */
+        if (ImGui::Checkbox("SGB Colors", &g_sgb_colors_pref)) {
             if (g_registered_ctx && g_registered_ctx->sgb) {
-                gb_sgb_set_display_active((GBSgbState*)g_registered_ctx->sgb,
-                                          g_sgb_enabled_pref);
+                gb_sgb_set_display_palettes((GBSgbState*)g_registered_ctx->sgb,
+                                            g_sgb_colors_pref);
             }
             save_runtime_preferences();
         }
 
         /* SGB cart border: the actual border the cart ships in its ROM,
-         * decoded from CHR_TRN/PCT_TRN. Greyed out when the user has
-         * disabled the SGB display — the border is part of the SGB
-         * presentation layer and turns off with the rest of it. */
-        const bool sgb_display_on = g_registered_ctx &&
-            gb_sgb_is_display_active((GBSgbState*)g_registered_ctx->sgb);
-        if (!sgb_display_on) ImGui::BeginDisabled();
+         * decoded from CHR_TRN/PCT_TRN. Independent of SGB Colors —
+         * having the cart's authored border around a plain DMG game
+         * frame is a valid combination. */
         if (ImGui::Checkbox("SGB Cart Border", &g_sgb_cart_border_enabled)) {
+            if (g_registered_ctx && g_registered_ctx->sgb) {
+                gb_sgb_set_display_border((GBSgbState*)g_registered_ctx->sgb,
+                                          g_sgb_cart_border_enabled);
+            }
             apply_window_scale_preset();
             save_runtime_preferences();
         }
-        if (sgb_display_on && g_registered_ctx) {
+        if (g_registered_ctx) {
             GBSgbState* sgb_state = (GBSgbState*)g_registered_ctx->sgb;
-            if (!gb_sgb_border_ready(sgb_state)) {
+            if (g_sgb_cart_border_enabled && !gb_sgb_border_ready(sgb_state)) {
                 ImGui::TextDisabled("(waiting for cart border data)");
             }
-        } else if (!sgb_display_on) {
-            ImGui::TextDisabled("(Enable SGB above to use)");
         }
-        if (!sgb_display_on) ImGui::EndDisabled();
 
         /* Custom SGB border (optional, opt-in). Toggle picks whether to
          * draw a user-supplied PNG border; the cycler selects which one
@@ -4534,6 +4590,60 @@ static void cart_title_to_prefix(const GBContext* ctx, char* out, size_t cap) {
     if (n == 0) snprintf(out, cap, "print");
 }
 
+static GBHardwareModePref hardware_mode_pref_from_string(const std::string& s) {
+    if (s == "dmg") return GB_HARDWARE_MODE_DMG;
+    if (s == "sgb") return GB_HARDWARE_MODE_SGB;
+    if (s == "cgb") return GB_HARDWARE_MODE_CGB;
+    return GB_HARDWARE_MODE_AUTO;
+}
+static const char* hardware_mode_pref_to_string(GBHardwareModePref mode) {
+    switch (mode) {
+        case GB_HARDWARE_MODE_DMG: return "dmg";
+        case GB_HARDWARE_MODE_SGB: return "sgb";
+        case GB_HARDWARE_MODE_CGB: return "cgb";
+        case GB_HARDWARE_MODE_AUTO:
+        default:                   return "auto";
+    }
+}
+
+/* Pick a concrete hardware mode for a cart from its header bits.
+ * Mirrors the AUTO branch of gb_context_load_rom — kept in sync
+ * because the platform UI never shows AUTO; it shows the resolved
+ * choice as the default and lets the user override.
+ *
+ * Order of preference for dual-mode (SGB + CGB) carts: SGB. The cart
+ * border + region-tinted palettes Pokemon Yellow / Gold / Silver
+ * authored for SGB are visible features that CGB-mode loses in
+ * exchange for marginally richer per-pixel color. Users who prefer
+ * the CGB look can flip the dropdown. */
+static GBHardwareModePref hardware_mode_default_for_cart(const GBContext* ctx) {
+    if (!ctx) return GB_HARDWARE_MODE_DMG;
+    if (ctx->config.cartridge_requires_cgb) return GB_HARDWARE_MODE_CGB;
+    if (ctx->config.cartridge_supports_sgb) return GB_HARDWARE_MODE_SGB;
+    if (ctx->config.cartridge_supports_cgb) return GB_HARDWARE_MODE_CGB;
+    return GB_HARDWARE_MODE_DMG;
+}
+
+void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
+    if (!game_id || !*game_id) return;
+    g_active_game_id = game_id;
+    g_active_hardware_mode_pref = hardware_mode_default_for_cart(ctx);
+    auto it = g_per_game_prefs.find(g_active_game_id);
+    if (it != g_per_game_prefs.end()) {
+        auto& prefs = it->second;
+        auto hwm = prefs.find("hardware_mode");
+        if (hwm != prefs.end()) {
+            GBHardwareModePref saved = hardware_mode_pref_from_string(hwm->second);
+            if (saved != GB_HARDWARE_MODE_AUTO) {
+                g_active_hardware_mode_pref = saved;
+            }
+        }
+    }
+    if (ctx) {
+        ctx->hardware_mode_pref = g_active_hardware_mode_pref;
+    }
+}
+
 void gb_platform_register_context(GBContext* ctx) {
     g_registered_ctx = ctx;
     GBPlatformCallbacks callbacks = {
@@ -4555,9 +4665,10 @@ void gb_platform_register_context(GBContext* ctx) {
     /* gb_context_load_rom auto-enabled the SGB engine based on the cart
      * header. We leave the engine on (so the cart's CheckSGB latches
      * wOnSGB=1 and palette/border packets keep flowing) and only flip
-     * the display layer to match the user's pref. */
+     * the display layers to match the user's prefs. */
     if (ctx && ctx->sgb) {
-        gb_sgb_set_display_active((GBSgbState*)ctx->sgb, g_sgb_enabled_pref);
+        gb_sgb_set_display_palettes((GBSgbState*)ctx->sgb, g_sgb_colors_pref);
+        gb_sgb_set_display_border((GBSgbState*)ctx->sgb, g_sgb_cart_border_enabled);
     }
 
     /* Bring up the BGB-protocol link if GB_LINK_LISTEN or GB_LINK_CONNECT

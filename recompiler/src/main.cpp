@@ -1524,6 +1524,7 @@ int main(int argc, char* argv[]) {
     std::string android_package;
     std::string android_app_name;
     bool emit_asset_loader = false;
+    bool prefix_symbols = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -1602,6 +1603,13 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--emit-asset-loader") {
             emit_asset_loader = true;
+        } else if (arg == "--prefix-symbols") {
+            /* Force the same prefixed-symbol scheme multi-rom mode
+             * always uses, so the resulting output can drop into a
+             * shared launcher build alongside other prefixed ROMs
+             * without name collisions. Useful when prepping a single
+             * cart for the multi_sym launcher. */
+            prefix_symbols = true;
         } else if (arg[0] != '-') {
             rom_path = arg;
         } else {
@@ -1918,6 +1926,15 @@ int main(int argc, char* argv[]) {
     gen_opts.single_function_mode = single_function;
     gen_opts.parallel_codegen_jobs = requested_jobs;
     gen_opts.emit_asset_loader = emit_asset_loader;
+    if (prefix_symbols) {
+        /* Match the multi-rom mode's settings so the resulting files
+         * link cleanly alongside other prefixed-symbol modules. The
+         * launcher provides main(); the per-cart entry is now
+         * <prefix>_main(). */
+        gen_opts.use_prefixed_symbols = true;
+        gen_opts.emit_main_entry_point = false;
+        gen_opts.emit_cmake = false;
+    }
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
     
     auto output = gbrecomp::codegen::generate_output(

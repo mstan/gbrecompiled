@@ -370,13 +370,10 @@ bool SymbolTable::load_sym_file(const std::string& path,
 
         uint32_t addr = 0;
         if (!parse_banked_address(addr_token, addr)) {
-            if (error) {
-                std::ostringstream ss;
-                ss << "Malformed symbol file line " << line_number << " in " << path;
-                *error = ss.str();
-            }
-            clear();
-            return false;
+            /* RGBDS dumps every symbol — including bank-scoped constants
+             * like "00 SCENE_FOO" that have no address. They aren't
+             * useful here, so silently skip rather than aborting. */
+            continue;
         }
 
         PendingSymbol pending_symbol;

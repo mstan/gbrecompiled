@@ -99,6 +99,9 @@ static GBPrinter* g_printer = NULL;
 
 static GBHardwareModePref hardware_mode_pref_from_string(const std::string& s);
 static const char* hardware_mode_pref_to_string(GBHardwareModePref mode);
+static void set_active_game_pref(const char* key, const std::string& value);
+static void set_active_game_pref_bool(const char* key, bool value);
+static void set_active_game_pref_int(const char* key, int value);
 
 /* Per-game preferences keyed under "game.<id>." in runtime_prefs.ini.
  * gb_platform_set_game_id reads from this when the recompiled main
@@ -2715,7 +2718,10 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("(restart needed)");
         }
 
-        ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
+        if (ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names))) {
+            set_active_game_pref_int("palette", g_palette_idx);
+            save_runtime_preferences();
+        }
 
         /* Post-process shader (sharp / smooth / lcd / dmg-green plus any
          * shaders/<name>.frag.glsl on disk). Active selection persists
@@ -2733,6 +2739,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     if (ImGui::Selectable(name, selected)) {
                         if (gb_shader_pipeline_set_active(g_shader_pipeline, i)) {
                             g_active_shader_pref = name ? name : "";
+                            set_active_game_pref("shader", g_active_shader_pref);
                             save_runtime_preferences();
                         }
                     }
@@ -2761,6 +2768,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     gb_sgb_set_display_palettes((GBSgbState*)g_registered_ctx->sgb,
                                                 g_sgb_colors_pref);
                 }
+                set_active_game_pref_bool("sgb_colors", g_sgb_colors_pref);
                 save_runtime_preferences();
             }
         }
@@ -2773,6 +2781,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                               g_sgb_cart_border_enabled);
                 }
                 apply_window_scale_preset();
+                set_active_game_pref_bool("sgb_border", g_sgb_cart_border_enabled);
                 save_runtime_preferences();
             }
         }
@@ -2781,6 +2790,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             placed_any = true;
             if (ImGui::Checkbox("Custom Border", &g_border_enabled)) {
                 apply_border_change();
+                set_active_game_pref_bool("custom_border", g_border_enabled);
                 save_runtime_preferences();
             }
         }
@@ -2794,6 +2804,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             if (ImGui::ArrowButton("##border_prev", ImGuiDir_Left)) {
                 g_border_idx = (g_border_idx - 1 + count) % count;
                 apply_border_change();
+                if (g_border_idx >= 0 && g_border_idx < count) {
+                    set_active_game_pref("custom_border_file", g_border_files[g_border_idx]);
+                }
                 save_runtime_preferences();
             }
             ImGui::SameLine();
@@ -2807,6 +2820,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             if (ImGui::ArrowButton("##border_next", ImGuiDir_Right)) {
                 g_border_idx = (g_border_idx + 1) % count;
                 apply_border_change();
+                if (g_border_idx >= 0 && g_border_idx < count) {
+                    set_active_game_pref("custom_border_file", g_border_files[g_border_idx]);
+                }
                 save_runtime_preferences();
             }
             if (!cycler_enabled) ImGui::EndDisabled();
@@ -4733,6 +4749,7 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
     auto it = g_per_game_prefs.find(g_active_game_id);
     if (it != g_per_game_prefs.end()) {
         auto& prefs = it->second;
+
         auto hwm = prefs.find("hardware_mode");
         if (hwm != prefs.end()) {
             GBHardwareModePref saved = hardware_mode_pref_from_string(hwm->second);
@@ -4740,7 +4757,52 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
                 g_active_hardware_mode_pref = saved;
             }
         }
+
+        /* Per-game Look settings: each one inherits the global default
+         * if no per-game value is saved, so a fresh cart picks up
+         * whatever was last set globally. Subsequent menu changes are
+         * scoped to this cart only. */
+        auto pal = prefs.find("palette");
+        if (pal != prefs.end()) {
+            int idx = atoi(pal->second.c_str());
+            if (idx >= 0 && idx < (int)IM_ARRAYSIZE(g_palette_names)) {
+                g_palette_idx = idx;
+            }
+        }
+        auto sha = prefs.find("shader");
+        if (sha != prefs.end()) {
+            g_active_shader_pref = sha->second;
+            if (g_shader_pipeline) {
+                gb_shader_pipeline_set_active_by_name(g_shader_pipeline,
+                                                     sha->second.c_str());
+            }
+        }
+        auto sc = prefs.find("sgb_colors");
+        if (sc != prefs.end()) {
+            g_sgb_colors_pref = (sc->second != "0");
+            if (ctx && ctx->sgb) {
+                gb_sgb_set_display_palettes((GBSgbState*)ctx->sgb,
+                                            g_sgb_colors_pref);
+            }
+        }
+        auto sb = prefs.find("sgb_border");
+        if (sb != prefs.end()) {
+            g_sgb_cart_border_enabled = (sb->second != "0");
+            if (ctx && ctx->sgb) {
+                gb_sgb_set_display_border((GBSgbState*)ctx->sgb,
+                                          g_sgb_cart_border_enabled);
+            }
+        }
+        auto cbe = prefs.find("custom_border");
+        if (cbe != prefs.end()) {
+            g_border_enabled = (cbe->second != "0");
+        }
+        auto cbf = prefs.find("custom_border_file");
+        if (cbf != prefs.end()) {
+            g_border_loaded_filename = cbf->second;
+        }
     }
+
     if (ctx) {
         ctx->hardware_mode_pref = g_active_hardware_mode_pref;
     }
@@ -4750,6 +4812,19 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
      * (CGB/DMG modes), so the SGB Cart Border toggle still works on
      * later launches. */
     try_load_sgb_cart_border_cache();
+}
+
+/* Helpers for menu handlers to scope a Look setting to the active
+ * cart. No-op when no game is loaded (e.g. during the launcher). */
+static void set_active_game_pref(const char* key, const std::string& value) {
+    if (g_active_game_id.empty() || !key || !*key) return;
+    g_per_game_prefs[g_active_game_id][key] = value;
+}
+static void set_active_game_pref_bool(const char* key, bool value) {
+    set_active_game_pref(key, value ? "1" : "0");
+}
+static void set_active_game_pref_int(const char* key, int value) {
+    set_active_game_pref(key, std::to_string(value));
 }
 
 void gb_platform_register_context(GBContext* ctx) {

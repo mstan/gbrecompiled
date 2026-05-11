@@ -14,6 +14,7 @@ add_library(gbrt STATIC
     src/network_discovery.c
     src/sgb.c
     src/ir.c
+    src/mock_ir.c
     src/relay_client.c
     src/shader_pipeline.cpp
     src/gb_printer.c

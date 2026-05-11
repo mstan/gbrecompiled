@@ -25,7 +25,7 @@ Everything below is built on top of upstream `arcanite24/gb-recompiled`. Most ar
 
 ### Hardware emulation
 - **Super Game Boy** support — palettes, cart-supplied border, MASK_EN. Auto-enables from cart header; can be toggled mid-game.
-- **Game Boy Camera** (MBC `$FC`) — exposes a host webcam to the cart, runs on Linux v4l2 and macOS AVFoundation.
+- **Game Boy Camera** (MBC `$FC`) — exposes a host webcam to the cart via per-platform native APIs (Linux v4l2, macOS AVFoundation, Windows Media Foundation; zero runtime deps). Opt-in via CMake `-DGBRT_ENABLE_GBCAM=ON` (default off) so non-Camera carts don't compile or link it.
 - **Game Boy Printer** — virtual paper printer that writes received prints to `<cwd>/prints/*.png`, with smart concatenation across multi-page jobs.
 - **GBC IR port (`$FF56`)** — generic state machine for the CGB IR LED + photodiode; used by the Mystery Gift mock above.
 

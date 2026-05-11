@@ -12,18 +12,27 @@
 #include "gbrt_debug.h"
 
 /* ============================================================================
- * Pocket Camera — Webcam Capture (cross-platform via gbcam.cpp / OpenCV)
+ * Pocket Camera — Webcam Capture
+ *
+ * Only built when GBRT_ENABLE_GBCAM is set (gb-recompiled CMake option,
+ * default OFF). When disabled, gbcam_capture_webcam returns false and the
+ * MBC 0xFC handler below falls back to the built-in gradient test pattern.
  * ========================================================================== */
+#ifdef GBRT_HAVE_GBCAM
 #include "gbcam.h"
 /* Camera sensor registers (written by the game via 0xA001-0xA005) */
 static uint8_t gbcam_regs[6] = {0};
 
-/* Wrapper: delegate to gbcam cross-platform capture */
 static bool gbcam_capture_webcam(GBContext* ctx) {
     if (!ctx->eram) return false;
     return gbcam_capture_to_sram(ctx->eram, ctx->eram_size, gbcam_regs);
 }
-
+#else
+static bool gbcam_capture_webcam(GBContext* ctx) {
+    (void)ctx;
+    return false;  /* no camera build: MBC handler falls through to test pattern */
+}
+#endif
 /* End of Pocket Camera webcam capture */
 
 
@@ -1976,10 +1985,13 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
                     }
                 }
             }
-            /* Store camera sensor register writes */
+            /* Store camera sensor register writes (only when camera build
+             * is enabled — gbcam_regs is only defined under GBRT_HAVE_GBCAM). */
+#ifdef GBRT_HAVE_GBCAM
             if (reg_addr >= 0x01 && reg_addr <= 0x05) {
                 gbcam_regs[reg_addr] = value;
             }
+#endif
             return;
         }
 

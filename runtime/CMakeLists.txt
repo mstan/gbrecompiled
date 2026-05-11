@@ -9,7 +9,6 @@ add_library(gbrt STATIC
     src/audio.c
     src/audio_stats.c
     src/platform_sdl.cpp
-    src/gbcam.c
     src/serial_link.c
     src/network_discovery.c
     src/sgb.c
@@ -30,10 +29,32 @@ target_link_libraries(gbrt PUBLIC Threads::Threads)
 find_package(CURL REQUIRED)
 target_link_libraries(gbrt PUBLIC CURL::libcurl)
 
-# macOS: add AVFoundation camera backend
-if(APPLE)
-    target_sources(gbrt PRIVATE src/gbcam_macos.m)
-    target_link_libraries(gbrt PRIVATE "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
+# Game Boy Camera (MBC 0xFC) — webcam capture. Off by default because the
+# only cart that needs it is GB-Recomp/gbcamera. Each consumer that needs
+# it does `set(GBRT_ENABLE_GBCAM ON CACHE BOOL "" FORCE)` before adding
+# gbrt. When off, gbrt.c's MBC 0xFC handler falls through to the built-in
+# gradient test pattern.
+#
+# Per-platform native backends (zero runtime deps — each API ships with
+# the OS):
+#   - Linux:   v4l2          (src/gbcam.c)
+#   - Windows: Media Found.  (src/gbcam.c)
+#   - macOS:   AVFoundation  (src/gbcam_macos.m)
+#   - Android: TODO — NDK Camera2 API (<camera/NdkCameraDevice.h>, API 24+)
+#   - iOS:     TODO — AVFoundation (src/gbcam_macos.m is mostly portable,
+#                                   the AVFoundation API is identical)
+#
+# OpenCV is an alternative single-codepath backend (src/gbcam.cpp). Not
+# wired here because it adds a ~30 MB runtime dependency for end users
+# and gave us garbled frames on the v4l2 path. Enable manually if needed.
+option(GBRT_ENABLE_GBCAM "Build Game Boy Camera webcam capture (native backends)" OFF)
+if(GBRT_ENABLE_GBCAM)
+    target_sources(gbrt PRIVATE src/gbcam.c)
+    target_compile_definitions(gbrt PUBLIC GBRT_HAVE_GBCAM=1)
+    if(APPLE)
+        target_sources(gbrt PRIVATE src/gbcam_macos.m)
+        target_link_libraries(gbrt PRIVATE "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
+    endif()
 endif()
 
 # Dear ImGui sources (if using SDL2)

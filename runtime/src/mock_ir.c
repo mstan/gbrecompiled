@@ -1,5 +1,7 @@
 /*
- * See mock_ir.h. Item/deco tables, queue state, partner-WRAM writer.
+ * See mock_ir.h. Item/deco tables, queue state, partner-WRAM writer,
+ * and the runtime's gb_dispatch override that intercepts each Gen 2
+ * cart's ExchangeMysteryGiftData entry point.
  *
  * The 36-item and 36-deco lists below are in the same order as the cart's
  * MysteryGiftItems / MysteryGiftDecos tables — the cart looks up these by
@@ -10,6 +12,7 @@
 
 #include "gbrt.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -201,4 +204,62 @@ bool gb_mock_ir_apply_partner(struct GBContext* ctx, GBMockIRGame game) {
 
     gb_mock_ir_clear_queue();
     return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * gb_dispatch override
+ *
+ * The SDL launcher's run loop dispatches each instruction through gb_step →
+ * gb_dispatch. Without this override gbrt.c falls back to gb_interpret for
+ * everything. We provide a strong gb_dispatch here so the runtime can also
+ * intercept specific (bank, pc) pairs — currently used to short-circuit each
+ * Gen 2 cart's ExchangeMysteryGiftData entry. Non-Gen-2 carts and Gen 2
+ * carts running anything other than Mystery Gift fall straight through to
+ * the interpreter.
+ *
+ * MG_OKAY = ~MG_NOT_OKAY = ~(0x01 | 0x02 | 0x10 | 0x80) = 0x6C — the
+ * cart's hMGStatusFlags value DoMysteryGift expects in A after a
+ * successful exchange.
+ * ---------------------------------------------------------------------------
+ */
+#define MG_OKAY 0x6C
+
+static bool is_exchange_mystery_gift_data(GBMockIRGame game, uint8_t bank, uint16_t pc) {
+    switch (game) {
+    case GB_MOCK_IR_GAME_GOLD:
+    case GB_MOCK_IR_GAME_SILVER:  return bank == 0x0A && pc == 0x5FC9;
+    case GB_MOCK_IR_GAME_CRYSTAL: return bank == 0x41 && pc == 0x4A95;
+    default:                      return false;
+    }
+}
+
+static void apply_mock_mystery_gift(GBContext* ctx, GBMockIRGame game) {
+    static int once[4] = {0};
+    if (!once[(int)game]) {
+        fprintf(stderr, "[MOCK_IR] Mystery Gift delivered (game=%d)\n", (int)game);
+        fflush(stderr);
+        once[(int)game] = 1;
+    }
+    gb_mock_ir_apply_partner(ctx, game);
+    ctx->a = MG_OKAY;
+    ctx->pc = gb_pop16(ctx);
+    /* RET is 16 T-cycles. Charge them so timer state stays roughly honest;
+     * we're skipping the multi-frame IR loop the real exchange would run,
+     * which the cart doesn't depend on for correctness. */
+    gb_tick(ctx, 16);
+}
+
+void gb_dispatch(GBContext* ctx, uint16_t addr) {
+    uint8_t bank = (addr < 0x4000) ? 0 : (uint8_t)ctx->rom_bank;
+    GBMockIRGame game = gb_mock_ir_detect(ctx);
+
+    if (game != GB_MOCK_IR_GAME_NONE &&
+        is_exchange_mystery_gift_data(game, bank, addr)) {
+        apply_mock_mystery_gift(ctx, game);
+        return;
+    }
+
+    gbrt_log_trace(ctx, bank, addr);
+    ctx->pc = addr;
+    gb_interpret(ctx, addr);
 }

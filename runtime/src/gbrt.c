@@ -3141,13 +3141,12 @@ void gbrt_log_interrupt_service(GBContext* ctx,
             ie_reg);
 }
 
-#ifndef _MSC_VER
-__attribute__((weak)) void gb_dispatch(GBContext* ctx, uint16_t addr) {
-    gbrt_log_trace(ctx, (addr < 0x4000) ? 0 : ctx->rom_bank, addr);
-    ctx->pc = addr;
-    gb_interpret(ctx, addr);
-}
+/* gb_dispatch is provided by mock_ir.c — the runtime's main dispatch path
+ * needs to be able to intercept specific (bank, pc) pairs for the Mystery
+ * Gift mock on Pokemon Gen 2 carts, and falls through to gb_interpret for
+ * everything else. */
 
+#ifndef _MSC_VER
 __attribute__((weak)) void gb_dispatch_call(GBContext* ctx, uint16_t addr) {
     gbrt_log_trace(ctx, (addr < 0x4000) ? 0 : ctx->rom_bank, addr);
     ctx->pc = addr;

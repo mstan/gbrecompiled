@@ -2,9 +2,54 @@
 
 A **static recompiler** for Game Boy and Game Boy Color ROMs that translates LR35902 code directly into portable, modern C code.
 
+This is the **GB-Recomp fork** of [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled) — see [Fork Additions](#fork-additions) below for what it adds on top of upstream.
+
 <p align="center">
   <img src="dino.png" alt="GB Recompiled Screenshot" width="400">
 </p>
+
+---
+
+## Fork Additions
+
+Everything below is built on top of upstream `arcanite24/gb-recompiled`. Most are runtime / launcher features that any recompiled cart picks up automatically by linking against this fork's `gbrt`.
+
+### Networking & link play
+- **BGB-compatible link cable over TCP** — peer-to-peer between two recompiled instances; verified Pokemon trade between Gen 1 carts.
+- **LAN peer auto-discovery** — Esc menu's Network section finds other instances on the same LAN.
+- **Internet relay** — companion `gb-link-rendezvous` Flask server + `relay_client.c` for NAT-traversal-style introductions. Gameplay still runs P2P over BGB once paired.
+
+### Pokemon Gen 2 Mystery Gift mock
+- Scripted Mystery Gift for Pokemon Gold / Silver / Crystal — pick an item or decoration from an Esc-menu carousel, the next in-game IR exchange delivers it. Uses a runtime `gb_dispatch` override that intercepts each cart's `ExchangeMysteryGiftData` entry point and synthesizes a successful exchange.
+- Cart-side flow runs unmodified afterward: items go to the Goldenrod counter, decorations into your bedroom PC list (after save + Continue).
+
+### Hardware emulation
+- **Super Game Boy** support — palettes, cart-supplied border, MASK_EN. Auto-enables from cart header; can be toggled mid-game.
+- **Game Boy Camera** (MBC `$FC`) — exposes a host webcam to the cart, runs on Linux v4l2 and macOS AVFoundation.
+- **Game Boy Printer** — virtual paper printer that writes received prints to `<cwd>/prints/*.png`, with smart concatenation across multi-page jobs.
+- **GBC IR port (`$FF56`)** — generic state machine for the CGB IR LED + photodiode; used by the Mystery Gift mock above.
+
+### Per-game UX
+- **Per-game preferences** — palette, shader, SGB toggles, custom border, hardware mode (DMG/SGB/CGB/AUTO). Globals act as defaults; overrides save per game ID.
+- **Custom SGB borders** — drop 256x224 PNGs into `borders/` next to the binary; cycle from the Esc menu.
+- **Cart-border cache** — SGB border decoded once and cached to disk so non-SGB modes can still display it.
+- **Pocket / Light palette presets**, **Show FPS overlay**, **audio settings**, **input remapping** with controller support and per-profile labels (Xbox / PlayStation / Nintendo / Generic).
+- **Savestates** with multi-slot UI.
+
+### Launcher infrastructure
+- **Multi-ROM launcher** with a graphical picker, missing-ROM tagging, and `--game <id>` headless launch.
+- **Single-cart auto-start** — when a launcher has exactly one game registered, the picker is skipped and the cart boots straight up. Esc menu's "Return to Launcher" is replaced with "Restart Game" so you can reboot the cart from inside the menu.
+- **`--prefix-symbols`** flag on `gbrecomp` so multiple carts can be linked into one binary without symbol collisions.
+- **Native asset-loader integration** — ROM data is bundled into the binary as compressed sections that get extracted into `assets/<id>/` on first boot.
+- **`roms/` subfolder convention** — user-supplied ROMs live at `roms/<id>.<ext>` next to the binary.
+
+### Recompiler workflow
+- **Directory mode** with auto-discovery of per-ROM `.sym` / `.annotations` files.
+- **Parallel code generation**, **annotation handling** (skips non-address sym lines), and various analyzer fixes.
+
+### Ecosystem
+- [GB-Recomp/pgbcomp](https://github.com/GB-Recomp/pgbcomp) — Pokemon Gen 1 + Gen 2 compilation umbrella that FetchContents six per-game repos plus this fork.
+- Per-game repos under [github.com/GB-Recomp](https://github.com/GB-Recomp): `pokered`, `pokeblue`, `pokeyellow`, `pokegold`, `pokesilver`, `pokecrystal` — each builds standalone or links into a compilation.
 
 ---
 

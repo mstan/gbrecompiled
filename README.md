@@ -29,6 +29,10 @@ Everything below is built on top of upstream `arcanite24/gb-recompiled`. Most ar
 - **Game Boy Printer** — virtual paper printer that writes received prints to `<cwd>/prints/*.png`, with smart concatenation across multi-page jobs.
 - **GBC IR port (`$FF56`)** — generic state machine for the CGB IR LED + photodiode; used by the Mystery Gift mock above.
 
+### Display pipeline
+- **GLES 2.0 rendering backend** with a built-in post-process shader pipeline. One binary covers desktop Mesa, Mali, Adreno — same shaders run everywhere.
+- **Shipped shader presets** (sharp / scanlines / CRT-like effects) selectable from the Esc menu's Look section. Per-game shader preference stays sticky once set.
+
 ### Per-game UX
 - **Per-game preferences** — palette, shader, SGB toggles, custom border, hardware mode (DMG/SGB/CGB/AUTO). Globals act as defaults; overrides save per game ID.
 - **Custom SGB borders** — drop 256x224 PNGs into `borders/` next to the binary; cycle from the Esc menu.

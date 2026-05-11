@@ -13,6 +13,9 @@
 #include "sgb.h"
 #include "relay_client.h"
 #include "mock_ir.h"
+#ifdef GBRT_HAVE_GBCAM
+#include "gbcam.h"
+#endif
 #include "gb_printer.h"
 
 #ifdef GB_HAS_SDL2
@@ -2893,6 +2896,54 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("Queued: %s", gb_mock_ir_queue_label());
         }
 
+#ifdef GBRT_HAVE_GBCAM
+        /* Game Boy Camera device picker — only compiled in when the gbrt
+         * was built with GBRT_ENABLE_GBCAM, and only shown for carts that
+         * actually have the MBC $FC webcam hardware. */
+        if (g_registered_ctx && g_registered_ctx->mbc_type == 0xFC) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Camera");
+            static GBCamDevice cam_devs[16];
+            static int cam_count = -1;       /* -1 = not enumerated yet */
+            static int cam_selected_idx = -1;
+            if (cam_count < 0) {
+                cam_count = gbcam_enumerate_devices(cam_devs, 16);
+                /* Sync the dropdown selection with whatever the backend
+                 * currently has open (env-var, default, or per-game pref). */
+                const char* current = gbcam_current_device();
+                for (int i = 0; i < cam_count; i++) {
+                    if (strcmp(cam_devs[i].path, current) == 0) {
+                        cam_selected_idx = i;
+                        break;
+                    }
+                }
+            }
+            if (cam_count == 0) {
+                ImGui::TextDisabled("No video devices detected.");
+            } else {
+                /* Format each device's label as "<label> [<path>]". */
+                static const char* cam_combo_items[16];
+                static char cam_combo_buf[16][160];
+                for (int i = 0; i < cam_count; i++) {
+                    snprintf(cam_combo_buf[i], sizeof(cam_combo_buf[i]),
+                             "%s  [%s]", cam_devs[i].label, cam_devs[i].path);
+                    cam_combo_items[i] = cam_combo_buf[i];
+                }
+                int prev = cam_selected_idx;
+                if (ImGui::Combo("Device", &cam_selected_idx, cam_combo_items, cam_count)) {
+                    if (cam_selected_idx != prev && cam_selected_idx >= 0 &&
+                        cam_selected_idx < cam_count) {
+                        gbcam_close();
+                        gbcam_open(cam_devs[cam_selected_idx].path);
+                        set_active_game_pref("camera_device",
+                                             cam_devs[cam_selected_idx].path);
+                        save_runtime_preferences();
+                    }
+                }
+            }
+        }
+#endif
+
         ImGui::Spacing();
         ImGui::TextDisabled("Savestates");
         int savestate_slot = g_savestate_slot + 1;
@@ -4879,6 +4930,15 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
                                           g_sgb_cart_border_enabled);
             }
         }
+#ifdef GBRT_HAVE_GBCAM
+        /* Per-game camera device preference. Gets bridged into the gbcam
+         * backend by setting GBCAM_DEVICE so the cart's lazy first-open
+         * picks it up automatically. */
+        auto camdev = prefs.find("camera_device");
+        if (camdev != prefs.end() && !camdev->second.empty()) {
+            setenv("GBCAM_DEVICE", camdev->second.c_str(), 1);
+        }
+#endif
         auto cbe = prefs.find("custom_border");
         if (cbe != prefs.end()) {
             g_border_enabled = (cbe->second != "0");

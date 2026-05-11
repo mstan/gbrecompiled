@@ -26,9 +26,33 @@ extern "C" {
 #define GBCAM_IMG_SIZE   (GBCAM_TILE_COUNT * 16)
 
 /**
- * List available video capture devices to stdout.
+ * Camera device descriptor for programmatic enumeration.
+ *   path  - what to pass to gbcam_open (e.g. "/dev/video0" on Linux,
+ *           the index string "0" on macOS/Windows). Empty if unused.
+ *   label - human-readable name (cap.card on Linux, AVCaptureDevice
+ *           localizedName on macOS, friendlyName on Windows).
+ */
+typedef struct {
+    char path[64];
+    char label[96];
+} GBCamDevice;
+
+/**
+ * List available video capture devices to stdout (diagnostic).
  */
 void gbcam_list_devices(void);
+
+/**
+ * Programmatic enumeration. Fills up to `max_count` entries into `out`
+ * and returns the number written. Pass NULL/0 to just probe the count.
+ */
+int gbcam_enumerate_devices(GBCamDevice* out, int max_count);
+
+/**
+ * Return the device path most recently passed to gbcam_open, or "" if
+ * the camera has never been opened.
+ */
+const char* gbcam_current_device(void);
 
 /**
  * Open a webcam device. Pass NULL to use GBCAM_DEVICE env var or platform default.

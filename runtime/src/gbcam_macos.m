@@ -56,12 +56,27 @@ static GBCamGrabber* grabber = nil;
 static uint8_t frame_buffer[GBCAM_WIDTH * GBCAM_HEIGHT];
 static int cam_state = 0; /* 0=not tried, 1=failed, 2=open */
 
-void gbcam_list_devices(void) {
-    printf("[GBCAM] Available video devices:\n");
+int gbcam_enumerate_devices(GBCamDevice* out, int max_count) {
     NSArray* devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
-    for (NSUInteger i = 0; i < devices.count; i++) {
+    int count = (int)devices.count;
+    if (!out) return count;
+    int written = 0;
+    for (int i = 0; i < count && written < max_count; i++) {
         AVCaptureDevice* dev = devices[i];
-        printf("[GBCAM]   %lu - %s\n", (unsigned long)i, dev.localizedName.UTF8String);
+        snprintf(out[written].path, sizeof(out[written].path), "%d", i);
+        snprintf(out[written].label, sizeof(out[written].label), "%s",
+                 dev.localizedName.UTF8String);
+        written++;
+    }
+    return count;
+}
+
+void gbcam_list_devices(void) {
+    GBCamDevice devs[16];
+    int n = gbcam_enumerate_devices(devs, 16);
+    printf("[GBCAM] Available video devices:\n");
+    for (int i = 0; i < n; i++) {
+        printf("[GBCAM]   %s - %s\n", devs[i].path, devs[i].label);
     }
     printf("[GBCAM] Set GBCAM_DEVICE=N to choose a camera (default: 0)\n");
 }
@@ -72,7 +87,9 @@ void gbcam_close(void) {
         session = nil;
     }
     grabber = nil;
-    cam_state = 1;
+    /* 0 = "not attempted yet" so gbcam_open will retry; 1 stays reserved
+     * for permanent open failures inside gbcam_open. */
+    cam_state = 0;
 }
 
 bool gbcam_open(const char* device) {
@@ -94,6 +111,10 @@ bool gbcam_open(const char* device) {
 
         AVCaptureDevice* dev = devices[dev_index];
         printf("[GBCAM] Using %s\n", dev.localizedName.UTF8String);
+        char idx_str[16];
+        snprintf(idx_str, sizeof(idx_str), "%d", dev_index);
+        extern void gbcam_internal_set_current(const char*);
+        gbcam_internal_set_current(idx_str);
 
         NSError* error = nil;
         AVCaptureDeviceInput* input = [AVCaptureDeviceInput deviceInputWithDevice:dev error:&error];

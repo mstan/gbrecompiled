@@ -11,6 +11,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Tracks the last successfully opened device path. Each platform backend
+ * below sets this from inside gbcam_open via the helper. Visibility is
+ * extern so gbcam_macos.m (separate TU) can call the setter. */
+static char g_current_device[64] = {0};
+
+void gbcam_internal_set_current(const char* path) {
+    if (path) snprintf(g_current_device, sizeof(g_current_device), "%s", path);
+    else      g_current_device[0] = '\0';
+}
+
+const char* gbcam_current_device(void) {
+    return g_current_device;
+}
+
 /* ============================================================================
  * Platform backend: Linux (V4L2)
  * ========================================================================== */
@@ -30,20 +44,33 @@ static uint32_t v4l2_buflen = 0;
 static uint32_t v4l2_width = 0;
 static uint32_t v4l2_height = 0;
 
-void gbcam_list_devices(void) {
-    printf("[GBCAM] Available video devices:\n");
-    for (int i = 0; i < 10; i++) {
+int gbcam_enumerate_devices(GBCamDevice* out, int max_count) {
+    int count = 0;
+    for (int i = 0; i < 32; i++) {
         char path[32];
         snprintf(path, sizeof(path), "/dev/video%d", i);
         int fd = open(path, O_RDWR);
         if (fd < 0) continue;
         struct v4l2_capability cap = {0};
-        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
-            if (cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) {
-                printf("[GBCAM]   %s - %s (%s)\n", path, cap.card, cap.driver);
+        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+            (cap.device_caps & V4L2_CAP_VIDEO_CAPTURE)) {
+            if (out && count < max_count) {
+                snprintf(out[count].path, sizeof(out[count].path), "%s", path);
+                snprintf(out[count].label, sizeof(out[count].label), "%s", cap.card);
             }
+            count++;
         }
         close(fd);
+    }
+    return count;
+}
+
+void gbcam_list_devices(void) {
+    GBCamDevice devs[16];
+    int n = gbcam_enumerate_devices(devs, 16);
+    printf("[GBCAM] Available video devices:\n");
+    for (int i = 0; i < n; i++) {
+        printf("[GBCAM]   %s - %s\n", devs[i].path, devs[i].label);
     }
     printf("[GBCAM] Set GBCAM_DEVICE=/dev/videoN to choose a camera\n");
 }
@@ -58,7 +85,10 @@ void gbcam_close(void) {
         ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
         close(v4l2_fd);
     }
-    v4l2_fd = -1;
+    /* -2 = "not attempted yet" so a subsequent gbcam_open retries cleanly.
+     * Keep -1 reserved for permanent open failures triggered from inside
+     * gbcam_open itself. */
+    v4l2_fd = -2;
 }
 
 bool gbcam_open(const char* device) {
@@ -77,6 +107,7 @@ bool gbcam_open(const char* device) {
         return false;
     }
     printf("[GBCAM] Using %s\n", device);
+    gbcam_internal_set_current(device);
 
     /* Request YUYV at a small resolution */
     struct v4l2_format fmt = {0};
@@ -181,12 +212,18 @@ bool gbcam_grab_grayscale(uint8_t* grayscale_out) {
 /* Forward declarations — implemented in gbcam_macos.m */
 /* If gbcam_macos.m is not linked, these weak stubs are used. */
 void gbcam_list_devices(void) __attribute__((weak));
+int  gbcam_enumerate_devices(GBCamDevice* out, int max_count) __attribute__((weak));
 bool gbcam_open(const char* device) __attribute__((weak));
 void gbcam_close(void) __attribute__((weak));
 bool gbcam_grab_grayscale(uint8_t* grayscale_out) __attribute__((weak));
 
 void gbcam_list_devices(void) {
     printf("[GBCAM] macOS camera: use GBCAM_DEVICE=N (device index) or omit for default\n");
+}
+
+int gbcam_enumerate_devices(GBCamDevice* out, int max_count) {
+    (void)out; (void)max_count;
+    return 0;
 }
 
 bool gbcam_open(const char* device) {
@@ -227,36 +264,53 @@ static uint32_t mf_height = 0;
 static bool mf_initialized = false;
 static int mf_state = 0; /* 0=not tried, 1=failed, 2=open */
 
-void gbcam_list_devices(void) {
+int gbcam_enumerate_devices(GBCamDevice* out, int max_count) {
     if (!mf_initialized) {
         MFStartup(MF_VERSION, MFSTARTUP_LITE);
         mf_initialized = true;
     }
-
     IMFAttributes* attrs = NULL;
     MFCreateAttributes(&attrs, 1);
     IMFAttributes_SetGUID(attrs, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                           &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
-
     IMFActivate** devices = NULL;
     UINT32 count = 0;
     MFEnumDeviceSources(attrs, &devices, &count);
-
-    printf("[GBCAM] Available video devices:\n");
+    int written = 0;
     for (UINT32 i = 0; i < count; i++) {
-        WCHAR* name = NULL;
-        UINT32 name_len = 0;
-        IMFActivate_GetAllocatedString(devices[i], &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-                                        &name, &name_len);
-        if (name) {
-            printf("[GBCAM]   %u - %ls\n", i, name);
-            CoTaskMemFree(name);
+        if (out && written < max_count) {
+            WCHAR* name = NULL;
+            UINT32 name_len = 0;
+            IMFActivate_GetAllocatedString(devices[i], &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                                            &name, &name_len);
+            snprintf(out[written].path, sizeof(out[written].path), "%u", i);
+            if (name) {
+                /* Best-effort wide → narrow for the label. */
+                int j = 0;
+                for (; j < (int)sizeof(out[written].label) - 1 && name[j]; j++) {
+                    out[written].label[j] = (name[j] < 128) ? (char)name[j] : '?';
+                }
+                out[written].label[j] = '\0';
+                CoTaskMemFree(name);
+            } else {
+                snprintf(out[written].label, sizeof(out[written].label), "Camera %u", i);
+            }
+            written++;
         }
         IMFActivate_Release(devices[i]);
     }
     if (devices) CoTaskMemFree(devices);
     if (attrs) IMFAttributes_Release(attrs);
+    return (int)count;
+}
 
+void gbcam_list_devices(void) {
+    GBCamDevice devs[16];
+    int n = gbcam_enumerate_devices(devs, 16);
+    printf("[GBCAM] Available video devices:\n");
+    for (int i = 0; i < n; i++) {
+        printf("[GBCAM]   %s - %s\n", devs[i].path, devs[i].label);
+    }
     printf("[GBCAM] Set GBCAM_DEVICE=N to choose a camera (default: 0)\n");
 }
 
@@ -265,7 +319,9 @@ void gbcam_close(void) {
         IMFSourceReader_Release(mf_reader);
         mf_reader = NULL;
     }
-    mf_state = 1;
+    /* 0 = "not attempted yet" so gbcam_open will retry; 1 stays reserved
+     * for permanent open failures. */
+    mf_state = 0;
 }
 
 bool gbcam_open(const char* device) {
@@ -312,6 +368,11 @@ bool gbcam_open(const char* device) {
         printf("[GBCAM] Failed to activate device %d\n", dev_index);
         mf_state = 1;
         return false;
+    }
+    {
+        char idx_str[16];
+        snprintf(idx_str, sizeof(idx_str), "%d", dev_index);
+        gbcam_internal_set_current(idx_str);
     }
 
     /* Create source reader */
@@ -394,6 +455,7 @@ bool gbcam_grab_grayscale(uint8_t* grayscale_out) {
 void gbcam_list_devices(void) {
     printf("[GBCAM] No webcam support on this platform\n");
 }
+int gbcam_enumerate_devices(GBCamDevice* out, int max_count) { (void)out; (void)max_count; return 0; }
 bool gbcam_open(const char* device) { (void)device; return false; }
 void gbcam_close(void) {}
 bool gbcam_grab_grayscale(uint8_t* grayscale_out) { (void)grayscale_out; return false; }

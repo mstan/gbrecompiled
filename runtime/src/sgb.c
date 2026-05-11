@@ -98,11 +98,13 @@ struct GBSgbState {
     bool     palettes_active;
 
     /* Cart border (CHR_TRN tile graphics + PCT_TRN tilemap+palettes).
-     * Tiles are 4bpp, 32 bytes each; CHR_TRN delivers 4 KiB = 128 tiles
-     * (tiles 0-127 with byte1 bit 0 == 0; pokered only sends this set).
+     * Tiles are 4bpp, 32 bytes each; CHR_TRN delivers 4 KiB per packet.
+     * pokered only ships tiles 0..127 (one CHR_TRN with byte1 bit 0 == 0),
+     * but LADX and others ship both banks (two CHR_TRN packets), so we
+     * keep room for the full 256 bg tiles.
      * The tilemap is 32x32 16-bit entries and the four border palettes
      * follow at offset 0x800 in the 4 KiB PCT_TRN payload. */
-    uint8_t  border_chr[4096];
+    uint8_t  border_chr[8192];
     uint8_t  border_tilemap[2048];
     uint16_t border_palette[4][16];
     bool     border_chr_loaded;
@@ -338,12 +340,16 @@ static void sgb_handle_attr_blk(GBSgbState* sgb, const uint8_t (*packets)[SGB_PA
 }
 
 /* CHR_TRN: copies 4 KiB of border tile graphics from VRAM 0x8800.
- * byte1 bit 0 selects 0..127 vs 128..255 and bit 1 selects bg vs obj
- * tiles. pokered only sends bg tiles 0..127, so 4 KiB is enough. */
+ * byte1 bit 0 selects tile bank (0..127 vs 128..255) and bit 1 selects
+ * bg vs obj tiles. Pokemon carts only ship bg-bank-0 (128 tiles).
+ * LADX (and others with full-art borders) ship two CHR_TRN packets:
+ * bank 0 then bank 1, completing tiles 0..255. We ignore obj tiles since
+ * the border-render path never references them. */
 static void sgb_handle_chr_trn(GBSgbState* sgb, GBContext* ctx, const uint8_t* p) {
     if (!ctx || !ctx->vram) return;
-    if ((p[1] & 0x03) != 0) return;
-    memcpy(sgb->border_chr, ctx->vram + 0x0800, sizeof(sgb->border_chr));
+    if (p[1] & 0x02) return;  /* obj tiles — not used for borders */
+    const size_t dst_offset = (p[1] & 0x01) ? 4096u : 0u;
+    memcpy(sgb->border_chr + dst_offset, ctx->vram + 0x0800, 4096);
     sgb->border_chr_loaded = true;
     sgb->border_revision++;
 }
@@ -599,7 +605,7 @@ bool gb_sgb_render_border(const GBSgbState* sgb, uint32_t* out_rgba) {
             int map_idx = (ty * 32 + tx) * 2;
             uint16_t entry = (uint16_t)(sgb->border_tilemap[map_idx] |
                                         (sgb->border_tilemap[map_idx + 1] << 8));
-            uint16_t tile_no = (uint16_t)(entry & 0x00FF);  /* pokered only fills 0..127 */
+            uint16_t tile_no = (uint16_t)(entry & 0x00FF);
             uint8_t pal_no   = (uint8_t)((entry >> 10) & 0x03);
             bool flip_x = (entry & 0x4000) != 0;
             bool flip_y = (entry & 0x8000) != 0;

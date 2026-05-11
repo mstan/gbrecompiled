@@ -1984,7 +1984,11 @@ static void try_load_sgb_cart_border_cache(void) {
  * session as soon as the engine produces a complete border, so a
  * later switch to CGB / DMG hardware mode can still display it. */
 static void save_sgb_cart_border_cache_if_new(void) {
-    if (g_sgb_cart_border_cache_saved) return;
+    /* Carts ship more than one border state — LADX, for example, sets up
+     * an intro/logo border before transitioning to the in-game border.
+     * Saving only the first revision permanently caches that intermediate
+     * state, so the user sees a partially-decoded border forever after.
+     * Overwrite on every new revision instead — the latest one wins. */
     if (g_active_game_id.empty()) return;
     if (g_sgb_cart_border_pixels.size() !=
         (size_t)(GB_SGB_BORDER_W * GB_SGB_BORDER_H)) return;
@@ -1998,7 +2002,8 @@ static void save_sgb_cart_border_cache_if_new(void) {
                        g_sgb_cart_border_pixels.data(),
                        GB_SGB_BORDER_W * 4)) {
         g_sgb_cart_border_cache_saved = true;
-        fprintf(stderr, "[SGB] Saved cart border cache: %s\n", path.c_str());
+        fprintf(stderr, "[SGB] Saved cart border cache (rev %u): %s\n",
+                (unsigned)g_sgb_cart_border_revision, path.c_str());
     }
 }
 

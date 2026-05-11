@@ -31,10 +31,17 @@ typedef struct GBPlatformTimingInfo {
 typedef enum GBPlatformExitAction {
     GB_PLATFORM_EXIT_QUIT = 0,
     GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER = 1,
+    /* Restart the current cart. Uses the same teardown/relaunch path as
+     * RETURN_TO_LAUNCHER (full SDL re-init + battery-RAM reload) so the
+     * cart boots from scratch, but the launcher loops back to the same
+     * game instead of opening the picker. The "Restart Game" Esc-menu
+     * button uses this; only shown when launcher-return is disabled. */
+    GB_PLATFORM_EXIT_RESTART_GAME = 2,
 } GBPlatformExitAction;
 
 enum {
     GB_PLATFORM_RETURN_TO_LAUNCHER_EXIT_CODE = 64,
+    GB_PLATFORM_RESTART_GAME_EXIT_CODE       = 65,
 };
 
 /**
@@ -77,6 +84,17 @@ void gb_platform_set_launcher_return_enabled(bool enabled);
  * @brief Report how the SDL runtime requested to exit the current game.
  */
 GBPlatformExitAction gb_platform_get_exit_action(void);
+
+/**
+ * @brief Returns true if the in-game Esc menu's "Restart Game" button was
+ *        clicked since this was last called, then clears the flag.
+ *
+ * Intended for launchers: after the cart's main() returns (any exit code),
+ * the launcher consumes this flag and, if set, re-invokes the same cart's
+ * main_fn to perform a clean reboot (full SDL/context re-init + battery
+ * reload from disk).
+ */
+bool gb_platform_consume_restart_requested(void);
 
 /**
  * @brief Shutdown SDL2 platform

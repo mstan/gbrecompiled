@@ -12,6 +12,7 @@
 #include "network_discovery.h"
 #include "sgb.h"
 #include "relay_client.h"
+#include "mock_ir.h"
 #include "gb_printer.h"
 
 #ifdef GB_HAS_SDL2
@@ -178,6 +179,8 @@ static std::vector<uint32_t> g_sgb_cart_border_pixels;  /* scratch RGBA buffer *
 static bool g_sgb_cart_border_from_cache = false;
 static bool g_sgb_cart_border_cache_saved = false;
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
+/* Set by the Esc menu's "Restart Game" button; consumed by the launcher. */
+static bool g_restart_game_requested = false;
 static const char* g_palette_names[] = {
     "DMG",
     "Game Boy Pocket",
@@ -2840,6 +2843,56 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("Drop 256x224 PNGs into a borders/ folder next to the executable or working directory, then restart for a custom screen border.");
         }
 
+        /* Mystery Gift mock — only visible on Pokemon Gen 2 carts. Two
+         * carousels (items, decorations) with their own Send buttons; the
+         * "queued" gift is delivered the next time the cart enters Mystery
+         * Gift IR. If nothing is queued, the mock rolls a random gift. */
+        const GBMockIRGame mg_game = gb_mock_ir_detect(g_registered_ctx);
+        if (mg_game != GB_MOCK_IR_GAME_NONE) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Mystery Gift");
+
+            static int mg_item_idx = 0;
+            static int mg_deco_idx = 0;
+
+            const float button_width = ImGui::CalcTextSize("Send").x +
+                                       ImGui::GetStyle().FramePadding.x * 2.0f;
+
+            if (ImGui::ArrowButton("##mg_item_prev", ImGuiDir_Left)) {
+                mg_item_idx = (mg_item_idx - 1 + GB_MOCK_IR_NUM_ITEMS) % GB_MOCK_IR_NUM_ITEMS;
+            }
+            ImGui::SameLine();
+            ImGui::Text("Item: %-16s (%d/%d)",
+                        gb_mock_ir_item_name(mg_item_idx),
+                        mg_item_idx + 1, GB_MOCK_IR_NUM_ITEMS);
+            ImGui::SameLine();
+            if (ImGui::ArrowButton("##mg_item_next", ImGuiDir_Right)) {
+                mg_item_idx = (mg_item_idx + 1) % GB_MOCK_IR_NUM_ITEMS;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Send##item", ImVec2(button_width * 1.6f, 0.0f))) {
+                gb_mock_ir_queue(GB_MOCK_IR_KIND_ITEM, mg_item_idx);
+            }
+
+            if (ImGui::ArrowButton("##mg_deco_prev", ImGuiDir_Left)) {
+                mg_deco_idx = (mg_deco_idx - 1 + GB_MOCK_IR_NUM_DECOS) % GB_MOCK_IR_NUM_DECOS;
+            }
+            ImGui::SameLine();
+            ImGui::Text("Deco: %-16s (%d/%d)",
+                        gb_mock_ir_deco_name(mg_deco_idx),
+                        mg_deco_idx + 1, GB_MOCK_IR_NUM_DECOS);
+            ImGui::SameLine();
+            if (ImGui::ArrowButton("##mg_deco_next", ImGuiDir_Right)) {
+                mg_deco_idx = (mg_deco_idx + 1) % GB_MOCK_IR_NUM_DECOS;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Send##deco", ImVec2(button_width * 1.6f, 0.0f))) {
+                gb_mock_ir_queue(GB_MOCK_IR_KIND_DECO, mg_deco_idx);
+            }
+
+            ImGui::TextDisabled("Queued: %s", gb_mock_ir_queue_label());
+        }
+
         ImGui::Spacing();
         ImGui::TextDisabled("Savestates");
         int savestate_slot = g_savestate_slot + 1;
@@ -3437,6 +3490,23 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 quit_event.type = SDL_QUIT;
                 SDL_PushEvent(&quit_event);
             }
+        } else {
+            /* Single-game launcher mode: nowhere to return to, so offer
+             * "Restart Game" in the same slot. The launcher loops back to
+             * the same cart and pokegame_init runs a full reset.
+             *
+             * We don't change g_exit_action here (the recompiled main only
+             * has translation logic for RETURN_TO_LAUNCHER → exit code 64);
+             * instead we set a separate flag the launcher reads after the
+             * cart's main_fn returns. */
+            ImGui::SameLine();
+            if (ImGui::Button("Restart Game", ImVec2(footer_button_width, 0.0f))) {
+                g_restart_game_requested = true;
+                g_exit_action = GB_PLATFORM_EXIT_RESTART_GAME;
+                SDL_Event quit_event;
+                quit_event.type = SDL_QUIT;
+                SDL_PushEvent(&quit_event);
+            }
         }
 
         ImGui::SameLine();
@@ -3581,6 +3651,12 @@ void gb_platform_set_launcher_return_enabled(bool enabled) {
 
 GBPlatformExitAction gb_platform_get_exit_action(void) {
     return g_exit_action;
+}
+
+bool gb_platform_consume_restart_requested(void) {
+    bool requested = g_restart_game_requested;
+    g_restart_game_requested = false;
+    return requested;
 }
 
 /* ============================================================================
@@ -4886,6 +4962,10 @@ void gb_platform_set_launcher_return_enabled(bool enabled) {
 
 GBPlatformExitAction gb_platform_get_exit_action(void) {
     return GB_PLATFORM_EXIT_QUIT;
+}
+
+bool gb_platform_consume_restart_requested(void) {
+    return false;
 }
 
 bool gb_platform_poll_events(GBContext* ctx) {

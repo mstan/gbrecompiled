@@ -180,6 +180,13 @@ int gb_inject_file_scan(const GBContext* ctx, const char* game_id,
                         GBInjectFileEntry* out, int max) {
     if (!game_id || !out || max <= 0) return 0;
 
+    /* Filter binaries to the active cart's generation — a .pk1 on a
+     * Gen 2 cart (or vice versa) would fail apply anyway, so hide
+     * incompatible files from the dropdown to keep the menu honest.
+     * .gbmon stays generation-agnostic (resolved at apply). */
+    bool cart_is_gen1 = ctx && (gb_mock_gen1_detect(ctx) != GB_MOCK_GEN1_NONE);
+    bool cart_is_gen2 = ctx && (gb_mock_gen2_detect(ctx) != GB_MOCK_GEN2_NONE);
+
     char dir_path[512];
     snprintf(dir_path, sizeof(dir_path), "injects/%s", game_id);
 
@@ -190,6 +197,9 @@ int gb_inject_file_scan(const GBContext* ctx, const char* game_id,
     struct dirent* ent;
     while (count < max && (ent = readdir(d)) != NULL) {
         if (ext_length(ent->d_name) == 0) continue;
+
+        if (file_has_ext(ent->d_name, ".pk1") && !cart_is_gen1) continue;
+        if (file_has_ext(ent->d_name, ".pk2") && !cart_is_gen2) continue;
 
         GBInjectFileEntry* e = &out[count];
         snprintf(e->filename, sizeof(e->filename), "%s", ent->d_name);

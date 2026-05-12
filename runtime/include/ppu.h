@@ -166,6 +166,15 @@ void ppu_init(GBPPU* ppu);
 void ppu_reset(GBPPU* ppu, const GBContext* ctx);
 
 /**
+ * Re-apply the CGB BIOS DMG-compat palette for the current cart.
+ * Reads ctx->cgb_compat_palette_override (set by the menu) and ctx->rom
+ * (for the title-hash lookup when override is -1), writes the resulting
+ * BG/OBJ palette colors into CGB palette RAM. No-op outside CGB compat
+ * mode. Safe to call mid-session — the next rendered frame picks up
+ * the new colors. */
+void ppu_reload_cgb_compat_palette(GBPPU* ppu, const GBContext* ctx);
+
+/**
  * @brief Tick the PPU for a number of cycles
  */
 void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles);

@@ -875,6 +875,7 @@ GBContext* gb_context_create(const GBConfig* config) {
     if (!gb_is_cgb_hardware(ctx)) {
         ctx->config.cgb_compatibility_mode = false;
     }
+    ctx->cgb_compat_palette_override = -1;  /* -1 = AUTO (use title-hash LUT) */
     
     ctx->wram = (uint8_t*)calloc(1, WRAM_BANK_SIZE * 8);
     ctx->vram = (uint8_t*)calloc(1, VRAM_SIZE * 2);
@@ -1162,7 +1163,13 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
             want_sgb_engine = true;
             break;
         case GB_HARDWARE_MODE_CGB:
-            want_cgb = cart_supports_cgb || cart_requires_cgb;
+            /* Real CGB hardware runs any DMG cart in compat mode — it
+             * doesn't refuse based on cart byte 0x143. When the user
+             * explicitly picks CGB, trust them and engage the
+             * compatibility palette path so the cart gets the BIOS-
+             * curated colorization (or a user-chosen preset). Same
+             * principle as the explicit-SGB branch above. */
+            want_cgb = true;
             want_sgb_engine = false;
             break;
         case GB_HARDWARE_MODE_AUTO:

@@ -2739,9 +2739,55 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("(restart needed)");
         }
 
-        if (ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names))) {
-            set_active_game_pref_int("palette", g_palette_idx);
-            save_runtime_preferences();
+        /* Custom Palette: 4-color framebuffer post-remap that looks for
+         * the DMG-green values and rewrites them. Only meaningful when
+         * the PPU is actually emitting DMG-green pixels — in CGB
+         * hardware mode the PPU uses CGB palette RAM so the values
+         * never match and the remap is a silent no-op. Hide it there. */
+        if (g_active_hardware_mode_pref != GB_HARDWARE_MODE_CGB) {
+            if (ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names))) {
+                set_active_game_pref_int("palette", g_palette_idx);
+                save_runtime_preferences();
+            }
+        }
+
+        /* CGB BIOS Palette: only relevant when a DMG cart is running on
+         * CGB hardware. Default "Auto" runs the cart's title-hash
+         * through the BIOS LUT (Nintendo-curated palette for ~80 known
+         * games, "Brown" default for the rest); the rest force one of
+         * the 12 button-combo presets a real CGB picks when you hold
+         * a button at boot. */
+        if (g_active_hardware_mode_pref == GB_HARDWARE_MODE_CGB &&
+            g_registered_ctx &&
+            !g_registered_ctx->config.cartridge_supports_cgb) {
+            /* Color names follow the canonical CGB BIOS labels (Brown,
+             * Pastel Mix, Inverted, etc.) — the button combo each
+             * corresponds to on real hardware is shown alongside so
+             * the mapping is unambiguous. */
+            static const char* cgb_pal_names[] = {
+                "Auto",
+                "Green (Right)",        "Blue (Left)",
+                "Brown (Up)",           "Pastel Mix (Down)",
+                "Dark Green (Right+A)", "Dark Blue (Left+A)",
+                "Red (Up+A)",           "Orange (Down+A)",
+                "Inverted (Right+B)",   "Grayscale (Left+B)",
+                "Dark Brown (Up+B)",    "Yellow (Down+B)",
+            };
+            int cgb_pal_idx = g_registered_ctx->cgb_compat_palette_override + 1;
+            if (cgb_pal_idx < 0 || cgb_pal_idx >= (int)IM_ARRAYSIZE(cgb_pal_names)) {
+                cgb_pal_idx = 0;
+            }
+            if (ImGui::Combo("CGB BIOS Palette", &cgb_pal_idx,
+                             cgb_pal_names, IM_ARRAYSIZE(cgb_pal_names))) {
+                g_registered_ctx->cgb_compat_palette_override = cgb_pal_idx - 1;
+                if (g_registered_ctx->ppu) {
+                    ppu_reload_cgb_compat_palette((GBPPU*)g_registered_ctx->ppu,
+                                                  g_registered_ctx);
+                }
+                set_active_game_pref_int("cgb_palette",
+                                         g_registered_ctx->cgb_compat_palette_override);
+                save_runtime_preferences();
+            }
         }
 
         /* Post-process shader (sharp / smooth / lcd / dmg-green plus any
@@ -4914,6 +4960,15 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
             int idx = atoi(pal->second.c_str());
             if (idx >= 0 && idx < (int)IM_ARRAYSIZE(g_palette_names)) {
                 g_palette_idx = idx;
+            }
+        }
+        auto cgbp = prefs.find("cgb_palette");
+        if (cgbp != prefs.end() && ctx) {
+            int idx = atoi(cgbp->second.c_str());
+            /* -1 (AUTO) through 11 (Inverted) — anything else gets
+             * clamped back to AUTO. */
+            if (idx >= -1 && idx <= 11) {
+                ctx->cgb_compat_palette_override = idx;
             }
         }
         auto sha = prefs.find("shader");

@@ -184,8 +184,38 @@ static uint8_t compat_title_checksum(const GBContext* ctx) {
     return checksum;
 }
 
+/* User-pickable presets: same set the real CGB BIOS would apply when
+ * the user holds a button combo at boot. Order matches the dropdown
+ * in the Esc menu. Color labels follow the canonical CGB names
+ * (Brown for Up, Pastel Mix for Down, etc.).
+ *
+ * Combo numbers reference SameBoy's PaletteCombinations table
+ * (cgb_boot.asm:445); KeyCombinationPalettes (line 544) maps each
+ * button-hold to one of those entries. */
+static const uint8_t compat_palette_override_combos[] = {
+     1,  /*  0 Green       (Right)    */
+    48,  /*  1 Blue        (Left)     */
+     5,  /*  2 Brown       (Up)       */
+     8,  /*  3 Pastel Mix  (Down)     */
+     0,  /*  4 Dark Green  (Right+A)  */
+    40,  /*  5 Dark Blue   (Left+A)   */
+    43,  /*  6 Red         (Up+A)     */
+     3,  /*  7 Orange      (Down+A)   */
+     6,  /*  8 Inverted    (Right+B)  */
+     7,  /*  9 Grayscale   (Left+B)   */
+    28,  /* 10 Dark Brown  (Up+B)     */
+    49,  /* 11 Yellow      (Down+B)   */
+};
+#define COMPAT_PALETTE_OVERRIDE_COUNT \
+    ((int)(sizeof(compat_palette_override_combos) / sizeof(compat_palette_override_combos[0])))
+
 static uint8_t compat_palette_index(const GBContext* ctx) {
     uint8_t checksum;
+
+    if (ctx && ctx->cgb_compat_palette_override >= 0 &&
+        ctx->cgb_compat_palette_override < COMPAT_PALETTE_OVERRIDE_COUNT) {
+        return compat_palette_override_combos[ctx->cgb_compat_palette_override];
+    }
 
     if (!compat_license_is_nintendo(ctx)) {
         return 0;
@@ -226,6 +256,13 @@ static void ppu_fill_palette_ram(uint8_t* palette_ram, uint16_t color) {
             palette_ram[index + 1] = (uint8_t)(color >> 8);
         }
     }
+}
+
+static void ppu_load_compatibility_palettes(GBPPU* ppu, const GBContext* ctx);
+
+void ppu_reload_cgb_compat_palette(GBPPU* ppu, const GBContext* ctx) {
+    if (!ppu || !ppu_is_cgb_compat_mode(ctx)) return;
+    ppu_load_compatibility_palettes(ppu, ctx);
 }
 
 static void ppu_load_compatibility_palettes(GBPPU* ppu, const GBContext* ctx) {

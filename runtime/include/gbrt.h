@@ -228,7 +228,18 @@ typedef struct GBContext {
      * <game>_init call. gb_context_load_rom honors it when deciding
      * the SGB-vs-CGB conflict for dual-mode carts. */
     GBHardwareModePref hardware_mode_pref;
-    
+
+    /* CGB BIOS palette override for mono carts running in CGB compat
+     * mode. -1 = AUTO (use title-hash LUT, matches real CGB BIOS
+     * behavior); 0..11 force one of the 12 canonical color presets:
+     *   0 Green (Right)        1 Blue (Left)        2 Brown (Up)
+     *   3 Pastel Mix (Down)    4 Dark Green (R+A)   5 Dark Blue (L+A)
+     *   6 Red (U+A)            7 Orange (D+A)       8 Inverted (R+B)
+     *   9 Grayscale (L+B)     10 Dark Brown (U+B)  11 Yellow (D+B)
+     * Set by the platform layer between gb_context_create and the
+     * recompiled <game>_init call, like hardware_mode_pref above. */
+    int cgb_compat_palette_override;
+
     /* MBC state */
     uint8_t mbc_type;
     uint8_t ram_enabled;

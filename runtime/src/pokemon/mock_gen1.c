@@ -28,11 +28,13 @@ typedef struct {
     int         title_prefix_len;
     /* ROM addresses (banked) */
     uint8_t  rom_bank_base_stats;
-    uint16_t rom_off_base_stats;    /* BaseStats */
+    uint16_t rom_off_base_stats;    /* BaseStats — keyed by pokedex# */
     uint8_t  rom_bank_names;
-    uint16_t rom_off_names;         /* MonsterNames */
+    uint16_t rom_off_names;         /* MonsterNames — keyed by pokedex# */
     uint8_t  rom_bank_evos;
-    uint16_t rom_off_evos;          /* EvosMovesPointerTable */
+    uint16_t rom_off_evos;          /* EvosMovesPointerTable — by pokedex# */
+    uint8_t  rom_bank_dex_order;
+    uint16_t rom_off_dex_order;     /* PokedexOrder — internal_id → dex# */
     /* WRAM offsets (Gen 1 doesn't use CGB WRAM banking — all in
      * the fixed $D000-$DFFF region, which lives at offset 0x1000
      * in our flat 8-bank buffer). */
@@ -51,6 +53,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x0E, 0x43DE,
         0x07, 0x421E,
         0x0E, 0x705C,
+        0x10, 0x5024,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
     },
     {
@@ -58,6 +61,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x0E, 0x43DE,
         0x07, 0x421E,
         0x0E, 0x705C,
+        0x10, 0x5024,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
     },
     {
@@ -65,6 +69,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x0E, 0x43DE,
         0x3A, 0x4000,
         0x0E, 0x71E5,
+        0x10, 0x50B1,
         0xD162, 0xD163, 0xD16A, 0xD272, 0xD2B4, 0xD358, 0xD157,
     },
 };
@@ -107,6 +112,28 @@ static size_t rom_addr(uint8_t bank, uint16_t addr) {
 static void ensure_rng_seeded(void) {
     static bool seeded = false;
     if (!seeded) { srand((unsigned int)time(NULL)); seeded = true; }
+}
+
+/* Gen 1 stores Pokemon by INTERNAL hex ID (e.g. Rhydon=$01, Gastly=$19,
+ * Mew=$15), not by pokedex number. The user-facing builder picks by dex
+ * number (1..151), and the cart's BaseStats / EvosMoves / MonsterNames
+ * tables are all dex-keyed, so dex is the right form for ROM reads.
+ * Party-slot bytes (wPartySpecies, MON_SPECIES) need the internal ID
+ * instead — without this translation the cart looks up the wrong row
+ * in every per-species table at runtime (moves, base stats, name).
+ *
+ * PokedexOrder is a table mapping internal_id (1-based) → dex#. To
+ * find the internal ID for a given dex#, scan the table for the first
+ * row whose value equals dex#. The table includes ~190 entries
+ * (MissingNo slots) so we cap the scan at a generous 200. */
+static int dex_to_internal(const GBContext* ctx, const GBGen1Info* c, int dex) {
+    if (dex < 1 || dex > GB_MOCK_GEN1_SPECIES_COUNT) return -1;
+    size_t base = rom_addr(c->rom_bank_dex_order, c->rom_off_dex_order);
+    for (int i = 0; i < 200; i++) {
+        if (base + i >= ctx->rom_size) break;
+        if (ctx->rom[base + i] == (uint8_t)dex) return i + 1; /* 1-based */
+    }
+    return -1;
 }
 
 uint8_t gb_mock_gen1_party_count(const GBContext* ctx) {
@@ -196,10 +223,12 @@ static uint32_t exp_for_level(uint8_t growth_rate, int level) {
 
 static int read_learnset(const GBContext* ctx, const GBGen1Info* c,
                          int species, int level, uint8_t moves[4]) {
-    /* Gen 1 each species's "starting moves" are stored in BaseStats at
-     * offset +15..+18 (4 moves). The level-up additions are in
-     * EvosMoves. Start with the base moves, then append level-up
-     * learns up to chosen level, keeping the last 4. */
+    /* Gen 1 each species's "starting moves" live in BaseStats at
+     * offset +15..+18 (4 moves). Level-up additions are in
+     * EvosMovesPointerTable. BaseStats is dex-indexed but the
+     * EvosMoves pointer table is INTERNAL-indexed (matching
+     * MonsterNames). Without the dex→internal translation we'd
+     * end up with the wrong species's learnset. */
     memset(moves, 0, 4);
     if (species < 1 || species > GB_MOCK_GEN1_SPECIES_COUNT) return 0;
 
@@ -208,9 +237,11 @@ static int read_learnset(const GBContext* ctx, const GBGen1Info* c,
     if (base_off + 4 > ctx->rom_size) return 0;
     memcpy(moves, &ctx->rom[base_off], 4);
 
-    /* EvosMovesPointerTable — 151 entries × 2 bytes. */
+    int internal = dex_to_internal(ctx, c, species);
+    if (internal < 1) return 4;
+    /* EvosMovesPointerTable — internal-indexed, 2 bytes/entry. */
     size_t ptr_off = rom_addr(c->rom_bank_evos, c->rom_off_evos) +
-                     (size_t)(species - 1) * 2;
+                     (size_t)(internal - 1) * 2;
     if (ptr_off + 2 > ctx->rom_size) return 0;
     uint16_t data_addr = (uint16_t)(ctx->rom[ptr_off] |
                                     (ctx->rom[ptr_off + 1] << 8));
@@ -250,8 +281,14 @@ bool gb_mock_gen1_species_name(const GBContext* ctx, int species,
     const GBGen1Info* c = gen1_info(ctx);
     if (!c || !ctx->rom) return false;
     if (species < 1 || species > GB_MOCK_GEN1_SPECIES_COUNT) return false;
+    /* MonsterNames is INTERNAL-indexed in Gen 1, not dex-indexed.
+     * Same trap as EvosMovesPointerTable. Translate dex → internal
+     * before computing the offset, otherwise the dropdown labels
+     * disagree with the species the cart actually receives. */
+    int internal = dex_to_internal(ctx, c, species);
+    if (internal < 1) return false;
     size_t off = rom_addr(c->rom_bank_names, c->rom_off_names) +
-                 (size_t)(species - 1) * 10;
+                 (size_t)(internal - 1) * 10;
     if (off + 10 > ctx->rom_size) return false;
     size_t i;
     for (i = 0; i < 10; i++) {
@@ -272,6 +309,9 @@ bool gb_mock_gen1_inject_builder(GBContext* ctx, int species,
 
     uint8_t party_count = gb_mock_gen1_party_count(ctx);
     if (party_count >= PARTY_LENGTH) return false;
+
+    int internal = dex_to_internal(ctx, c, species);
+    if (internal < 1) return false;  /* dex_id not in PokedexOrder */
 
     uint8_t base[5];      /* HP, Atk, Def, Spd, Spc */
     uint8_t types[2];
@@ -296,7 +336,7 @@ bool gb_mock_gen1_inject_builder(GBContext* ctx, int species,
     /* Build the 44-byte party struct. Field offsets per
      * pokered/macros/ram.asm — box_struct + party-only tail. */
     uint8_t mon[PARTYMON_STRUCT_LEN] = {0};
-    mon[0]  = (uint8_t)species;         /* MON_SPECIES */
+    mon[0]  = (uint8_t)internal;        /* MON_SPECIES (internal hex ID) */
     mon[1]  = (uint8_t)(hp >> 8);       /* MON_HP (current) */
     mon[2]  = (uint8_t)(hp & 0xFF);
     mon[3]  = (uint8_t)level;           /* MON_BOX_LEVEL — kept in sync */
@@ -326,9 +366,11 @@ bool gb_mock_gen1_inject_builder(GBContext* ctx, int species,
                        (size_t)party_count * PARTYMON_STRUCT_LEN;
     memcpy(mon_dst, mon, PARTYMON_STRUCT_LEN);
 
-    /* Nickname: species name. */
+    /* Nickname: species name. MonsterNames is internal-indexed
+     * (see species_name above), so use the already-computed
+     * `internal` value rather than dex `species`. */
     size_t name_off = rom_addr(c->rom_bank_names, c->rom_off_names) +
-                      (size_t)(species - 1) * 10;
+                      (size_t)(internal - 1) * 10;
     uint8_t* nick_dst = wram_ptr(ctx, c->wram_party_nicks) +
                         (size_t)party_count * MON_NAME_LEN;
     memset(nick_dst, 0x50, MON_NAME_LEN);
@@ -343,18 +385,18 @@ bool gb_mock_gen1_inject_builder(GBContext* ctx, int species,
                (size_t)party_count * MON_NAME_LEN,
            wram_cptr(ctx, c->wram_player_name), MON_NAME_LEN);
 
-    /* wPartySpecies[party_count] = species; terminator at next. */
+    /* wPartySpecies[party_count] = internal hex ID; terminator next. */
     uint8_t* species_arr = wram_ptr(ctx, c->wram_party_species);
-    species_arr[party_count] = (uint8_t)species;
+    species_arr[party_count] = (uint8_t)internal;
     species_arr[party_count + 1] = 0xFF;
 
     /* Increment wPartyCount last. */
     ctx->wram[0x1000 + (c->wram_party_count - 0xD000)] = party_count + 1;
 
     fprintf(stderr,
-            "[gen1/%s] Built species=%d level=%d shiny=%d → slot %d "
-            "(H/A/D/S/Sp=%d/%d/%d/%d/%d)\n",
-            c->title_prefix, species, level, shiny ? 1 : 0, party_count,
-            hp, at, df, sp, sc);
+            "[gen1/%s] Built dex=%d internal=$%02X level=%d shiny=%d "
+            "→ slot %d (H/A/D/S/Sp=%d/%d/%d/%d/%d)\n",
+            c->title_prefix, species, internal, level, shiny ? 1 : 0,
+            party_count, hp, at, df, sp, sc);
     return true;
 }

@@ -1153,7 +1153,13 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
             break;
         case GB_HARDWARE_MODE_SGB:
             want_cgb = false;
-            want_sgb_engine = cart_supports_sgb;
+            /* Real SGB hardware doesn't consult cart byte 0x146 — it
+             * just runs every DMG cart with SGB hooks active. Some
+             * mono carts (e.g. original Link's Awakening Rev 2) issue
+             * SGB commands at runtime without advertising support in
+             * the header. When the user explicitly picks SGB mode,
+             * trust them and start the engine regardless of the byte. */
+            want_sgb_engine = true;
             break;
         case GB_HARDWARE_MODE_CGB:
             want_cgb = cart_supports_cgb || cart_requires_cgb;

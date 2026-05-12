@@ -211,6 +211,10 @@ uint8_t gb_sgb_last_command(const GBSgbState* sgb) {
     return sgb ? sgb->last_command : 0;
 }
 
+bool gb_sgb_palettes_active(const GBSgbState* sgb) {
+    return sgb && sgb->palettes_active;
+}
+
 /* ---------------- packet dispatch ---------------- */
 
 static void sgb_handle_mlt_req(GBSgbState* sgb, const uint8_t* packet) {

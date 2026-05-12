@@ -97,6 +97,14 @@ uint32_t gb_sgb_packet_count(const GBSgbState* sgb);
 uint8_t gb_sgb_last_command(const GBSgbState* sgb);
 
 /**
+ * Whether the cart has ever sent a palette/attribute command this session.
+ * Used by the menu to hide the SGB Colors toggle on carts that turn out
+ * not to use SGB features at runtime (header byte 0x146 isn't always
+ * authoritative — some mono carts ship without it set).
+ */
+bool gb_sgb_palettes_active(const GBSgbState* sgb);
+
+/**
  * Apply the active SGB palettes + per-tile attribute grid to the PPU's
  * framebuffer. Call once per frame, after the PPU has finished rendering
  * scanlines and before the runtime converts color_framebuffer to RGBA.

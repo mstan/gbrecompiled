@@ -2771,13 +2771,18 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         }
 
         /* Three optional toggles laid out inline. Each only appears
-         * when it's actually applicable: SGB Colors only matters in
-         * SGB hardware mode; SGB Cart Border only when the engine has
-         * decoded one (or a cache loaded); Custom PNG Border only
-         * when there's at least one PNG in borders/. Hiding the
-         * irrelevant ones keeps the menu honest. */
+         * when it's actually applicable: SGB Colors only when the
+         * engine is on AND the cart has actually issued a PAL/ATTR
+         * command this session (covers e.g. mono LA which ships
+         * SGB-flagless and never sends color commands — toggling
+         * "SGB Colors" there would be a no-op); SGB Cart Border only
+         * when the engine has decoded one (or a cache loaded); Custom
+         * PNG Border only when there's at least one PNG in borders/.
+         * Hiding the irrelevant ones keeps the menu honest. */
         const bool show_sgb_colors_toggle =
-            (g_active_hardware_mode_pref == GB_HARDWARE_MODE_SGB);
+            (g_active_hardware_mode_pref == GB_HARDWARE_MODE_SGB) &&
+            g_registered_ctx && g_registered_ctx->sgb &&
+            gb_sgb_palettes_active((GBSgbState*)g_registered_ctx->sgb);
         const bool show_sgb_border_toggle = g_sgb_cart_border_texture != 0;
         const bool show_custom_border_toggle = !g_border_files.empty();
         bool placed_any = false;

@@ -84,6 +84,12 @@ static bool g_show_menu = false;
 static bool g_show_overlay = false;
 static int g_speed_percent = 100;
 static int g_palette_idx = 0;
+/* Color correction: 0=Off, 1=GBC (modern LCDs viewing GBC-tinted output),
+ * 2=GBA (compensate for AGB LCD's darker / washed-out look). Applied
+ * per-pixel during the framebuffer upload. Defaults to Off but gets
+ * auto-bumped to a matching mode when the user picks CGB / GBA
+ * hardware. Only relevant in CGB/GBA hardware modes — hidden in DMG/SGB. */
+static int g_color_correction = 0;
 static bool g_smooth_lcd_transitions = true;
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
@@ -2554,6 +2560,32 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
          * dropdown a silent no-op. */
         const uint32_t orig[4] = { 0xFFE6F6CDu, 0xFF73BD62u, 0xFF319C52u, 0xFF081010u };
         const uint32_t* pal = (g_palette_idx == 0) ? NULL : g_palettes[g_palette_idx];
+
+        /* Color correction matrices applied per-pixel.
+         *
+         *   GBC mode: viewing original-CGB-cartridge output on a modern
+         *   sRGB display. Real CGB LCDs had crushed saturation; the cart
+         *   art was tuned for that. Modern displays show those values
+         *   too vibrantly, so we desaturate slightly.
+         *
+         *   GBA mode: the AGB LCD was darker and bluer than the CGB
+         *   LCD. Games shipped for GBC look oversaturated on a real
+         *   GBA. This matrix gives the on-GBA look back. From mGBA's
+         *   GBA color correction; gamma is approximated as a linear
+         *   scale to keep this in integer math.
+         *
+         * Both matrices are normalized so the [0..255] output range
+         * stays in bounds. Coefficients * 1024 to fit uint16 multiply. */
+        static const int16_t cc_gbc[9] = {
+            /*  R from R,G,B   G from R,G,B   B from R,G,B */
+              893, 123,   8,    102,  840,  82,    102,  133,  789,
+        };
+        static const int16_t cc_gba[9] = {
+              860, 169,  -5,     92,  676, 256,     92,  261,  671,
+        };
+        const int16_t* cc = (g_color_correction == 1) ? cc_gbc :
+                            (g_color_correction == 2) ? cc_gba : NULL;
+
         for (int i = 0; i < GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT; i++) {
             uint32_t c = src[i];
             if (pal) {
@@ -2562,11 +2594,20 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 else if (c == orig[2]) c = pal[2];
                 else if (c == orig[3]) c = pal[3];
             }
-            /* ARGB → RGBA: swap R<->B, keep G and A. */
             uint32_t a = c & 0xFF000000u;
             uint32_t r = (c >> 16) & 0xFFu;
             uint32_t g = (c >>  8) & 0xFFu;
             uint32_t b =  c        & 0xFFu;
+            if (cc) {
+                int rn = ((int)r * cc[0] + (int)g * cc[1] + (int)b * cc[2]) >> 10;
+                int gn = ((int)r * cc[3] + (int)g * cc[4] + (int)b * cc[5]) >> 10;
+                int bn = ((int)r * cc[6] + (int)g * cc[7] + (int)b * cc[8]) >> 10;
+                if (rn < 0) rn = 0; else if (rn > 255) rn = 255;
+                if (gn < 0) gn = 0; else if (gn > 255) gn = 255;
+                if (bn < 0) bn = 0; else if (bn > 255) bn = 255;
+                r = (uint32_t)rn; g = (uint32_t)gn; b = (uint32_t)bn;
+            }
+            /* ARGB → RGBA: swap R<->B, keep G and A. */
             s_upload_buf[i] = a | (b << 16) | (g << 8) | r;
         }
     }
@@ -2720,9 +2761,10 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
          * apply on the next launch. The dropdown shows the cart's
          * resolved default until the user picks something else. */
         if (!g_active_game_id.empty()) {
-            static const char* hw_mode_labels[] = { "DMG", "SGB", "CGB" };
+            static const char* hw_mode_labels[] = { "DMG", "SGB", "CGB", "GBA" };
             static const GBHardwareModePref hw_mode_values[] = {
-                GB_HARDWARE_MODE_DMG, GB_HARDWARE_MODE_SGB, GB_HARDWARE_MODE_CGB,
+                GB_HARDWARE_MODE_DMG, GB_HARDWARE_MODE_SGB,
+                GB_HARDWARE_MODE_CGB, GB_HARDWARE_MODE_GBA,
             };
             int hw_mode_idx = 0;
             for (int i = 0; i < (int)IM_ARRAYSIZE(hw_mode_values); i++) {
@@ -2741,10 +2783,11 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
         /* Custom Palette: 4-color framebuffer post-remap that looks for
          * the DMG-green values and rewrites them. Only meaningful when
-         * the PPU is actually emitting DMG-green pixels — in CGB
-         * hardware mode the PPU uses CGB palette RAM so the values
-         * never match and the remap is a silent no-op. Hide it there. */
-        if (g_active_hardware_mode_pref != GB_HARDWARE_MODE_CGB) {
+         * the PPU is actually emitting DMG-green pixels — in CGB or
+         * GBA hardware mode the PPU uses CGB palette RAM so the
+         * values never match and the remap is a silent no-op. */
+        if (g_active_hardware_mode_pref != GB_HARDWARE_MODE_CGB &&
+            g_active_hardware_mode_pref != GB_HARDWARE_MODE_GBA) {
             if (ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names))) {
                 set_active_game_pref_int("palette", g_palette_idx);
                 save_runtime_preferences();
@@ -2757,7 +2800,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
          * games, "Brown" default for the rest); the rest force one of
          * the 12 button-combo presets a real CGB picks when you hold
          * a button at boot. */
-        if (g_active_hardware_mode_pref == GB_HARDWARE_MODE_CGB &&
+        if ((g_active_hardware_mode_pref == GB_HARDWARE_MODE_CGB ||
+             g_active_hardware_mode_pref == GB_HARDWARE_MODE_GBA) &&
             g_registered_ctx &&
             !g_registered_ctx->config.cartridge_supports_cgb) {
             /* Color names follow the canonical CGB BIOS labels (Brown,
@@ -2786,6 +2830,22 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 }
                 set_active_game_pref_int("cgb_palette",
                                          g_registered_ctx->cgb_compat_palette_override);
+                save_runtime_preferences();
+            }
+        }
+
+        /* Color Correction: only visible in CGB / GBA hardware modes
+         * (DMG and SGB output goes through different paths). Off is
+         * the raw PPU output; GBC matches what an original CGB LCD
+         * would show; GBA compensates for the AGB LCD's washed-out
+         * look. Defaults auto-pick a sensible mode based on hardware
+         * mode at game-load time. */
+        if (g_active_hardware_mode_pref == GB_HARDWARE_MODE_CGB ||
+            g_active_hardware_mode_pref == GB_HARDWARE_MODE_GBA) {
+            static const char* cc_names[] = { "Off", "GBC", "GBA" };
+            if (ImGui::Combo("Color Correction", &g_color_correction,
+                             cc_names, IM_ARRAYSIZE(cc_names))) {
+                set_active_game_pref_int("color_correction", g_color_correction);
                 save_runtime_preferences();
             }
         }
@@ -4905,6 +4965,7 @@ static GBHardwareModePref hardware_mode_pref_from_string(const std::string& s) {
     if (s == "dmg") return GB_HARDWARE_MODE_DMG;
     if (s == "sgb") return GB_HARDWARE_MODE_SGB;
     if (s == "cgb") return GB_HARDWARE_MODE_CGB;
+    if (s == "gba") return GB_HARDWARE_MODE_GBA;
     return GB_HARDWARE_MODE_AUTO;
 }
 static const char* hardware_mode_pref_to_string(GBHardwareModePref mode) {
@@ -4912,6 +4973,7 @@ static const char* hardware_mode_pref_to_string(GBHardwareModePref mode) {
         case GB_HARDWARE_MODE_DMG: return "dmg";
         case GB_HARDWARE_MODE_SGB: return "sgb";
         case GB_HARDWARE_MODE_CGB: return "cgb";
+        case GB_HARDWARE_MODE_GBA: return "gba";
         case GB_HARDWARE_MODE_AUTO:
         default:                   return "auto";
     }
@@ -4969,6 +5031,24 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
              * clamped back to AUTO. */
             if (idx >= -1 && idx <= 11) {
                 ctx->cgb_compat_palette_override = idx;
+            }
+        }
+        auto cc = prefs.find("color_correction");
+        if (cc != prefs.end()) {
+            int idx = atoi(cc->second.c_str());
+            if (idx >= 0 && idx <= 2) {
+                g_color_correction = idx;
+            }
+        } else {
+            /* No saved choice — pick a sensible default from hardware
+             * mode. GBA picks GBA correction; CGB picks GBC; everything
+             * else stays Off (irrelevant in DMG/SGB anyway). */
+            if (g_active_hardware_mode_pref == GB_HARDWARE_MODE_GBA) {
+                g_color_correction = 2;
+            } else if (g_active_hardware_mode_pref == GB_HARDWARE_MODE_CGB) {
+                g_color_correction = 1;
+            } else {
+                g_color_correction = 0;
             }
         }
         auto sha = prefs.find("shader");

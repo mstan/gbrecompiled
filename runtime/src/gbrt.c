@@ -1048,7 +1048,12 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
 
         if (gb_is_cgb_mode(ctx)) {
             ctx->af = 0x1180;
-            ctx->bc = 0x0000;
+            /* Register B = 0x00 on CGB, 0x01 on GBA-running-CGB-cart.
+             * A few CGB carts read this to detect GBA — Pokemon
+             * Crystal blocks the mobile adapter on GBA, DKC GBC
+             * refuses to boot, etc. PPU/MBC behavior is otherwise
+             * identical to CGB. */
+            ctx->bc = ctx->gba_mode ? 0x0100 : 0x0000;
             ctx->de = 0xFF56;
             ctx->hl = 0x000D;
             ctx->div_counter = 0x0000;
@@ -1163,12 +1168,13 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
             want_sgb_engine = true;
             break;
         case GB_HARDWARE_MODE_CGB:
-            /* Real CGB hardware runs any DMG cart in compat mode — it
-             * doesn't refuse based on cart byte 0x143. When the user
-             * explicitly picks CGB, trust them and engage the
-             * compatibility palette path so the cart gets the BIOS-
-             * curated colorization (or a user-chosen preset). Same
-             * principle as the explicit-SGB branch above. */
+        case GB_HARDWARE_MODE_GBA:
+            /* Real CGB / GBA hardware runs any DMG cart in compat mode
+             * — they don't refuse based on cart byte 0x143. When the
+             * user explicitly picks one, trust them and engage the
+             * compatibility palette path. GBA only differs from CGB
+             * at boot-register init (handled in gb_context_reset);
+             * everything else — PPU, MBC, audio — is the same chip. */
             want_cgb = true;
             want_sgb_engine = false;
             break;
@@ -1193,6 +1199,8 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
             }
             break;
     }
+
+    ctx->gba_mode = (ctx->hardware_mode_pref == GB_HARDWARE_MODE_GBA);
 
     bool need_reset = false;
     if (want_cgb) {

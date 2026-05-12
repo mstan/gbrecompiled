@@ -52,6 +52,13 @@ typedef enum {
     GB_HARDWARE_MODE_DMG,
     GB_HARDWARE_MODE_SGB,
     GB_HARDWARE_MODE_CGB,
+    /* GBA mode behaves identically to CGB at the PPU/MBC level — it's
+     * still a CGB cart running. The only difference is that the real
+     * GBA boots a GBC cart with CPU register B = 0x01 (vs CGB's 0x00),
+     * which a handful of carts read to gate GBA-specific behavior
+     * (e.g. Pokemon Crystal blocks the mobile adapter on GBA, DKC GBC
+     * refuses to run). Picking this mode flips that flag. */
+    GB_HARDWARE_MODE_GBA,
 } GBHardwareModePref;
 
 /**
@@ -228,6 +235,14 @@ typedef struct GBContext {
      * <game>_init call. gb_context_load_rom honors it when deciding
      * the SGB-vs-CGB conflict for dual-mode carts. */
     GBHardwareModePref hardware_mode_pref;
+
+    /* Identify as GBA-running-GBC-cart at boot. PPU/MBC behavior is
+     * identical to CGB; only effect is register B = 0x01 (vs CGB's
+     * 0x00) at reset. A handful of GBC carts read this to gate
+     * GBA-specific behavior (Pokemon Crystal blocks the mobile
+     * adapter; DKC GBC refuses to run). Set by gb_context_load_rom
+     * when hardware_mode_pref == GBA. */
+    bool gba_mode;
 
     /* CGB BIOS palette override for mono carts running in CGB compat
      * mode. -1 = AUTO (use title-hash LUT, matches real CGB BIOS

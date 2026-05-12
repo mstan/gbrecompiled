@@ -13,6 +13,7 @@
 #include "sgb.h"
 #include "relay_client.h"
 #include "mock_ir.h"
+#include "mock_crystal.h"
 #ifdef GBRT_HAVE_GBCAM
 #include "gbcam.h"
 #endif
@@ -3010,6 +3011,34 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
 
             ImGui::TextDisabled("Queued: %s", gb_mock_ir_queue_label());
+        }
+
+        /* Mobile Adapter event triggers — Crystal-only. The cart already
+         * has the full GS Ball → Kurt → Ilex → Celebi script chain; only
+         * the flag that the Goldenrod NPC checks was disabled in the
+         * US/EU localization (it relied on the JP-only Mobile Adapter
+         * GB). One click writes the flag directly into SRAM bank 1, same
+         * end result as sceptios/pokecrystal's HoF-time SRAM write. */
+        if (gb_mock_crystal_active(g_registered_ctx)) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Mobile Events");
+            bool celebi_caught = gb_mock_crystal_celebi_caught(g_registered_ctx);
+            const char* button_label = celebi_caught
+                ? "Re-arm GS Ball event##gsball"
+                : "Trigger GS Ball event##gsball";
+            if (ImGui::Button(button_label)) {
+                gb_mock_crystal_apply_gs_ball(g_registered_ctx);
+            }
+            /* Status line — re-read every frame, so a successful click
+             * flips this immediately to "Armed" without having to
+             * walk to Goldenrod to verify. */
+            uint8_t gs_flag = gb_mock_crystal_gs_ball_flag(g_registered_ctx);
+            ImGui::TextDisabled("Status: %s (sGSBallFlag = 0x%02X)",
+                                gb_mock_crystal_gs_ball_state_label(g_registered_ctx),
+                                gs_flag);
+            if (celebi_caught) {
+                ImGui::TextDisabled("Celebi was already caught — pressing this re-arms the event so you can encounter it again.");
+            }
         }
 
 #ifdef GBRT_HAVE_GBCAM

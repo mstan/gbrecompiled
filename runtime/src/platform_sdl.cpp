@@ -2960,7 +2960,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
             if (!cycler_enabled) ImGui::EndDisabled();
         } else {
+            ImGui::PushTextWrapPos(0.0f);
             ImGui::TextDisabled("Drop 256x224 PNGs into a borders/ folder next to the executable or working directory, then restart for a custom screen border.");
+            ImGui::PopTextWrapPos();
         }
 
         /* Mystery Gift mock — only visible on Pokemon Gen 2 carts. Two
@@ -3022,6 +3024,10 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (gb_mock_crystal_active(g_registered_ctx)) {
             ImGui::Spacing();
             ImGui::TextDisabled("Mobile Events");
+            /* Wrap all captions in this section to the panel width
+             * — they tend to be one-line explanations longer than
+             * the column. */
+            ImGui::PushTextWrapPos(0.0f);
             bool celebi_caught = gb_mock_crystal_celebi_caught(g_registered_ctx);
             const char* button_label = celebi_caught
                 ? "Re-arm GS Ball event##gsball"
@@ -3039,6 +3045,36 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             if (celebi_caught) {
                 ImGui::TextDisabled("Celebi was already caught — pressing this re-arms the event so you can encounter it again.");
             }
+
+            /* Odd Egg — the second Mobile-only event the US ROM has
+             * payload for. The OddEggs species table is in vanilla
+             * ROM but no NPC ever calls into it. This button reads
+             * the table, rolls one of 7 baby Pokemon using the cart's
+             * own probability weights, and drops it into the next
+             * empty party slot as a hatchable egg.
+             *
+             * Caption tracks the last click result rather than the
+             * live party-full state: after a successful add the
+             * caption reads "Sent" instead of immediately flipping
+             * to "Party full" (which is technically true post-add
+             * but reads as if the button failed). A follow-up click
+             * with a full party flips it to "Party full" then. */
+            static const char* odd_egg_last_msg = NULL;
+            uint8_t party_count = gb_mock_crystal_party_count(g_registered_ctx);
+            if (ImGui::Button("Receive Odd Egg##odd_egg")) {
+                if (gb_mock_crystal_apply_odd_egg(g_registered_ctx)) {
+                    odd_egg_last_msg = "Sent — check your party.";
+                } else {
+                    odd_egg_last_msg = "Party full (6/6) — release or store a Pokemon first.";
+                }
+            }
+            if (odd_egg_last_msg) {
+                ImGui::TextDisabled("%s", odd_egg_last_msg);
+            } else {
+                ImGui::TextDisabled("Party: %d/6. Rolls one of 7 baby Pokemon (Pichu/Cleffa/Igglybuff/Smoochum/Magby/Tyrogue/Elekid) with the original 14%% shiny rate.",
+                                    party_count);
+            }
+            ImGui::PopTextWrapPos();
         }
 
 #ifdef GBRT_HAVE_GBCAM

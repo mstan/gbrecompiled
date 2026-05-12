@@ -52,6 +52,17 @@ uint8_t gb_mock_crystal_gs_ball_flag(const GBContext* ctx);
  * for menu display. Returns a static string. */
 const char* gb_mock_crystal_gs_ball_state_label(const GBContext* ctx);
 
+/* Live wPartyCount from WRAM bank 1. 0xFF if cart isn't Crystal. */
+uint8_t gb_mock_crystal_party_count(const GBContext* ctx);
+
+/* Add a randomly-rolled Odd Egg to the player's party. Returns false
+ * if the cart isn't Crystal or the party is already at 6 Pokemon.
+ * Picks one of 7 baby species (Pichu/Cleffa/Igglybuff/Smoochum/Magby/
+ * Tyrogue/Elekid) using the cart's own probability table (in vanilla
+ * US Crystal ROM at bank 0x7E $7552). Uses 14% shiny rate per the
+ * original Mobile event's design. */
+bool gb_mock_crystal_apply_odd_egg(GBContext* ctx);
+
 #ifdef __cplusplus
 }
 #endif

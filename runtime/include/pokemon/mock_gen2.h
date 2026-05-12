@@ -1,24 +1,24 @@
 /**
- * @file mock_crystal.h
- * @brief Crystal-only runtime event injectors.
+ * @file mock_gen2.h
+ * @brief Runtime injectors for Gen 2 mainline carts (Gold/Silver/Crystal).
  *
- * Pokemon Crystal had several special events that were originally
- * distributed through the Japan-only Mobile Adapter GB (a peripheral
- * the cart talks to via the link port, separate from the IR receiver
- * the Mystery Gift mock in mock_ir.c handles). The US/EU localizations
- * shipped with most of that code intact, just gated behind flags the
- * adapter never gets a chance to set on non-Japanese hardware.
+ * Two flavors of functionality live here:
  *
- * This module offers the same end result without emulating the
- * adapter: a one-call write of the cart-side flag that's all the
- * normal in-game scripts ever cared about.
+ *  1. Generic builder + cart detection (`gb_mock_gen2_*`) — works
+ *     on any of the three Gen 2 carts. Per-cart WRAM and ROM
+ *     offsets are kept in a dispatch table inside the .c file so
+ *     the public API doesn't need to know which cart is loaded.
  *
- * Currently exposes the GS Ball / Celebi event. Other future entries
- * (Egg Ticket, etc.) would go here.
+ *  2. Crystal-only Mobile-Adapter event injectors
+ *     (`gb_mock_crystal_*`) — the GS Ball / Celebi chain and the
+ *     Odd Egg distribution. These features have payload code in
+ *     Crystal but not Gold/Silver, and they hit Crystal-specific
+ *     SRAM/ROM addresses, so they live behind the Crystal-only
+ *     `gb_mock_crystal_active()` gate.
  */
 
-#ifndef MOCK_CRYSTAL_H
-#define MOCK_CRYSTAL_H
+#ifndef MOCK_GEN2_H
+#define MOCK_GEN2_H
 
 #include <stdbool.h>
 #include "gbrt.h"
@@ -27,8 +27,21 @@
 extern "C" {
 #endif
 
+/* Which Gen 2 mainline cart is loaded. Detected by cart-title byte
+ * matching at 0x134-0x143 — same approach as gb_mock_ir_detect. */
+typedef enum {
+    GB_MOCK_GEN2_NONE = 0,
+    GB_MOCK_GEN2_GOLD,
+    GB_MOCK_GEN2_SILVER,
+    GB_MOCK_GEN2_CRYSTAL,
+} GBGen2Game;
+
+GBGen2Game gb_mock_gen2_detect(const GBContext* ctx);
+
 /* True iff the active cart is Pokemon Crystal (US 1.0 / 1.1).
- * Matched by cart title bytes — same approach as gb_mock_ir_detect. */
+ * Thin wrapper for the few features that are Crystal-only (GS Ball
+ * event, Odd Egg distribution). The generic builder, party_count,
+ * and species_name helpers below work on Gold/Silver/Crystal. */
 bool gb_mock_crystal_active(const GBContext* ctx);
 
 /* True iff the Pokedex shows Celebi (#251) as caught in the live
@@ -64,13 +77,17 @@ uint8_t gb_mock_crystal_party_count(const GBContext* ctx);
 bool gb_mock_crystal_apply_odd_egg(GBContext* ctx);
 
 /* Number of valid species (251 for Gen 2). */
-#define GB_MOCK_CRYSTAL_SPECIES_COUNT 251
+#define GB_MOCK_GEN2_SPECIES_COUNT 251
+
+/* Live wPartyCount for the active Gen 2 cart. 0xFF if not Gen 2. */
+uint8_t gb_mock_gen2_party_count(const GBContext* ctx);
 
 /* Decode the Gen 2-charmapped name of a species (1..251) from the
- * cart's PokemonNames table into out (ASCII, NUL-terminated).
- * Out must be at least 11 bytes. Returns false on out-of-range. */
-bool gb_mock_crystal_species_name(const GBContext* ctx, int species,
-                                  char* out, size_t out_size);
+ * active cart's PokemonNames table into out (ASCII, NUL-terminated).
+ * Out must be at least 11 bytes. Returns false on out-of-range or
+ * non-Gen-2 cart. */
+bool gb_mock_gen2_species_name(const GBContext* ctx, int species,
+                               char* out, size_t out_size);
 
 /* Build and inject a Pokemon into the next party slot.
  *   species : 1..251 (1-based dex number)
@@ -80,13 +97,13 @@ bool gb_mock_crystal_species_name(const GBContext* ctx, int species,
  * stats computed via the Gen 2 formula, moves picked as the
  * last-4-learned at the chosen level from the cart's evos/attacks
  * table, OT = player's name+ID, no held item, default happiness.
- * Returns false if the cart isn't Crystal, the party is full, or
+ * Returns false if the cart isn't Gen 2, the party is full, or
  * the species/level is out of range. */
-bool gb_mock_crystal_inject_builder(GBContext* ctx,
-                                    int species, int level, bool shiny);
+bool gb_mock_gen2_inject_builder(GBContext* ctx,
+                                 int species, int level, bool shiny);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif /* MOCK_GEN2_H */

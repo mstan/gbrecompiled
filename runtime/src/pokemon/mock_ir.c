@@ -8,7 +8,7 @@
  * index, so we write the index (0..35) directly into wMysteryGiftPartner
  * WhichItem / WhichDeco and let the cart resolve the actual byte/flag.
  */
-#include "mock_ir.h"
+#include "pokemon/mock_ir.h"
 
 #include "gbrt.h"
 
@@ -61,15 +61,8 @@ const char* gb_mock_ir_deco_name(int index) {
     return DECO_NAMES[index];
 }
 
-GBMockIRGame gb_mock_ir_detect(const struct GBContext* ctx) {
-    if (!ctx || !ctx->rom || ctx->rom_size < 0x144) return GB_MOCK_IR_GAME_NONE;
-    const uint8_t* title = ctx->rom + 0x134;
-    /* Cart title is up to 11 ASCII bytes, NUL-padded. */
-    if (memcmp(title, "POKEMON_GLD", 11) == 0) return GB_MOCK_IR_GAME_GOLD;
-    if (memcmp(title, "POKEMON_SLV", 11) == 0) return GB_MOCK_IR_GAME_SILVER;
-    if (memcmp(title, "PM_CRYSTAL",  10) == 0) return GB_MOCK_IR_GAME_CRYSTAL;
-    return GB_MOCK_IR_GAME_NONE;
-}
+/* Cart detection is consolidated in mock_gen2.c — this module just
+ * consumes gb_mock_gen2_detect() instead of carrying its own scan. */
 
 static void update_queue_label(void) {
     switch (g_queue_kind) {
@@ -120,11 +113,11 @@ const char* gb_mock_ir_queue_label(void) {
 
 /* Per-cart base address of wMysteryGiftPartnerData. Layout is identical
  * across the three Gen 2 carts; only the WRAM offset differs. */
-static uint16_t partner_data_addr(GBMockIRGame game) {
+static uint16_t partner_data_addr(GBGen2Game game) {
     switch (game) {
-    case GB_MOCK_IR_GAME_GOLD:
-    case GB_MOCK_IR_GAME_SILVER:  return 0xC800;
-    case GB_MOCK_IR_GAME_CRYSTAL: return 0xC900;
+    case GB_MOCK_GEN2_GOLD:
+    case GB_MOCK_GEN2_SILVER:  return 0xC800;
+    case GB_MOCK_GEN2_CRYSTAL: return 0xC900;
     default:                      return 0;
     }
 }
@@ -160,7 +153,7 @@ static const char* const FAKE_PARTNERS[] = {
 };
 #define FAKE_PARTNER_COUNT ((int)(sizeof(FAKE_PARTNERS) / sizeof(FAKE_PARTNERS[0])))
 
-bool gb_mock_ir_apply_partner(struct GBContext* ctx, GBMockIRGame game) {
+bool gb_mock_ir_apply_partner(struct GBContext* ctx, GBGen2Game game) {
     uint16_t base = partner_data_addr(game);
     if (!ctx || base == 0) return false;
 
@@ -224,16 +217,16 @@ bool gb_mock_ir_apply_partner(struct GBContext* ctx, GBMockIRGame game) {
  */
 #define MG_OKAY 0x6C
 
-static bool is_exchange_mystery_gift_data(GBMockIRGame game, uint8_t bank, uint16_t pc) {
+static bool is_exchange_mystery_gift_data(GBGen2Game game, uint8_t bank, uint16_t pc) {
     switch (game) {
-    case GB_MOCK_IR_GAME_GOLD:
-    case GB_MOCK_IR_GAME_SILVER:  return bank == 0x0A && pc == 0x5FC9;
-    case GB_MOCK_IR_GAME_CRYSTAL: return bank == 0x41 && pc == 0x4A95;
+    case GB_MOCK_GEN2_GOLD:
+    case GB_MOCK_GEN2_SILVER:  return bank == 0x0A && pc == 0x5FC9;
+    case GB_MOCK_GEN2_CRYSTAL: return bank == 0x41 && pc == 0x4A95;
     default:                      return false;
     }
 }
 
-static void apply_mock_mystery_gift(GBContext* ctx, GBMockIRGame game) {
+static void apply_mock_mystery_gift(GBContext* ctx, GBGen2Game game) {
     static int once[4] = {0};
     if (!once[(int)game]) {
         fprintf(stderr, "[MOCK_IR] Mystery Gift delivered (game=%d)\n", (int)game);
@@ -251,9 +244,9 @@ static void apply_mock_mystery_gift(GBContext* ctx, GBMockIRGame game) {
 
 void gb_dispatch(GBContext* ctx, uint16_t addr) {
     uint8_t bank = (addr < 0x4000) ? 0 : (uint8_t)ctx->rom_bank;
-    GBMockIRGame game = gb_mock_ir_detect(ctx);
+    GBGen2Game game = gb_mock_gen2_detect(ctx);
 
-    if (game != GB_MOCK_IR_GAME_NONE &&
+    if (game != GB_MOCK_GEN2_NONE &&
         is_exchange_mystery_gift_data(game, bank, addr)) {
         apply_mock_mystery_gift(ctx, game);
         return;

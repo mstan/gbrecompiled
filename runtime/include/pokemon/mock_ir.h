@@ -28,18 +28,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "pokemon/mock_gen2.h"  /* GBGen2Game cart enum + gb_mock_gen2_detect */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-struct GBContext;
-
-typedef enum {
-    GB_MOCK_IR_GAME_NONE = 0,
-    GB_MOCK_IR_GAME_GOLD,
-    GB_MOCK_IR_GAME_SILVER,
-    GB_MOCK_IR_GAME_CRYSTAL,
-} GBMockIRGame;
 
 typedef enum {
     GB_MOCK_IR_KIND_NONE = 0,  /* nothing queued — apply rolls a random gift */
@@ -55,10 +48,6 @@ typedef enum {
 const char* gb_mock_ir_item_name(int index);
 const char* gb_mock_ir_deco_name(int index);
 
-/* Identify Gen 2 carts by 11-byte cart title at $0134. Returns
- * GB_MOCK_IR_GAME_NONE for everything else. */
-GBMockIRGame gb_mock_ir_detect(const struct GBContext* ctx);
-
 /* Esc-menu side: queue the next gift, or clear, or read what's queued. */
 void        gb_mock_ir_queue(GBMockIRKind kind, int index);
 void        gb_mock_ir_clear_queue(void);
@@ -69,7 +58,7 @@ const char* gb_mock_ir_queue_label(void);  /* for the "Queued: ..." line */
  * nothing is queued, rolls a random gift (~80% item, ~20% decoration to
  * mirror the real cart's RandomSample distribution). After applying, the
  * queue is cleared. Returns true on success. */
-bool gb_mock_ir_apply_partner(struct GBContext* ctx, GBMockIRGame game);
+bool gb_mock_ir_apply_partner(struct GBContext* ctx, GBGen2Game game);
 
 #ifdef __cplusplus
 }

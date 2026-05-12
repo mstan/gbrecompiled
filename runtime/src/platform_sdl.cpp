@@ -12,8 +12,8 @@
 #include "network_discovery.h"
 #include "sgb.h"
 #include "relay_client.h"
-#include "mock_ir.h"
-#include "mock_crystal.h"
+#include "pokemon/mock_ir.h"
+#include "pokemon/mock_gen2.h"
 #ifdef GBRT_HAVE_GBCAM
 #include "gbcam.h"
 #endif
@@ -2960,37 +2960,32 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
 
-        /* Custom-border cycler. Only shown when at least one PNG is
-         * present and the toggle is on. */
+        /* Custom-border picker. Only shown when at least one PNG is
+         * present in the borders/ folder. */
         if (show_custom_border_toggle) {
-            const bool cycler_enabled = g_border_enabled;
-            if (!cycler_enabled) ImGui::BeginDisabled();
+            const bool combo_enabled = g_border_enabled;
+            if (!combo_enabled) ImGui::BeginDisabled();
             const int count = (int)g_border_files.size();
-            if (ImGui::ArrowButton("##border_prev", ImGuiDir_Left)) {
-                g_border_idx = (g_border_idx - 1 + count) % count;
-                apply_border_change();
-                if (g_border_idx >= 0 && g_border_idx < count) {
-                    set_active_game_pref("custom_border_file", g_border_files[g_border_idx]);
+            if (g_border_idx < 0 || g_border_idx >= count) g_border_idx = 0;
+            const char* preview = (count > 0)
+                ? g_border_files[g_border_idx].c_str() : "(none)";
+            if (ImGui::BeginCombo("Border", preview)) {
+                for (int i = 0; i < count; i++) {
+                    bool selected = (i == g_border_idx);
+                    if (ImGui::Selectable(g_border_files[i].c_str(), selected)) {
+                        if (i != g_border_idx) {
+                            g_border_idx = i;
+                            apply_border_change();
+                            set_active_game_pref("custom_border_file",
+                                                 g_border_files[i]);
+                            save_runtime_preferences();
+                        }
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
                 }
-                save_runtime_preferences();
+                ImGui::EndCombo();
             }
-            ImGui::SameLine();
-            const std::string& current_name =
-                (g_border_idx >= 0 && g_border_idx < count)
-                    ? g_border_files[g_border_idx]
-                    : std::string("(none)");
-            ImGui::Text("Border: %s  (%d/%d)", current_name.c_str(),
-                        g_border_idx + 1, count);
-            ImGui::SameLine();
-            if (ImGui::ArrowButton("##border_next", ImGuiDir_Right)) {
-                g_border_idx = (g_border_idx + 1) % count;
-                apply_border_change();
-                if (g_border_idx >= 0 && g_border_idx < count) {
-                    set_active_game_pref("custom_border_file", g_border_files[g_border_idx]);
-                }
-                save_runtime_preferences();
-            }
-            if (!cycler_enabled) ImGui::EndDisabled();
+            if (!combo_enabled) ImGui::EndDisabled();
         } else {
             ImGui::PushTextWrapPos(0.0f);
             ImGui::TextDisabled("Drop 256x224 PNGs into a borders/ folder next to the executable or working directory, then restart for a custom screen border.");
@@ -3001,8 +2996,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
          * carousels (items, decorations) with their own Send buttons; the
          * "queued" gift is delivered the next time the cart enters Mystery
          * Gift IR. If nothing is queued, the mock rolls a random gift. */
-        const GBMockIRGame mg_game = gb_mock_ir_detect(g_registered_ctx);
-        if (mg_game != GB_MOCK_IR_GAME_NONE) {
+        const GBGen2Game mg_game = gb_mock_gen2_detect(g_registered_ctx);
+        if (mg_game != GB_MOCK_GEN2_NONE) {
             ImGui::Spacing();
             ImGui::TextDisabled("Mystery Gift");
 
@@ -3045,12 +3040,14 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         }
 
         /* Mobile Adapter event triggers — Crystal-only. The cart already
-         * has the full GS Ball → Kurt → Ilex → Celebi script chain; only
-         * the flag that the Goldenrod NPC checks was disabled in the
-         * US/EU localization (it relied on the JP-only Mobile Adapter
-         * GB). One click writes the flag directly into SRAM bank 1, same
-         * end result as sceptios/pokecrystal's HoF-time SRAM write. */
-        if (gb_mock_crystal_active(g_registered_ctx)) {
+         * has the full GS Ball → Kurt → Ilex → Celebi script chain
+         * and the Odd Egg distribution data in vanilla; only the
+         * mobile-adapter flag/UI scripts that referenced them were
+         * stripped from the US/EU release. We hit the relevant
+         * SRAM/WRAM bytes directly, same end result as
+         * sceptios/pokecrystal's HoF-time SRAM write. */
+        bool crystal_active = gb_mock_crystal_active(g_registered_ctx);
+        if (crystal_active) {
             ImGui::Spacing();
             ImGui::TextDisabled("Mobile Events");
             /* Wrap all captions in this section to the panel width
@@ -3088,7 +3085,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
              * to "Party full" (which is technically true post-add
              * but reads as if the button failed). A follow-up click
              * with a full party flips it to "Party full" then. */
-            uint8_t party_count = gb_mock_crystal_party_count(g_registered_ctx);
+            uint8_t party_count = gb_mock_gen2_party_count(g_registered_ctx);
             if (ImGui::Button("Receive Odd Egg##odd_egg")) {
                 if (gb_mock_crystal_apply_odd_egg(g_registered_ctx)) {
                     g_odd_egg_last_msg = "Sent — check your party.";
@@ -3103,11 +3100,15 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                     party_count);
             }
             ImGui::PopTextWrapPos();
+        }
 
-            /* Generic Pokemon builder — collapsible sub-section. Lets
-             * the user inject any of the 251 Gen 2 species at any
-             * level, with random or shiny DVs. Other fields (moves,
-             * stats, OT) are derived from the cart's own data tables. */
+        /* Generic Pokemon builder — works on any Gen 2 cart
+         * (Gold/Silver/Crystal). Per-cart WRAM offsets and ROM
+         * data-table addresses come from the dispatch table in
+         * mock_gen2.c. The cart's own BaseData, EvosAttacks, and
+         * PokemonNames drive everything except the user-picked
+         * species/level/shiny. */
+        if (gb_mock_gen2_detect(g_registered_ctx) != GB_MOCK_GEN2_NONE) {
             ImGui::Spacing();
             if (ImGui::CollapsingHeader("Pokemon Builder")) {
                 ImGui::PushTextWrapPos(0.0f);
@@ -3119,8 +3120,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 if (species_labels.empty()) {
                     char raw[16];
                     char label[32];
-                    for (int i = 1; i <= GB_MOCK_CRYSTAL_SPECIES_COUNT; i++) {
-                        if (gb_mock_crystal_species_name(g_registered_ctx, i,
+                    for (int i = 1; i <= GB_MOCK_GEN2_SPECIES_COUNT; i++) {
+                        if (gb_mock_gen2_species_name(g_registered_ctx, i,
                                                          raw, sizeof(raw))) {
                             snprintf(label, sizeof(label), "%03d %s", i, raw);
                         } else {
@@ -3148,7 +3149,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                  "%d", ImGuiSliderFlags_NoInput);
                 ImGui::Checkbox("Shiny##builder", &g_builder_shiny);
                 if (ImGui::Button("Receive Pokemon##builder")) {
-                    if (gb_mock_crystal_inject_builder(g_registered_ctx,
+                    if (gb_mock_gen2_inject_builder(g_registered_ctx,
                                                       g_builder_species,
                                                       g_builder_level,
                                                       g_builder_shiny)) {

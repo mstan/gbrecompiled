@@ -13,6 +13,7 @@
 #include "sgb.h"
 #include "relay_client.h"
 #include "pokemon/mock_ir.h"
+#include "pokemon/mock_gen1.h"
 #include "pokemon/mock_gen2.h"
 #ifdef GBRT_HAVE_GBCAM
 #include "gbcam.h"
@@ -3103,26 +3104,40 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         }
 
         /* Generic Pokemon builder — works on any Gen 2 cart
-         * (Gold/Silver/Crystal). Per-cart WRAM offsets and ROM
-         * data-table addresses come from the dispatch table in
-         * mock_gen2.c. The cart's own BaseData, EvosAttacks, and
-         * PokemonNames drive everything except the user-picked
-         * species/level/shiny. */
-        if (gb_mock_gen2_detect(g_registered_ctx) != GB_MOCK_GEN2_NONE) {
+         * Gen 1 (Red/Blue/Yellow) or Gen 2 (Gold/Silver/Crystal).
+         * Per-cart WRAM offsets and ROM data-table addresses come
+         * from the dispatch table in mock_gen1.c / mock_gen2.c. The
+         * cart's own BaseStats, EvosMoves, and PokemonNames drive
+         * everything except the user-picked species/level/shiny. */
+        bool builder_gen2 = gb_mock_gen2_detect(g_registered_ctx) != GB_MOCK_GEN2_NONE;
+        bool builder_gen1 = !builder_gen2 &&
+                            gb_mock_gen1_detect(g_registered_ctx) != GB_MOCK_GEN1_NONE;
+        if (builder_gen1 || builder_gen2) {
+            int builder_species_count = builder_gen2
+                ? GB_MOCK_GEN2_SPECIES_COUNT : GB_MOCK_GEN1_SPECIES_COUNT;
             ImGui::Spacing();
             if (ImGui::CollapsingHeader("Pokemon Builder")) {
                 ImGui::PushTextWrapPos(0.0f);
 
-                /* Lazy-build the species name cache once per session.
-                 * The names come from PokemonNames in cart ROM and
-                 * don't change. 251 entries → ~5 KB of std::string. */
+                /* Species name cache — rebuilt the first time the
+                 * generation it represents differs from the active
+                 * cart, so the same UI session can move between
+                 * Gen 1 and Gen 2 carts (after Restart) without
+                 * showing stale labels. */
                 static std::vector<std::string> species_labels;
-                if (species_labels.empty()) {
+                static bool species_labels_gen2 = false;
+                if (species_labels.empty() ||
+                    (int)species_labels.size() != builder_species_count ||
+                    species_labels_gen2 != builder_gen2) {
+                    species_labels.clear();
+                    species_labels_gen2 = builder_gen2;
                     char raw[16];
                     char label[32];
-                    for (int i = 1; i <= GB_MOCK_GEN2_SPECIES_COUNT; i++) {
-                        if (gb_mock_gen2_species_name(g_registered_ctx, i,
-                                                         raw, sizeof(raw))) {
+                    for (int i = 1; i <= builder_species_count; i++) {
+                        bool ok = builder_gen2
+                            ? gb_mock_gen2_species_name(g_registered_ctx, i, raw, sizeof(raw))
+                            : gb_mock_gen1_species_name(g_registered_ctx, i, raw, sizeof(raw));
+                        if (ok) {
                             snprintf(label, sizeof(label), "%03d %s", i, raw);
                         } else {
                             snprintf(label, sizeof(label), "%03d ???", i);
@@ -3149,10 +3164,12 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                  "%d", ImGuiSliderFlags_NoInput);
                 ImGui::Checkbox("Shiny##builder", &g_builder_shiny);
                 if (ImGui::Button("Receive Pokemon##builder")) {
-                    if (gb_mock_gen2_inject_builder(g_registered_ctx,
-                                                      g_builder_species,
-                                                      g_builder_level,
-                                                      g_builder_shiny)) {
+                    bool ok = builder_gen2
+                        ? gb_mock_gen2_inject_builder(g_registered_ctx,
+                              g_builder_species, g_builder_level, g_builder_shiny)
+                        : gb_mock_gen1_inject_builder(g_registered_ctx,
+                              g_builder_species, g_builder_level, g_builder_shiny);
+                    if (ok) {
                         g_builder_last_msg = "Sent — check your party.";
                     } else {
                         g_builder_last_msg = "Party full (6/6) — release or store a Pokemon first.";
@@ -3160,6 +3177,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 }
                 if (g_builder_last_msg) {
                     ImGui::TextDisabled("%s", g_builder_last_msg);
+                } else if (builder_gen1) {
+                    ImGui::TextDisabled("Moves/stats auto-filled from cart data. Shiny sets Gen-2-compatible DVs — Gen 1 itself doesn't display shinies, but Time Capsule trades to Gen 2 will.");
                 } else {
                     ImGui::TextDisabled("Moves and stats are auto-filled from the cart's own data tables. OT becomes the player.");
                 }

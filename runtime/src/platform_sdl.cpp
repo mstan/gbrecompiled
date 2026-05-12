@@ -15,6 +15,7 @@
 #include "pokemon/mock_ir.h"
 #include "pokemon/mock_gen1.h"
 #include "pokemon/mock_gen2.h"
+#include "pokemon/mock_inject_file.h"
 #ifdef GBRT_HAVE_GBCAM
 #include "gbcam.h"
 #endif
@@ -97,6 +98,10 @@ static int g_builder_species = 25;   /* Pikachu */
 static int g_builder_level = 50;
 static bool g_builder_shiny = false;
 static const char* g_builder_last_msg = NULL;
+/* Events / file-based injects: selected entry index + last-action
+ * caption. Reset on menu close along with the rest. */
+static int  g_event_sel_idx = 0;
+static char g_event_last_msg[160] = "";
 static void reset_menu_ephemeral_state(void) {
     g_mg_item_idx = 0;
     g_mg_deco_idx = 0;
@@ -105,6 +110,8 @@ static void reset_menu_ephemeral_state(void) {
     g_builder_level = 50;
     g_builder_shiny = false;
     g_builder_last_msg = NULL;
+    g_event_sel_idx = 0;
+    g_event_last_msg[0] = '\0';
 }
 static int g_speed_percent = 100;
 static int g_palette_idx = 0;
@@ -2064,7 +2071,7 @@ static bool load_border_texture(const std::string& filename) {
         return false;
     }
     if (w != GB_BORDER_FULL_W || h != GB_BORDER_FULL_H) {
-        fprintf(stderr, "[BORDER] %s is %dx%d, expected %dx%d — skipping\n",
+        fprintf(stderr, "[BORDER] %s is %dx%d, expected %dx%d - skipping\n",
                 full.string().c_str(), w, h, GB_BORDER_FULL_W, GB_BORDER_FULL_H);
         stbi_image_free(pixels);
         return false;
@@ -3070,7 +3077,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                 gb_mock_crystal_gs_ball_state_label(g_registered_ctx),
                                 gs_flag);
             if (celebi_caught) {
-                ImGui::TextDisabled("Celebi was already caught — pressing this re-arms the event so you can encounter it again.");
+                ImGui::TextDisabled("Celebi was already caught - pressing this re-arms the event so you can encounter it again.");
             }
 
             /* Odd Egg — the second Mobile-only event the US ROM has
@@ -3089,9 +3096,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             uint8_t party_count = gb_mock_gen2_party_count(g_registered_ctx);
             if (ImGui::Button("Receive Odd Egg##odd_egg")) {
                 if (gb_mock_crystal_apply_odd_egg(g_registered_ctx)) {
-                    g_odd_egg_last_msg = "Sent — check your party.";
+                    g_odd_egg_last_msg = "Sent - check your party.";
                 } else {
-                    g_odd_egg_last_msg = "Party full (6/6) — release or store a Pokemon first.";
+                    g_odd_egg_last_msg = "Party full (6/6) - release or store a Pokemon first.";
                 }
             }
             if (g_odd_egg_last_msg) {
@@ -3170,17 +3177,65 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                         : gb_mock_gen1_inject_builder(g_registered_ctx,
                               g_builder_species, g_builder_level, g_builder_shiny);
                     if (ok) {
-                        g_builder_last_msg = "Sent — check your party.";
+                        g_builder_last_msg = "Sent - check your party.";
                     } else {
-                        g_builder_last_msg = "Party full (6/6) — release or store a Pokemon first.";
+                        g_builder_last_msg = "Party full (6/6) - release or store a Pokemon first.";
                     }
                 }
                 if (g_builder_last_msg) {
                     ImGui::TextDisabled("%s", g_builder_last_msg);
                 } else if (builder_gen1) {
-                    ImGui::TextDisabled("Moves/stats auto-filled from cart data. Shiny sets Gen-2-compatible DVs — Gen 1 itself doesn't display shinies, but Time Capsule trades to Gen 2 will.");
+                    ImGui::TextDisabled("Moves/stats auto-filled from cart data. Shiny sets Gen-2-compatible DVs - Gen 1 itself doesn't display shinies, but Time Capsule trades to Gen 2 will.");
                 } else {
                     ImGui::TextDisabled("Moves and stats are auto-filled from the cart's own data tables. OT becomes the player.");
+                }
+
+                /* Events — scan injects/<game_id>/ for .gbmon / .pk1 / .pk2
+                 * files. Listed in a dropdown; Apply button injects. */
+                ImGui::Spacing();
+                ImGui::TextDisabled("Events (injects/%s/)", g_active_game_id.c_str());
+                static GBInjectFileEntry s_events[GB_INJECT_FILE_MAX];
+                static int s_event_count = -1;
+                if (s_event_count < 0) {
+                    s_event_count = gb_inject_file_scan(g_registered_ctx,
+                                                        g_active_game_id.c_str(),
+                                                        s_events, GB_INJECT_FILE_MAX);
+                }
+                if (s_event_count == 0) {
+                    ImGui::TextDisabled("(no event files found)");
+                } else {
+                    if (g_event_sel_idx < 0) g_event_sel_idx = 0;
+                    if (g_event_sel_idx >= s_event_count) g_event_sel_idx = 0;
+                    if (ImGui::BeginCombo("Event##event_pick",
+                                          s_events[g_event_sel_idx].display)) {
+                        for (int i = 0; i < s_event_count; i++) {
+                            bool selected = (i == g_event_sel_idx);
+                            if (ImGui::Selectable(s_events[i].display, selected)) {
+                                g_event_sel_idx = i;
+                            }
+                            if (selected) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (ImGui::Button("Apply Event##event_apply")) {
+                        char err[128];
+                        if (gb_inject_file_apply(g_registered_ctx,
+                                                 &s_events[g_event_sel_idx],
+                                                 err, sizeof(err))) {
+                            snprintf(g_event_last_msg, sizeof(g_event_last_msg),
+                                     "Applied %s - check your party.",
+                                     s_events[g_event_sel_idx].filename);
+                        } else {
+                            snprintf(g_event_last_msg, sizeof(g_event_last_msg),
+                                     "Apply failed: %s", err);
+                        }
+                    }
+                    if (g_event_last_msg[0]) {
+                        ImGui::TextDisabled("%s", g_event_last_msg);
+                    } else {
+                        ImGui::TextDisabled("Drop .gbmon / .pk1 / .pk2 files into injects/%s/ - they appear here.",
+                                            g_active_game_id.c_str());
+                    }
                 }
                 ImGui::PopTextWrapPos();
             }
@@ -3290,7 +3345,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     g_link_status_text.clear();
                 }
             } else if (g_link_listening) {
-                ImGui::TextDisabled("Listening on TCP :%d — waiting for peer", g_link_port_pref);
+                ImGui::TextDisabled("Listening on TCP :%d - waiting for peer", g_link_port_pref);
             } else if (!g_link_status_text.empty()) {
                 ImGui::TextDisabled("%s", g_link_status_text.c_str());
             }
@@ -3521,7 +3576,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             std::string preview;
             if (g_relay_room_pick >= 0 && g_relay_room_pick < (int)g_relay_rooms.size()) {
                 const GBRelayRoomInfo& r = g_relay_rooms[g_relay_room_pick];
-                preview = std::string(r.code) + (r.nickname[0] ? std::string(" — ") + r.nickname : std::string());
+                preview = std::string(r.code) + (r.nickname[0] ? std::string(" - ") + r.nickname : std::string());
             } else if (g_relay_rooms.empty()) {
                 preview = "(no open rooms)";
             } else {
@@ -3532,7 +3587,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     const GBRelayRoomInfo& r = g_relay_rooms[i];
                     char label[160];
                     if (r.nickname[0]) {
-                        snprintf(label, sizeof(label), "%s — %s (%ds ago)",
+                        snprintf(label, sizeof(label), "%s - %s (%ds ago)",
                                  r.code, r.nickname, r.age_seconds);
                     } else {
                         snprintf(label, sizeof(label), "%s (%ds ago)",
@@ -3583,7 +3638,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                              " but TCP connect failed (port not reachable).";
                         }
                     } else if (r.ok) {
-                        g_relay_status = "Host disappeared between list and join — refresh and try again.";
+                        g_relay_status = "Host disappeared between list and join - refresh and try again.";
                     }
                 }
             }

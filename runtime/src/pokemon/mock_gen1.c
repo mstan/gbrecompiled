@@ -142,6 +142,38 @@ uint8_t gb_mock_gen1_party_count(const GBContext* ctx) {
     return ctx->wram[0x1000 + (c->wram_party_count - 0xD000)];
 }
 
+uint8_t* gb_mock_gen1_nick_slot(GBContext* ctx, int slot) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_ptr(ctx, c->wram_party_nicks) + (size_t)slot * 11;
+}
+
+uint8_t* gb_mock_gen1_party_mons_slot(GBContext* ctx, int slot) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_ptr(ctx, c->wram_party_mons) + (size_t)slot * 44;
+}
+
+uint8_t* gb_mock_gen1_party_ots_slot(GBContext* ctx, int slot) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_ptr(ctx, c->wram_party_ot) + (size_t)slot * 11;
+}
+
+uint8_t* gb_mock_gen1_party_species_slot(GBContext* ctx, int slot) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_ptr(ctx, c->wram_party_species) + (size_t)slot;
+}
+
+uint8_t gb_mock_gen1_party_count_inc(GBContext* ctx) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram) return 0xFF;
+    uint8_t* p = &ctx->wram[0x1000 + (c->wram_party_count - 0xD000)];
+    *p = (uint8_t)(*p + 1);
+    return *p;
+}
+
 /* Gen 1 stat formula — identical math to Gen 2 (Gen 2 inherited it). */
 static int stat_hp(int base, int dv, int level) {
     return ((base + dv) * 2 * level) / 100 + level + 10;
@@ -272,6 +304,45 @@ static char decode_charmap_byte(uint8_t b) {
     if (b == 0xE8)              return '.';
     if (b >= 0xF6 && b <= 0xFF) return (char)('0' + (b - 0xF6));
     return '?';
+}
+
+bool gb_mock_gen1_species_name_by_internal(const GBContext* ctx,
+                                           int internal_id,
+                                           char* out, size_t out_size) {
+    if (!out || out_size < 11) return false;
+    out[0] = '\0';
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->rom) return false;
+    if (internal_id < 1 || internal_id > 200) return false;
+    size_t off = rom_addr(c->rom_bank_names, c->rom_off_names) +
+                 (size_t)(internal_id - 1) * 10;
+    if (off + 10 > ctx->rom_size) return false;
+    size_t i;
+    for (i = 0; i < 10; i++) {
+        uint8_t b = ctx->rom[off + i];
+        if (b == 0x50) break;
+        out[i] = decode_charmap_byte(b);
+    }
+    out[i] = '\0';
+    return true;
+}
+
+int gb_mock_gen1_dex_for_name(const GBContext* ctx, const char* name) {
+    if (!name || !*name) return -1;
+    char buf[16];
+    for (int dex = 1; dex <= GB_MOCK_GEN1_SPECIES_COUNT; dex++) {
+        if (!gb_mock_gen1_species_name(ctx, dex, buf, sizeof(buf))) continue;
+        int i = 0;
+        while (buf[i] && name[i]) {
+            int a = (unsigned char)buf[i],  b = (unsigned char)name[i];
+            if (a >= 'a' && a <= 'z') a -= 32;
+            if (b >= 'a' && b <= 'z') b -= 32;
+            if (a != b) break;
+            i++;
+        }
+        if (buf[i] == '\0' && name[i] == '\0') return dex;
+    }
+    return -1;
 }
 
 bool gb_mock_gen1_species_name(const GBContext* ctx, int species,

@@ -49,6 +49,19 @@ uint8_t gb_mock_gen1_party_count(const GBContext* ctx);
 bool gb_mock_gen1_species_name(const GBContext* ctx, int species,
                                char* out, size_t out_size);
 
+/* Linear scan of MonsterNames for an ASCII species name match.
+ * Case-insensitive. Returns 1-based dex# on hit, -1 on miss or
+ * non-Gen-1 cart. */
+int gb_mock_gen1_dex_for_name(const GBContext* ctx, const char* name);
+
+/* Same as species_name but takes an internal hex ID (1..190) — what
+ * pk1 files and the cart's MON_SPECIES field actually store.
+ * MonsterNames is internal-indexed natively, so this is the more
+ * direct lookup of the two. */
+bool gb_mock_gen1_species_name_by_internal(const GBContext* ctx,
+                                           int internal_id,
+                                           char* out, size_t out_size);
+
 /* Build + inject a Pokemon into the next party slot.
  *   species : 1..151
  *   level   : 2..100
@@ -59,6 +72,14 @@ bool gb_mock_gen1_species_name(const GBContext* ctx, int species,
  * Returns false on bad inputs or full party. */
 bool gb_mock_gen1_inject_builder(GBContext* ctx,
                                  int species, int level, bool shiny);
+
+/* Pointer to wPartyMonNicks[slot] in the live wram buffer, or NULL
+ * if not Gen 1 or slot out of range. */
+uint8_t* gb_mock_gen1_nick_slot(GBContext* ctx, int slot);
+uint8_t* gb_mock_gen1_party_mons_slot   (GBContext* ctx, int slot);
+uint8_t* gb_mock_gen1_party_ots_slot    (GBContext* ctx, int slot);
+uint8_t* gb_mock_gen1_party_species_slot(GBContext* ctx, int slot);
+uint8_t  gb_mock_gen1_party_count_inc(GBContext* ctx);
 
 #ifdef __cplusplus
 }

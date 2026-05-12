@@ -82,6 +82,11 @@ bool gb_mock_crystal_apply_odd_egg(GBContext* ctx);
 /* Live wPartyCount for the active Gen 2 cart. 0xFF if not Gen 2. */
 uint8_t gb_mock_gen2_party_count(const GBContext* ctx);
 
+/* Linear scan of PokemonNames for an ASCII species name match.
+ * Case-insensitive. Returns 1-based dex# on hit, -1 on miss or
+ * non-Gen-2 cart. Used by the file-based injector. */
+int gb_mock_gen2_dex_for_name(const GBContext* ctx, const char* name);
+
 /* Decode the Gen 2-charmapped name of a species (1..251) from the
  * active cart's PokemonNames table into out (ASCII, NUL-terminated).
  * Out must be at least 11 bytes. Returns false on out-of-range or
@@ -101,6 +106,17 @@ bool gb_mock_gen2_species_name(const GBContext* ctx, int species,
  * the species/level is out of range. */
 bool gb_mock_gen2_inject_builder(GBContext* ctx,
                                  int species, int level, bool shiny);
+
+/* Pointer to wPartyMonNicks[slot] in the live wram buffer, or NULL
+ * if not Gen 2 or slot out of range. Used by mock_inject_file to
+ * post-patch the nickname after inject_builder runs. */
+uint8_t* gb_mock_gen2_nick_slot(GBContext* ctx, int slot);
+uint8_t* gb_mock_gen2_party_mons_slot   (GBContext* ctx, int slot);
+uint8_t* gb_mock_gen2_party_ots_slot    (GBContext* ctx, int slot);
+uint8_t* gb_mock_gen2_party_species_slot(GBContext* ctx, int slot);
+/* Increment wPartyCount; returns the new value. Used by binary
+ * injectors that write party slots directly. */
+uint8_t  gb_mock_gen2_party_count_inc(GBContext* ctx);
 
 #ifdef __cplusplus
 }

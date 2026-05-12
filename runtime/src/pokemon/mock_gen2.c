@@ -136,6 +136,38 @@ uint8_t gb_mock_gen2_party_count(const GBContext* ctx) {
     return ctx->wram[0x1000 + (c->wram_party_count - 0xD000)];
 }
 
+uint8_t* gb_mock_gen2_nick_slot(GBContext* ctx, int slot) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_b1_ptr(ctx, c->wram_party_nicks) + (size_t)slot * 11;
+}
+
+uint8_t* gb_mock_gen2_party_mons_slot(GBContext* ctx, int slot) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_b1_ptr(ctx, c->wram_party_mons) + (size_t)slot * 48;
+}
+
+uint8_t* gb_mock_gen2_party_ots_slot(GBContext* ctx, int slot) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_b1_ptr(ctx, c->wram_party_ots) + (size_t)slot * 11;
+}
+
+uint8_t* gb_mock_gen2_party_species_slot(GBContext* ctx, int slot) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram || slot < 0 || slot >= 6) return NULL;
+    return wram_b1_ptr(ctx, c->wram_party_species) + (size_t)slot;
+}
+
+uint8_t gb_mock_gen2_party_count_inc(GBContext* ctx) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram) return 0xFF;
+    uint8_t* p = &ctx->wram[0x1000 + (c->wram_party_count - 0xD000)];
+    *p = (uint8_t)(*p + 1);
+    return *p;
+}
+
 /* Gen 2 stat formulas with stat_exp == 0. Clean-room from spec
  * (Bulbapedia); PKSM-Core's PK2 has the same formula but is GPL-3. */
 static int stat_hp(int base, int dv, int level) {
@@ -244,6 +276,24 @@ static char decode_charmap_byte(uint8_t c) {
     if (c == 0xF1)              return '.';
     if (c >= 0xF6 && c <= 0xFF) return (char)('0' + (c - 0xF6));
     return '?';
+}
+
+int gb_mock_gen2_dex_for_name(const GBContext* ctx, const char* name) {
+    if (!name || !*name) return -1;
+    char buf[16];
+    for (int dex = 1; dex <= GB_MOCK_GEN2_SPECIES_COUNT; dex++) {
+        if (!gb_mock_gen2_species_name(ctx, dex, buf, sizeof(buf))) continue;
+        int i = 0;
+        while (buf[i] && name[i]) {
+            int a = (unsigned char)buf[i],  b = (unsigned char)name[i];
+            if (a >= 'a' && a <= 'z') a -= 32;
+            if (b >= 'a' && b <= 'z') b -= 32;
+            if (a != b) break;
+            i++;
+        }
+        if (buf[i] == '\0' && name[i] == '\0') return dex;
+    }
+    return -1;
 }
 
 bool gb_mock_gen2_species_name(const GBContext* ctx, int species,

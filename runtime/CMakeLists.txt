@@ -16,6 +16,7 @@ add_library(gbrt STATIC
     src/pokemon/mock_ir.c
     src/pokemon/mock_gen1.c
     src/pokemon/mock_gen2.c
+    src/pokemon/mock_inject_file.c
     src/relay_client.c
     src/shader_pipeline.cpp
     src/gb_printer.c

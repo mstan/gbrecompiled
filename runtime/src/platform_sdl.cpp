@@ -83,6 +83,28 @@ static GBPlatformTimingInfo g_last_timing = {};
 /* Menu State */
 static bool g_show_menu = false;
 static bool g_show_overlay = false;
+
+/* Ephemeral Esc-menu input state — reset to defaults each time the
+ * menu closes (Esc, Resume, Restart, Return to Launcher all close it).
+ * Live cart state (party count, SRAM flags, etc.) re-reads from the
+ * cart on every menu open, so only "what the user just typed" needs
+ * resetting. */
+static int g_mg_item_idx = 0;
+static int g_mg_deco_idx = 0;
+static const char* g_odd_egg_last_msg = NULL;
+static int g_builder_species = 25;   /* Pikachu */
+static int g_builder_level = 50;
+static bool g_builder_shiny = false;
+static const char* g_builder_last_msg = NULL;
+static void reset_menu_ephemeral_state(void) {
+    g_mg_item_idx = 0;
+    g_mg_deco_idx = 0;
+    g_odd_egg_last_msg = NULL;
+    g_builder_species = 25;
+    g_builder_level = 50;
+    g_builder_shiny = false;
+    g_builder_last_msg = NULL;
+}
 static int g_speed_percent = 100;
 static int g_palette_idx = 0;
 /* Color correction: 0=Off, 1=GBC (modern LCDs viewing GBC-tinted output),
@@ -2690,6 +2712,16 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     ImGuiIO& imgui_io = ImGui::GetIO();
     imgui_io.FontGlobalScale = settings_ui_scale_for_size(imgui_io.DisplaySize);
 
+    /* Reset the menu's ephemeral input state every time it closes —
+     * so dropdowns, sliders, and "last action" captions don't carry
+     * over from the previous session. Triggered on the open→closed
+     * transition; runs once. */
+    static bool s_menu_was_open = false;
+    if (s_menu_was_open && !g_show_menu) {
+        reset_menu_ephemeral_state();
+    }
+    s_menu_was_open = g_show_menu;
+
     if (g_show_menu) {
         const float ui_scale = imgui_io.FontGlobalScale;
         const float footer_height = ImGui::GetFrameHeightWithSpacing() *
@@ -2974,42 +3006,39 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::Spacing();
             ImGui::TextDisabled("Mystery Gift");
 
-            static int mg_item_idx = 0;
-            static int mg_deco_idx = 0;
-
             const float button_width = ImGui::CalcTextSize("Send").x +
                                        ImGui::GetStyle().FramePadding.x * 2.0f;
 
             if (ImGui::ArrowButton("##mg_item_prev", ImGuiDir_Left)) {
-                mg_item_idx = (mg_item_idx - 1 + GB_MOCK_IR_NUM_ITEMS) % GB_MOCK_IR_NUM_ITEMS;
+                g_mg_item_idx = (g_mg_item_idx - 1 + GB_MOCK_IR_NUM_ITEMS) % GB_MOCK_IR_NUM_ITEMS;
             }
             ImGui::SameLine();
             ImGui::Text("Item: %-16s (%d/%d)",
-                        gb_mock_ir_item_name(mg_item_idx),
-                        mg_item_idx + 1, GB_MOCK_IR_NUM_ITEMS);
+                        gb_mock_ir_item_name(g_mg_item_idx),
+                        g_mg_item_idx + 1, GB_MOCK_IR_NUM_ITEMS);
             ImGui::SameLine();
             if (ImGui::ArrowButton("##mg_item_next", ImGuiDir_Right)) {
-                mg_item_idx = (mg_item_idx + 1) % GB_MOCK_IR_NUM_ITEMS;
+                g_mg_item_idx = (g_mg_item_idx + 1) % GB_MOCK_IR_NUM_ITEMS;
             }
             ImGui::SameLine();
             if (ImGui::Button("Send##item", ImVec2(button_width * 1.6f, 0.0f))) {
-                gb_mock_ir_queue(GB_MOCK_IR_KIND_ITEM, mg_item_idx);
+                gb_mock_ir_queue(GB_MOCK_IR_KIND_ITEM, g_mg_item_idx);
             }
 
             if (ImGui::ArrowButton("##mg_deco_prev", ImGuiDir_Left)) {
-                mg_deco_idx = (mg_deco_idx - 1 + GB_MOCK_IR_NUM_DECOS) % GB_MOCK_IR_NUM_DECOS;
+                g_mg_deco_idx = (g_mg_deco_idx - 1 + GB_MOCK_IR_NUM_DECOS) % GB_MOCK_IR_NUM_DECOS;
             }
             ImGui::SameLine();
             ImGui::Text("Deco: %-16s (%d/%d)",
-                        gb_mock_ir_deco_name(mg_deco_idx),
-                        mg_deco_idx + 1, GB_MOCK_IR_NUM_DECOS);
+                        gb_mock_ir_deco_name(g_mg_deco_idx),
+                        g_mg_deco_idx + 1, GB_MOCK_IR_NUM_DECOS);
             ImGui::SameLine();
             if (ImGui::ArrowButton("##mg_deco_next", ImGuiDir_Right)) {
-                mg_deco_idx = (mg_deco_idx + 1) % GB_MOCK_IR_NUM_DECOS;
+                g_mg_deco_idx = (g_mg_deco_idx + 1) % GB_MOCK_IR_NUM_DECOS;
             }
             ImGui::SameLine();
             if (ImGui::Button("Send##deco", ImVec2(button_width * 1.6f, 0.0f))) {
-                gb_mock_ir_queue(GB_MOCK_IR_KIND_DECO, mg_deco_idx);
+                gb_mock_ir_queue(GB_MOCK_IR_KIND_DECO, g_mg_deco_idx);
             }
 
             ImGui::TextDisabled("Queued: %s", gb_mock_ir_queue_label());
@@ -3059,22 +3088,82 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
              * to "Party full" (which is technically true post-add
              * but reads as if the button failed). A follow-up click
              * with a full party flips it to "Party full" then. */
-            static const char* odd_egg_last_msg = NULL;
             uint8_t party_count = gb_mock_crystal_party_count(g_registered_ctx);
             if (ImGui::Button("Receive Odd Egg##odd_egg")) {
                 if (gb_mock_crystal_apply_odd_egg(g_registered_ctx)) {
-                    odd_egg_last_msg = "Sent — check your party.";
+                    g_odd_egg_last_msg = "Sent — check your party.";
                 } else {
-                    odd_egg_last_msg = "Party full (6/6) — release or store a Pokemon first.";
+                    g_odd_egg_last_msg = "Party full (6/6) — release or store a Pokemon first.";
                 }
             }
-            if (odd_egg_last_msg) {
-                ImGui::TextDisabled("%s", odd_egg_last_msg);
+            if (g_odd_egg_last_msg) {
+                ImGui::TextDisabled("%s", g_odd_egg_last_msg);
             } else {
                 ImGui::TextDisabled("Party: %d/6. Rolls one of 7 baby Pokemon (Pichu/Cleffa/Igglybuff/Smoochum/Magby/Tyrogue/Elekid) with the original 14%% shiny rate.",
                                     party_count);
             }
             ImGui::PopTextWrapPos();
+
+            /* Generic Pokemon builder — collapsible sub-section. Lets
+             * the user inject any of the 251 Gen 2 species at any
+             * level, with random or shiny DVs. Other fields (moves,
+             * stats, OT) are derived from the cart's own data tables. */
+            ImGui::Spacing();
+            if (ImGui::CollapsingHeader("Pokemon Builder")) {
+                ImGui::PushTextWrapPos(0.0f);
+
+                /* Lazy-build the species name cache once per session.
+                 * The names come from PokemonNames in cart ROM and
+                 * don't change. 251 entries → ~5 KB of std::string. */
+                static std::vector<std::string> species_labels;
+                if (species_labels.empty()) {
+                    char raw[16];
+                    char label[32];
+                    for (int i = 1; i <= GB_MOCK_CRYSTAL_SPECIES_COUNT; i++) {
+                        if (gb_mock_crystal_species_name(g_registered_ctx, i,
+                                                         raw, sizeof(raw))) {
+                            snprintf(label, sizeof(label), "%03d %s", i, raw);
+                        } else {
+                            snprintf(label, sizeof(label), "%03d ???", i);
+                        }
+                        species_labels.emplace_back(label);
+                    }
+                }
+
+                int sel_idx = g_builder_species - 1;
+                if (sel_idx < 0) sel_idx = 0;
+                if (sel_idx >= (int)species_labels.size()) sel_idx = 0;
+                if (ImGui::BeginCombo("Species##builder",
+                                      species_labels[sel_idx].c_str())) {
+                    for (int i = 0; i < (int)species_labels.size(); i++) {
+                        bool selected = (i == sel_idx);
+                        if (ImGui::Selectable(species_labels[i].c_str(), selected)) {
+                            g_builder_species = i + 1;
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SliderInt("Level##builder", &g_builder_level, 2, 100,
+                                 "%d", ImGuiSliderFlags_NoInput);
+                ImGui::Checkbox("Shiny##builder", &g_builder_shiny);
+                if (ImGui::Button("Receive Pokemon##builder")) {
+                    if (gb_mock_crystal_inject_builder(g_registered_ctx,
+                                                      g_builder_species,
+                                                      g_builder_level,
+                                                      g_builder_shiny)) {
+                        g_builder_last_msg = "Sent — check your party.";
+                    } else {
+                        g_builder_last_msg = "Party full (6/6) — release or store a Pokemon first.";
+                    }
+                }
+                if (g_builder_last_msg) {
+                    ImGui::TextDisabled("%s", g_builder_last_msg);
+                } else {
+                    ImGui::TextDisabled("Moves and stats are auto-filled from the cart's own data tables. OT becomes the player.");
+                }
+                ImGui::PopTextWrapPos();
+            }
         }
 
 #ifdef GBRT_HAVE_GBCAM

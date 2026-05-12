@@ -63,6 +63,28 @@ uint8_t gb_mock_crystal_party_count(const GBContext* ctx);
  * original Mobile event's design. */
 bool gb_mock_crystal_apply_odd_egg(GBContext* ctx);
 
+/* Number of valid species (251 for Gen 2). */
+#define GB_MOCK_CRYSTAL_SPECIES_COUNT 251
+
+/* Decode the Gen 2-charmapped name of a species (1..251) from the
+ * cart's PokemonNames table into out (ASCII, NUL-terminated).
+ * Out must be at least 11 bytes. Returns false on out-of-range. */
+bool gb_mock_crystal_species_name(const GBContext* ctx, int species,
+                                  char* out, size_t out_size);
+
+/* Build and inject a Pokemon into the next party slot.
+ *   species : 1..251 (1-based dex number)
+ *   level   : 2..100
+ *   shiny   : true → canonical Gen 2 shiny DVs (Atk=Def=Spd=Spc=10)
+ * Other fields are derived: base stats read from the cart ROM,
+ * stats computed via the Gen 2 formula, moves picked as the
+ * last-4-learned at the chosen level from the cart's evos/attacks
+ * table, OT = player's name+ID, no held item, default happiness.
+ * Returns false if the cart isn't Crystal, the party is full, or
+ * the species/level is out of range. */
+bool gb_mock_crystal_inject_builder(GBContext* ctx,
+                                    int species, int level, bool shiny);
+
 #ifdef __cplusplus
 }
 #endif

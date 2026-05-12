@@ -53,6 +53,16 @@
 
 #define EGG_SPECIES_MARKER   0xFD  /* wPartySpecies[i] == this means "egg" */
 
+/* Cart ROM data tables (Crystal US Rev 1, locations from pokecrystal11.sym). */
+#define ROM_BANK_BASE_STATS      0x14
+#define ROM_OFF_BASE_STATS       0x5424   /* BaseData label */
+#define BASE_DATA_SIZE           32
+#define ROM_OFF_POKEMON_NAMES    0x7384   /* PokemonNames, same bank, 10 chars/entry */
+#define ROM_BANK_EVOS_ATTACKS    0x10
+#define ROM_OFF_EVOS_ATTACKS     0x65B1   /* EvosAttacksPointers */
+
+#define MON_NAME_LEN             11
+
 bool gb_mock_crystal_active(const GBContext* ctx) {
     if (!ctx || !ctx->rom || ctx->rom_size < 0x144) return false;
     /* Title bytes 0x134-0x142 (15 chars) — "PM_CRYSTAL\0..." for
@@ -182,6 +192,276 @@ bool gb_mock_crystal_apply_odd_egg(GBContext* ctx) {
 
     fprintf(stderr, "[crystal] Odd Egg added (table entry %d, party slot %d)\n",
             entry_idx, party_count);
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * Generic Pokemon builder
+ * --------------------------------------------------------------------------- */
+
+/* Translate a CGB-banked address into a flat ROM offset. */
+static size_t rom_addr(uint8_t bank, uint16_t addr) {
+    return (size_t)bank * 0x4000u + (size_t)(addr - 0x4000);
+}
+
+/* Gen 2 stat formulas with stat_exp == 0 (the cart's standard
+ * level-up uses these; our injected mons are fresh so this is the
+ * right starting state):
+ *   HP   = ((base + DV) * 2 * level) / 100 + level + 10
+ *   Stat = ((base + DV) * 2 * level) / 100 + 5
+ * Reimplemented clean-room from the Bulbapedia stat-mechanics
+ * article; PKSM-Core's PK2 has the same formula but is GPL.        */
+static int stat_hp(int base, int dv, int level) {
+    return ((base + dv) * 2 * level) / 100 + level + 10;
+}
+static int stat_other(int base, int dv, int level) {
+    return ((base + dv) * 2 * level) / 100 + 5;
+}
+
+/* HP DV is derived from the low bits of the other 4 DVs: bit0=Spd,
+ * bit1=Def, bit2=Atk, bit3=Spc. */
+static int derive_hp_dv(int atk, int def, int spd, int spc) {
+    return ((spd & 1) << 0) | ((def & 1) << 1) |
+           ((atk & 1) << 2) | ((spc & 1) << 3);
+}
+
+/* Canonical Gen 2 shiny condition: Def=Spd=Spc=10 AND Atk has bit 1
+ * set with bits 2-3 set (= 2,3,6,7,10,11,14,15). We use Atk=10. */
+static void pick_dvs(bool shiny, int* atk, int* def, int* spd, int* spc) {
+    if (shiny) {
+        *atk = 10; *def = 10; *spd = 10; *spc = 10;
+    } else {
+        ensure_rng_seeded();
+        *atk = rand() & 0xF;
+        *def = rand() & 0xF;
+        *spd = rand() & 0xF;
+        *spc = rand() & 0xF;
+    }
+}
+
+/* Read the 6 base stats (HP, Atk, Def, Spd, SAt, SDf) into out. */
+static bool read_base_stats(const GBContext* ctx, int species, uint8_t out[6]) {
+    if (species < 1 || species > GB_MOCK_CRYSTAL_SPECIES_COUNT) return false;
+    /* Skip the leading dex-number byte to land on BASE_HP. */
+    size_t off = rom_addr(ROM_BANK_BASE_STATS, ROM_OFF_BASE_STATS) +
+                 (size_t)(species - 1) * BASE_DATA_SIZE + 1;
+    if (off + 6 > ctx->rom_size) return false;
+    memcpy(out, &ctx->rom[off], 6);
+    return true;
+}
+
+/* Read the species's growth rate (offset 23 in BaseData per the
+ * struct: dex(1) + stats(6) + types(2) + catch(1) + exp(1) + items(2)
+ * + gender(1) + skip(1) + hatch(1) + skip(1) + pic_size(1) + frontpic(2)
+ * + backpic(2) + growth_rate at +23). */
+static uint8_t read_growth_rate(const GBContext* ctx, int species) {
+    size_t off = rom_addr(ROM_BANK_BASE_STATS, ROM_OFF_BASE_STATS) +
+                 (size_t)(species - 1) * BASE_DATA_SIZE + 23;
+    if (off >= ctx->rom_size) return 0; /* default to MEDIUM_FAST */
+    return ctx->rom[off];
+}
+
+/* Exp needed to be EXACTLY at level N for a given growth rate.
+ * Constants match data/growth_rates.asm. */
+static uint32_t exp_for_level(uint8_t growth_rate, int level) {
+    uint32_t n = (uint32_t)level;
+    uint32_t n3 = n * n * n;
+    switch (growth_rate) {
+        case 0: /* MEDIUM_FAST */  return n3;
+        case 1: /* SLIGHTLY_FAST */ return (n3 * 4) / 5 + 1; /* approx */
+        case 2: /* SLIGHTLY_SLOW */ return (n3 * 5) / 4 + 1;
+        case 3: /* MEDIUM_SLOW  */
+            /* 6/5 n^3 − 15 n^2 + 100 n − 140 */
+            if (level <= 1) return 0;
+            return (6 * n3) / 5 + 100 * n -
+                   (n > 0 ? 15 * n * n + 140 : 0);
+        case 4: /* FAST */         return (n3 * 4) / 5;
+        case 5: /* SLOW */         return (n3 * 5) / 4;
+        default:                   return n3;
+    }
+}
+
+/* Read the last-4-learned moves at or below the chosen level from
+ * the cart's EvosAttacks table. Returns the count of moves filled. */
+static int read_learnset(const GBContext* ctx, int species,
+                         int level, uint8_t moves[4]) {
+    memset(moves, 0, 4);
+    if (species < 1 || species > GB_MOCK_CRYSTAL_SPECIES_COUNT) return 0;
+
+    /* Pointer table: 251 entries × 2 bytes, little-endian, all within
+     * bank 0x10's $4000-$7FFF window. */
+    size_t ptr_off = rom_addr(ROM_BANK_EVOS_ATTACKS, ROM_OFF_EVOS_ATTACKS) +
+                     (size_t)(species - 1) * 2;
+    if (ptr_off + 2 > ctx->rom_size) return 0;
+    uint16_t data_addr = (uint16_t)(ctx->rom[ptr_off] |
+                                    (ctx->rom[ptr_off + 1] << 8));
+    size_t off = rom_addr(ROM_BANK_EVOS_ATTACKS, data_addr);
+
+    /* Evolutions are variable-length records terminated by a 0
+     * byte. The cart parses them by leading method byte, but for
+     * our purposes we just need to find the trailing 0 so we land
+     * on the (level, move) pair list. Evolution records are 4 or
+     * 5 bytes — easier to scan for 0. */
+    while (off < ctx->rom_size && ctx->rom[off] != 0) off++;
+    if (off >= ctx->rom_size) return 0;
+    off++; /* skip terminator */
+
+    /* (level, move) pairs until level byte == 0. Maintain a 4-slot
+     * sliding window of the most-recent learns at <= chosen level. */
+    int count = 0;
+    while (off + 1 < ctx->rom_size) {
+        uint8_t lvl = ctx->rom[off];
+        if (lvl == 0) break;
+        uint8_t mv = ctx->rom[off + 1];
+        off += 2;
+        if (lvl > level) continue;
+        /* shift-and-append */
+        moves[0] = moves[1]; moves[1] = moves[2];
+        moves[2] = moves[3]; moves[3] = mv;
+        if (count < 4) count++;
+    }
+    /* Left-align if fewer than 4 moves were learned. */
+    if (count > 0 && count < 4) {
+        uint8_t tmp[4] = {0};
+        for (int i = 0; i < count; i++) tmp[i] = moves[4 - count + i];
+        memcpy(moves, tmp, 4);
+    }
+    return count;
+}
+
+/* Decode one Gen 2 charmap byte to ASCII. Best effort — unknown
+ * codes become '?'. */
+static char decode_charmap_byte(uint8_t c) {
+    if (c >= 0x80 && c <= 0x99) return (char)('A' + (c - 0x80));
+    if (c >= 0xA0 && c <= 0xB9) return (char)('a' + (c - 0xA0));
+    if (c == 0x7F)              return ' ';
+    if (c == 0xE0)              return '\''; /* apostrophe */
+    if (c == 0xE8)              return '.';
+    if (c == 0xF1)              return '.';  /* mid-dot variant */
+    if (c == 0xF6)              return '0';  /* digit 0 in some fonts */
+    if (c >= 0xF6 && c <= 0xFF) return (char)('0' + (c - 0xF6));
+    return '?';
+}
+
+bool gb_mock_crystal_species_name(const GBContext* ctx, int species,
+                                  char* out, size_t out_size) {
+    if (!out || out_size < 11) return false;
+    out[0] = '\0';
+    if (!gb_mock_crystal_active(ctx) || !ctx->rom) return false;
+    if (species < 1 || species > GB_MOCK_CRYSTAL_SPECIES_COUNT) return false;
+    size_t off = rom_addr(ROM_BANK_BASE_STATS, ROM_OFF_POKEMON_NAMES) +
+                 (size_t)(species - 1) * 10;
+    if (off + 10 > ctx->rom_size) return false;
+    size_t i;
+    for (i = 0; i < 10; i++) {
+        uint8_t c = ctx->rom[off + i];
+        if (c == 0x50) break;
+        out[i] = decode_charmap_byte(c);
+    }
+    out[i] = '\0';
+    return true;
+}
+
+bool gb_mock_crystal_inject_builder(GBContext* ctx, int species,
+                                    int level, bool shiny) {
+    if (!gb_mock_crystal_active(ctx) || !ctx->wram || !ctx->rom) return false;
+    if (species < 1 || species > GB_MOCK_CRYSTAL_SPECIES_COUNT) return false;
+    if (level < 2 || level > 100) return false;
+
+    uint8_t party_count = gb_mock_crystal_party_count(ctx);
+    if (party_count >= PARTY_LENGTH) return false;
+
+    uint8_t base[6];
+    if (!read_base_stats(ctx, species, base)) return false;
+
+    int atk_dv, def_dv, spd_dv, spc_dv;
+    pick_dvs(shiny, &atk_dv, &def_dv, &spd_dv, &spc_dv);
+    int hp_dv = derive_hp_dv(atk_dv, def_dv, spd_dv, spc_dv);
+
+    uint16_t hp = (uint16_t)stat_hp(base[0], hp_dv,  level);
+    uint16_t at = (uint16_t)stat_other(base[1], atk_dv, level);
+    uint16_t df = (uint16_t)stat_other(base[2], def_dv, level);
+    uint16_t sp = (uint16_t)stat_other(base[3], spd_dv, level);
+    uint16_t sa = (uint16_t)stat_other(base[4], spc_dv, level);
+    uint16_t sd = (uint16_t)stat_other(base[5], spc_dv, level);
+
+    uint8_t moves[4];
+    read_learnset(ctx, species, level, moves);
+
+    uint8_t growth = read_growth_rate(ctx, species);
+    uint32_t exp = exp_for_level(growth, level);
+
+    /* Build the 48-byte party_mon struct. All multi-byte fields are
+     * big-endian in cart RAM, except the DVs (single packed uint16
+     * with ATK in high nibble of byte 0 and DEF in low; same pattern
+     * for byte 1 with SPD/SPC). */
+    uint8_t mon[48] = {0};
+    mon[0]  = (uint8_t)species;
+    mon[1]  = 0;  /* MON_ITEM — none */
+    memcpy(&mon[2], moves, 4);
+    /* OT_ID — copy player's (2 bytes, native byte order in WRAM) */
+    memcpy(&mon[6], wram_b1_ptr(ctx, WRAM_PLAYER_ID), 2);
+    /* MON_EXP (3 bytes big-endian) */
+    mon[8]  = (uint8_t)((exp >> 16) & 0xFF);
+    mon[9]  = (uint8_t)((exp >>  8) & 0xFF);
+    mon[10] = (uint8_t)( exp        & 0xFF);
+    /* MON_STAT_EXP (offsets 11-20) stays zero */
+    /* MON_DVS (offsets 21-22) */
+    mon[21] = (uint8_t)((atk_dv << 4) | (def_dv & 0xF));
+    mon[22] = (uint8_t)((spd_dv << 4) | (spc_dv & 0xF));
+    /* MON_PP (offsets 23-26) — default 20 each */
+    mon[23] = mon[24] = mon[25] = mon[26] = 20;
+    /* MON_HAPPINESS = 70 (Gen 2 default tame value) */
+    mon[27] = 70;
+    /* MON_POKERUS = 0, MON_CAUGHTDATA = 0 (offsets 28-30) */
+    mon[31] = (uint8_t)level;
+    /* MON_STATUS = 0 (offset 32), rb_skip (33) */
+    /* MON_HP (34-35), MAX (36-37), stats (38-47) — all big-endian */
+    mon[34] = (uint8_t)(hp >> 8); mon[35] = (uint8_t)(hp & 0xFF);
+    mon[36] = mon[34];           mon[37] = mon[35];
+    mon[38] = (uint8_t)(at >> 8); mon[39] = (uint8_t)(at & 0xFF);
+    mon[40] = (uint8_t)(df >> 8); mon[41] = (uint8_t)(df & 0xFF);
+    mon[42] = (uint8_t)(sp >> 8); mon[43] = (uint8_t)(sp & 0xFF);
+    mon[44] = (uint8_t)(sa >> 8); mon[45] = (uint8_t)(sa & 0xFF);
+    mon[46] = (uint8_t)(sd >> 8); mon[47] = (uint8_t)(sd & 0xFF);
+
+    /* Commit the writes (in safe order — count last). */
+    uint8_t* mon_dst = wram_b1_ptr(ctx, WRAM_PARTY_MONS) +
+                       (size_t)party_count * PARTYMON_STRUCT_LEN;
+    memcpy(mon_dst, mon, PARTYMON_STRUCT_LEN);
+
+    /* Nickname: copy the species name from PokemonNames so the
+     * nickname matches the species when uncustomized. */
+    size_t name_off = rom_addr(ROM_BANK_BASE_STATS, ROM_OFF_POKEMON_NAMES) +
+                      (size_t)(species - 1) * 10;
+    uint8_t* nick_dst = wram_b1_ptr(ctx, WRAM_PARTY_NICKS) +
+                        (size_t)party_count * MON_NAME_LEN;
+    memset(nick_dst, 0x50, MON_NAME_LEN);  /* fill with terminators */
+    for (int i = 0; i < 10 && name_off + i < ctx->rom_size; i++) {
+        uint8_t c = ctx->rom[name_off + i];
+        nick_dst[i] = c;
+        if (c == 0x50) break;
+    }
+
+    /* OT name: copy player's. */
+    memcpy(wram_b1_ptr(ctx, WRAM_PARTY_OTS) + (size_t)party_count * MON_NAME_LEN,
+           wram_b1_ptr(ctx, WRAM_PLAYER_NAME), MON_NAME_LEN);
+
+    /* Update species list + party count last so a mid-write read
+     * never sees a half-initialized slot. */
+    uint8_t* species_arr = wram_b1_ptr(ctx, WRAM_PARTY_SPECIES);
+    species_arr[party_count] = (uint8_t)species;
+    species_arr[party_count + 1] = 0xFF;
+    ctx->wram[0x1000 + (WRAM_PARTY_COUNT - 0xD000)] = party_count + 1;
+
+    fprintf(stderr,
+            "[crystal] Built species=%d level=%d shiny=%d → slot %d "
+            "(stats H/A/D/S/SA/SD = %d/%d/%d/%d/%d/%d, "
+            "DVs A/D/S/Sp = %d/%d/%d/%d, growth=%d, exp=%u)\n",
+            species, level, shiny ? 1 : 0, party_count,
+            hp, at, df, sp, sa, sd,
+            atk_dv, def_dv, spd_dv, spc_dv,
+            growth, exp);
     return true;
 }
 

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pokemon Distribution Builder</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Pokemon Distribution Builder</h1>
+    <p class="subtitle">
+      Build .pkm, .pk1, and .pk2 files for the gb-recompiled runtime.
+      Drop the saved file into <code>injects/&lt;game_id&gt;/</code> next to your
+      cart binary; the runtime's Distributions menu will list it.
+    </p>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="row">
+        <label>Load existing file
+          <input type="file" id="file-input" accept=".pkm,.pk1,.pk2">
+        </label>
+        <span class="status" id="load-status"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Generation</h2>
+      <div class="row">
+        <label><input type="radio" name="gen" value="1" checked> Gen 1 (Red/Blue/Yellow)</label>
+        <label><input type="radio" name="gen" value="2"> Gen 2 (Gold/Silver/Crystal)</label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Pokemon</h2>
+      <div class="grid">
+        <label>Species
+          <select id="species"></select>
+        </label>
+        <label>Level
+          <input type="number" id="level" min="2" max="100" value="50">
+        </label>
+        <label>Shiny
+          <input type="checkbox" id="shiny">
+        </label>
+        <label>Nickname
+          <input type="text" id="nickname" maxlength="10" placeholder="(species name)">
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Original Trainer</h2>
+      <div class="grid">
+        <label>OT Name
+          <input type="text" id="ot-name" maxlength="7" placeholder="(player)">
+        </label>
+        <label>OT ID
+          <input type="number" id="ot-id" min="0" max="65535" placeholder="(player)">
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Moves</h2>
+      <div class="grid grid-4">
+        <label>Slot 1 <select id="move-0" data-slot="0"></select></label>
+        <label>Slot 2 <select id="move-1" data-slot="1"></select></label>
+        <label>Slot 3 <select id="move-2" data-slot="2"></select></label>
+        <label>Slot 4 <select id="move-3" data-slot="3"></select></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>DVs</h2>
+      <div class="grid grid-4">
+        <label>Atk <input type="number" id="dv-atk" min="0" max="15"></label>
+        <label>Def <input type="number" id="dv-def" min="0" max="15"></label>
+        <label>Spd <input type="number" id="dv-spd" min="0" max="15"></label>
+        <label>Spc <input type="number" id="dv-spc" min="0" max="15"></label>
+      </div>
+      <p class="hint">Leave blank to let the runtime roll random DVs at inject time. Shiny checkbox above will override DVs with the canonical shiny pattern.</p>
+    </section>
+
+    <section class="card gen-2-only">
+      <h2>Gen 2 Extras</h2>
+      <div class="grid">
+        <label>Held Item <select id="held-item"></select></label>
+        <label>Happiness <input type="number" id="happiness" min="0" max="255"></label>
+        <label>Pokerus  <input type="number" id="pokerus" min="0" max="255"></label>
+      </div>
+      <p class="hint">
+        Leave blank to let the runtime use its defaults at inject time.<br>
+        Happiness (0-255): 70 = freshly caught, 220+ = friendship-evolution range, 255 = max.<br>
+        Pokerus byte: 0x00 = uninfected, high nibble = strain (1-15), low nibble = days remaining (1-4). 0x44 = active strain-4 infection with 4 days left; once cured the high nibble persists as an immunity marker.
+      </p>
+    </section>
+
+    <section class="card gen-1-only">
+      <h2>Gen 1 Extras</h2>
+      <div class="grid">
+        <label>Catch Rate <input type="number" id="catch-rate" min="1" max="255"></label>
+      </div>
+      <p class="hint">Leave blank to let the runtime fill in the species's default catch rate at inject time.</p>
+    </section>
+
+    <section class="card">
+      <h2>Save</h2>
+      <div class="row">
+        <button id="save-pkm" type="button">Save .pkm</button>
+        <span class="status" id="save-status"></span>
+      </div>
+      <p class="hint">.pk1 and .pk2 binary files can be loaded for editing, but the builder only writes the runtime-native .pkm format.</p>
+      <details>
+        <summary>Preview</summary>
+        <pre id="preview"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

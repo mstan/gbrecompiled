@@ -1,0 +1,1260 @@
+{
+  "_note": "Move IDs 1-165 are shared between Gen 1 and Gen 2. 166-251 are Gen 2 only. Names are taken from pret/pokecrystal MoveNames.",
+  "moves": [
+    {
+      "id": 1,
+      "name": "Pound",
+      "gen": 1
+    },
+    {
+      "id": 2,
+      "name": "Karate Chop",
+      "gen": 1
+    },
+    {
+      "id": 3,
+      "name": "Doubleslap",
+      "gen": 1
+    },
+    {
+      "id": 4,
+      "name": "Comet Punch",
+      "gen": 1
+    },
+    {
+      "id": 5,
+      "name": "Mega Punch",
+      "gen": 1
+    },
+    {
+      "id": 6,
+      "name": "Pay Day",
+      "gen": 1
+    },
+    {
+      "id": 7,
+      "name": "Fire Punch",
+      "gen": 1
+    },
+    {
+      "id": 8,
+      "name": "Ice Punch",
+      "gen": 1
+    },
+    {
+      "id": 9,
+      "name": "Thunderpunch",
+      "gen": 1
+    },
+    {
+      "id": 10,
+      "name": "Scratch",
+      "gen": 1
+    },
+    {
+      "id": 11,
+      "name": "Vicegrip",
+      "gen": 1
+    },
+    {
+      "id": 12,
+      "name": "Guillotine",
+      "gen": 1
+    },
+    {
+      "id": 13,
+      "name": "Razor Wind",
+      "gen": 1
+    },
+    {
+      "id": 14,
+      "name": "Swords Dance",
+      "gen": 1
+    },
+    {
+      "id": 15,
+      "name": "Cut",
+      "gen": 1
+    },
+    {
+      "id": 16,
+      "name": "Gust",
+      "gen": 1
+    },
+    {
+      "id": 17,
+      "name": "Wing Attack",
+      "gen": 1
+    },
+    {
+      "id": 18,
+      "name": "Whirlwind",
+      "gen": 1
+    },
+    {
+      "id": 19,
+      "name": "Fly",
+      "gen": 1
+    },
+    {
+      "id": 20,
+      "name": "Bind",
+      "gen": 1
+    },
+    {
+      "id": 21,
+      "name": "Slam",
+      "gen": 1
+    },
+    {
+      "id": 22,
+      "name": "Vine Whip",
+      "gen": 1
+    },
+    {
+      "id": 23,
+      "name": "Stomp",
+      "gen": 1
+    },
+    {
+      "id": 24,
+      "name": "Double Kick",
+      "gen": 1
+    },
+    {
+      "id": 25,
+      "name": "Mega Kick",
+      "gen": 1
+    },
+    {
+      "id": 26,
+      "name": "Jump Kick",
+      "gen": 1
+    },
+    {
+      "id": 27,
+      "name": "Rolling Kick",
+      "gen": 1
+    },
+    {
+      "id": 28,
+      "name": "Sand-Attack",
+      "gen": 1
+    },
+    {
+      "id": 29,
+      "name": "Headbutt",
+      "gen": 1
+    },
+    {
+      "id": 30,
+      "name": "Horn Attack",
+      "gen": 1
+    },
+    {
+      "id": 31,
+      "name": "Fury Attack",
+      "gen": 1
+    },
+    {
+      "id": 32,
+      "name": "Horn Drill",
+      "gen": 1
+    },
+    {
+      "id": 33,
+      "name": "Tackle",
+      "gen": 1
+    },
+    {
+      "id": 34,
+      "name": "Body Slam",
+      "gen": 1
+    },
+    {
+      "id": 35,
+      "name": "Wrap",
+      "gen": 1
+    },
+    {
+      "id": 36,
+      "name": "Take Down",
+      "gen": 1
+    },
+    {
+      "id": 37,
+      "name": "Thrash",
+      "gen": 1
+    },
+    {
+      "id": 38,
+      "name": "Double-Edge",
+      "gen": 1
+    },
+    {
+      "id": 39,
+      "name": "Tail Whip",
+      "gen": 1
+    },
+    {
+      "id": 40,
+      "name": "Poison Sting",
+      "gen": 1
+    },
+    {
+      "id": 41,
+      "name": "Twineedle",
+      "gen": 1
+    },
+    {
+      "id": 42,
+      "name": "Pin Missile",
+      "gen": 1
+    },
+    {
+      "id": 43,
+      "name": "Leer",
+      "gen": 1
+    },
+    {
+      "id": 44,
+      "name": "Bite",
+      "gen": 1
+    },
+    {
+      "id": 45,
+      "name": "Growl",
+      "gen": 1
+    },
+    {
+      "id": 46,
+      "name": "Roar",
+      "gen": 1
+    },
+    {
+      "id": 47,
+      "name": "Sing",
+      "gen": 1
+    },
+    {
+      "id": 48,
+      "name": "Supersonic",
+      "gen": 1
+    },
+    {
+      "id": 49,
+      "name": "Sonicboom",
+      "gen": 1
+    },
+    {
+      "id": 50,
+      "name": "Disable",
+      "gen": 1
+    },
+    {
+      "id": 51,
+      "name": "Acid",
+      "gen": 1
+    },
+    {
+      "id": 52,
+      "name": "Ember",
+      "gen": 1
+    },
+    {
+      "id": 53,
+      "name": "Flamethrower",
+      "gen": 1
+    },
+    {
+      "id": 54,
+      "name": "Mist",
+      "gen": 1
+    },
+    {
+      "id": 55,
+      "name": "Water Gun",
+      "gen": 1
+    },
+    {
+      "id": 56,
+      "name": "Hydro Pump",
+      "gen": 1
+    },
+    {
+      "id": 57,
+      "name": "Surf",
+      "gen": 1
+    },
+    {
+      "id": 58,
+      "name": "Ice Beam",
+      "gen": 1
+    },
+    {
+      "id": 59,
+      "name": "Blizzard",
+      "gen": 1
+    },
+    {
+      "id": 60,
+      "name": "Psybeam",
+      "gen": 1
+    },
+    {
+      "id": 61,
+      "name": "Bubblebeam",
+      "gen": 1
+    },
+    {
+      "id": 62,
+      "name": "Aurora Beam",
+      "gen": 1
+    },
+    {
+      "id": 63,
+      "name": "Hyper Beam",
+      "gen": 1
+    },
+    {
+      "id": 64,
+      "name": "Peck",
+      "gen": 1
+    },
+    {
+      "id": 65,
+      "name": "Drill Peck",
+      "gen": 1
+    },
+    {
+      "id": 66,
+      "name": "Submission",
+      "gen": 1
+    },
+    {
+      "id": 67,
+      "name": "Low Kick",
+      "gen": 1
+    },
+    {
+      "id": 68,
+      "name": "Counter",
+      "gen": 1
+    },
+    {
+      "id": 69,
+      "name": "Seismic Toss",
+      "gen": 1
+    },
+    {
+      "id": 70,
+      "name": "Strength",
+      "gen": 1
+    },
+    {
+      "id": 71,
+      "name": "Absorb",
+      "gen": 1
+    },
+    {
+      "id": 72,
+      "name": "Mega Drain",
+      "gen": 1
+    },
+    {
+      "id": 73,
+      "name": "Leech Seed",
+      "gen": 1
+    },
+    {
+      "id": 74,
+      "name": "Growth",
+      "gen": 1
+    },
+    {
+      "id": 75,
+      "name": "Razor Leaf",
+      "gen": 1
+    },
+    {
+      "id": 76,
+      "name": "Solarbeam",
+      "gen": 1
+    },
+    {
+      "id": 77,
+      "name": "Poisonpowder",
+      "gen": 1
+    },
+    {
+      "id": 78,
+      "name": "Stun Spore",
+      "gen": 1
+    },
+    {
+      "id": 79,
+      "name": "Sleep Powder",
+      "gen": 1
+    },
+    {
+      "id": 80,
+      "name": "Petal Dance",
+      "gen": 1
+    },
+    {
+      "id": 81,
+      "name": "String Shot",
+      "gen": 1
+    },
+    {
+      "id": 82,
+      "name": "Dragon Rage",
+      "gen": 1
+    },
+    {
+      "id": 83,
+      "name": "Fire Spin",
+      "gen": 1
+    },
+    {
+      "id": 84,
+      "name": "Thundershock",
+      "gen": 1
+    },
+    {
+      "id": 85,
+      "name": "Thunderbolt",
+      "gen": 1
+    },
+    {
+      "id": 86,
+      "name": "Thunder Wave",
+      "gen": 1
+    },
+    {
+      "id": 87,
+      "name": "Thunder",
+      "gen": 1
+    },
+    {
+      "id": 88,
+      "name": "Rock Throw",
+      "gen": 1
+    },
+    {
+      "id": 89,
+      "name": "Earthquake",
+      "gen": 1
+    },
+    {
+      "id": 90,
+      "name": "Fissure",
+      "gen": 1
+    },
+    {
+      "id": 91,
+      "name": "Dig",
+      "gen": 1
+    },
+    {
+      "id": 92,
+      "name": "Toxic",
+      "gen": 1
+    },
+    {
+      "id": 93,
+      "name": "Confusion",
+      "gen": 1
+    },
+    {
+      "id": 94,
+      "name": "Psychic",
+      "gen": 1
+    },
+    {
+      "id": 95,
+      "name": "Hypnosis",
+      "gen": 1
+    },
+    {
+      "id": 96,
+      "name": "Meditate",
+      "gen": 1
+    },
+    {
+      "id": 97,
+      "name": "Agility",
+      "gen": 1
+    },
+    {
+      "id": 98,
+      "name": "Quick Attack",
+      "gen": 1
+    },
+    {
+      "id": 99,
+      "name": "Rage",
+      "gen": 1
+    },
+    {
+      "id": 100,
+      "name": "Teleport",
+      "gen": 1
+    },
+    {
+      "id": 101,
+      "name": "Night Shade",
+      "gen": 1
+    },
+    {
+      "id": 102,
+      "name": "Mimic",
+      "gen": 1
+    },
+    {
+      "id": 103,
+      "name": "Screech",
+      "gen": 1
+    },
+    {
+      "id": 104,
+      "name": "Double Team",
+      "gen": 1
+    },
+    {
+      "id": 105,
+      "name": "Recover",
+      "gen": 1
+    },
+    {
+      "id": 106,
+      "name": "Harden",
+      "gen": 1
+    },
+    {
+      "id": 107,
+      "name": "Minimize",
+      "gen": 1
+    },
+    {
+      "id": 108,
+      "name": "Smokescreen",
+      "gen": 1
+    },
+    {
+      "id": 109,
+      "name": "Confuse Ray",
+      "gen": 1
+    },
+    {
+      "id": 110,
+      "name": "Withdraw",
+      "gen": 1
+    },
+    {
+      "id": 111,
+      "name": "Defense Curl",
+      "gen": 1
+    },
+    {
+      "id": 112,
+      "name": "Barrier",
+      "gen": 1
+    },
+    {
+      "id": 113,
+      "name": "Light Screen",
+      "gen": 1
+    },
+    {
+      "id": 114,
+      "name": "Haze",
+      "gen": 1
+    },
+    {
+      "id": 115,
+      "name": "Reflect",
+      "gen": 1
+    },
+    {
+      "id": 116,
+      "name": "Focus Energy",
+      "gen": 1
+    },
+    {
+      "id": 117,
+      "name": "Bide",
+      "gen": 1
+    },
+    {
+      "id": 118,
+      "name": "Metronome",
+      "gen": 1
+    },
+    {
+      "id": 119,
+      "name": "Mirror Move",
+      "gen": 1
+    },
+    {
+      "id": 120,
+      "name": "Selfdestruct",
+      "gen": 1
+    },
+    {
+      "id": 121,
+      "name": "Egg Bomb",
+      "gen": 1
+    },
+    {
+      "id": 122,
+      "name": "Lick",
+      "gen": 1
+    },
+    {
+      "id": 123,
+      "name": "Smog",
+      "gen": 1
+    },
+    {
+      "id": 124,
+      "name": "Sludge",
+      "gen": 1
+    },
+    {
+      "id": 125,
+      "name": "Bone Club",
+      "gen": 1
+    },
+    {
+      "id": 126,
+      "name": "Fire Blast",
+      "gen": 1
+    },
+    {
+      "id": 127,
+      "name": "Waterfall",
+      "gen": 1
+    },
+    {
+      "id": 128,
+      "name": "Clamp",
+      "gen": 1
+    },
+    {
+      "id": 129,
+      "name": "Swift",
+      "gen": 1
+    },
+    {
+      "id": 130,
+      "name": "Skull Bash",
+      "gen": 1
+    },
+    {
+      "id": 131,
+      "name": "Spike Cannon",
+      "gen": 1
+    },
+    {
+      "id": 132,
+      "name": "Constrict",
+      "gen": 1
+    },
+    {
+      "id": 133,
+      "name": "Amnesia",
+      "gen": 1
+    },
+    {
+      "id": 134,
+      "name": "Kinesis",
+      "gen": 1
+    },
+    {
+      "id": 135,
+      "name": "Softboiled",
+      "gen": 1
+    },
+    {
+      "id": 136,
+      "name": "Hi Jump Kick",
+      "gen": 1
+    },
+    {
+      "id": 137,
+      "name": "Glare",
+      "gen": 1
+    },
+    {
+      "id": 138,
+      "name": "Dream Eater",
+      "gen": 1
+    },
+    {
+      "id": 139,
+      "name": "Poison Gas",
+      "gen": 1
+    },
+    {
+      "id": 140,
+      "name": "Barrage",
+      "gen": 1
+    },
+    {
+      "id": 141,
+      "name": "Leech Life",
+      "gen": 1
+    },
+    {
+      "id": 142,
+      "name": "Lovely Kiss",
+      "gen": 1
+    },
+    {
+      "id": 143,
+      "name": "Sky Attack",
+      "gen": 1
+    },
+    {
+      "id": 144,
+      "name": "Transform",
+      "gen": 1
+    },
+    {
+      "id": 145,
+      "name": "Bubble",
+      "gen": 1
+    },
+    {
+      "id": 146,
+      "name": "Dizzy Punch",
+      "gen": 1
+    },
+    {
+      "id": 147,
+      "name": "Spore",
+      "gen": 1
+    },
+    {
+      "id": 148,
+      "name": "Flash",
+      "gen": 1
+    },
+    {
+      "id": 149,
+      "name": "Psywave",
+      "gen": 1
+    },
+    {
+      "id": 150,
+      "name": "Splash",
+      "gen": 1
+    },
+    {
+      "id": 151,
+      "name": "Acid Armor",
+      "gen": 1
+    },
+    {
+      "id": 152,
+      "name": "Crabhammer",
+      "gen": 1
+    },
+    {
+      "id": 153,
+      "name": "Explosion",
+      "gen": 1
+    },
+    {
+      "id": 154,
+      "name": "Fury Swipes",
+      "gen": 1
+    },
+    {
+      "id": 155,
+      "name": "Bonemerang",
+      "gen": 1
+    },
+    {
+      "id": 156,
+      "name": "Rest",
+      "gen": 1
+    },
+    {
+      "id": 157,
+      "name": "Rock Slide",
+      "gen": 1
+    },
+    {
+      "id": 158,
+      "name": "Hyper Fang",
+      "gen": 1
+    },
+    {
+      "id": 159,
+      "name": "Sharpen",
+      "gen": 1
+    },
+    {
+      "id": 160,
+      "name": "Conversion",
+      "gen": 1
+    },
+    {
+      "id": 161,
+      "name": "Tri Attack",
+      "gen": 1
+    },
+    {
+      "id": 162,
+      "name": "Super Fang",
+      "gen": 1
+    },
+    {
+      "id": 163,
+      "name": "Slash",
+      "gen": 1
+    },
+    {
+      "id": 164,
+      "name": "Substitute",
+      "gen": 1
+    },
+    {
+      "id": 165,
+      "name": "Struggle",
+      "gen": 1
+    },
+    {
+      "id": 166,
+      "name": "Sketch",
+      "gen": 2
+    },
+    {
+      "id": 167,
+      "name": "Triple Kick",
+      "gen": 2
+    },
+    {
+      "id": 168,
+      "name": "Thief",
+      "gen": 2
+    },
+    {
+      "id": 169,
+      "name": "Spider Web",
+      "gen": 2
+    },
+    {
+      "id": 170,
+      "name": "Mind Reader",
+      "gen": 2
+    },
+    {
+      "id": 171,
+      "name": "Nightmare",
+      "gen": 2
+    },
+    {
+      "id": 172,
+      "name": "Flame Wheel",
+      "gen": 2
+    },
+    {
+      "id": 173,
+      "name": "Snore",
+      "gen": 2
+    },
+    {
+      "id": 174,
+      "name": "Curse",
+      "gen": 2
+    },
+    {
+      "id": 175,
+      "name": "Flail",
+      "gen": 2
+    },
+    {
+      "id": 176,
+      "name": "Conversion2",
+      "gen": 2
+    },
+    {
+      "id": 177,
+      "name": "Aeroblast",
+      "gen": 2
+    },
+    {
+      "id": 178,
+      "name": "Cotton Spore",
+      "gen": 2
+    },
+    {
+      "id": 179,
+      "name": "Reversal",
+      "gen": 2
+    },
+    {
+      "id": 180,
+      "name": "Spite",
+      "gen": 2
+    },
+    {
+      "id": 181,
+      "name": "Powder Snow",
+      "gen": 2
+    },
+    {
+      "id": 182,
+      "name": "Protect",
+      "gen": 2
+    },
+    {
+      "id": 183,
+      "name": "Mach Punch",
+      "gen": 2
+    },
+    {
+      "id": 184,
+      "name": "Scary Face",
+      "gen": 2
+    },
+    {
+      "id": 185,
+      "name": "Faint Attack",
+      "gen": 2
+    },
+    {
+      "id": 186,
+      "name": "Sweet Kiss",
+      "gen": 2
+    },
+    {
+      "id": 187,
+      "name": "Belly Drum",
+      "gen": 2
+    },
+    {
+      "id": 188,
+      "name": "Sludge Bomb",
+      "gen": 2
+    },
+    {
+      "id": 189,
+      "name": "Mud-Slap",
+      "gen": 2
+    },
+    {
+      "id": 190,
+      "name": "Octazooka",
+      "gen": 2
+    },
+    {
+      "id": 191,
+      "name": "Spikes",
+      "gen": 2
+    },
+    {
+      "id": 192,
+      "name": "Zap Cannon",
+      "gen": 2
+    },
+    {
+      "id": 193,
+      "name": "Foresight",
+      "gen": 2
+    },
+    {
+      "id": 194,
+      "name": "Destiny Bond",
+      "gen": 2
+    },
+    {
+      "id": 195,
+      "name": "Perish Song",
+      "gen": 2
+    },
+    {
+      "id": 196,
+      "name": "Icy Wind",
+      "gen": 2
+    },
+    {
+      "id": 197,
+      "name": "Detect",
+      "gen": 2
+    },
+    {
+      "id": 198,
+      "name": "Bone Rush",
+      "gen": 2
+    },
+    {
+      "id": 199,
+      "name": "Lock-On",
+      "gen": 2
+    },
+    {
+      "id": 200,
+      "name": "Outrage",
+      "gen": 2
+    },
+    {
+      "id": 201,
+      "name": "Sandstorm",
+      "gen": 2
+    },
+    {
+      "id": 202,
+      "name": "Giga Drain",
+      "gen": 2
+    },
+    {
+      "id": 203,
+      "name": "Endure",
+      "gen": 2
+    },
+    {
+      "id": 204,
+      "name": "Charm",
+      "gen": 2
+    },
+    {
+      "id": 205,
+      "name": "Rollout",
+      "gen": 2
+    },
+    {
+      "id": 206,
+      "name": "False Swipe",
+      "gen": 2
+    },
+    {
+      "id": 207,
+      "name": "Swagger",
+      "gen": 2
+    },
+    {
+      "id": 208,
+      "name": "Milk Drink",
+      "gen": 2
+    },
+    {
+      "id": 209,
+      "name": "Spark",
+      "gen": 2
+    },
+    {
+      "id": 210,
+      "name": "Fury Cutter",
+      "gen": 2
+    },
+    {
+      "id": 211,
+      "name": "Steel Wing",
+      "gen": 2
+    },
+    {
+      "id": 212,
+      "name": "Mean Look",
+      "gen": 2
+    },
+    {
+      "id": 213,
+      "name": "Attract",
+      "gen": 2
+    },
+    {
+      "id": 214,
+      "name": "Sleep Talk",
+      "gen": 2
+    },
+    {
+      "id": 215,
+      "name": "Heal Bell",
+      "gen": 2
+    },
+    {
+      "id": 216,
+      "name": "Return",
+      "gen": 2
+    },
+    {
+      "id": 217,
+      "name": "Present",
+      "gen": 2
+    },
+    {
+      "id": 218,
+      "name": "Frustration",
+      "gen": 2
+    },
+    {
+      "id": 219,
+      "name": "Safeguard",
+      "gen": 2
+    },
+    {
+      "id": 220,
+      "name": "Pain Split",
+      "gen": 2
+    },
+    {
+      "id": 221,
+      "name": "Sacred Fire",
+      "gen": 2
+    },
+    {
+      "id": 222,
+      "name": "Magnitude",
+      "gen": 2
+    },
+    {
+      "id": 223,
+      "name": "Dynamicpunch",
+      "gen": 2
+    },
+    {
+      "id": 224,
+      "name": "Megahorn",
+      "gen": 2
+    },
+    {
+      "id": 225,
+      "name": "Dragonbreath",
+      "gen": 2
+    },
+    {
+      "id": 226,
+      "name": "Baton Pass",
+      "gen": 2
+    },
+    {
+      "id": 227,
+      "name": "Encore",
+      "gen": 2
+    },
+    {
+      "id": 228,
+      "name": "Pursuit",
+      "gen": 2
+    },
+    {
+      "id": 229,
+      "name": "Rapid Spin",
+      "gen": 2
+    },
+    {
+      "id": 230,
+      "name": "Sweet Scent",
+      "gen": 2
+    },
+    {
+      "id": 231,
+      "name": "Iron Tail",
+      "gen": 2
+    },
+    {
+      "id": 232,
+      "name": "Metal Claw",
+      "gen": 2
+    },
+    {
+      "id": 233,
+      "name": "Vital Throw",
+      "gen": 2
+    },
+    {
+      "id": 234,
+      "name": "Morning Sun",
+      "gen": 2
+    },
+    {
+      "id": 235,
+      "name": "Synthesis",
+      "gen": 2
+    },
+    {
+      "id": 236,
+      "name": "Moonlight",
+      "gen": 2
+    },
+    {
+      "id": 237,
+      "name": "Hidden Power",
+      "gen": 2
+    },
+    {
+      "id": 238,
+      "name": "Cross Chop",
+      "gen": 2
+    },
+    {
+      "id": 239,
+      "name": "Twister",
+      "gen": 2
+    },
+    {
+      "id": 240,
+      "name": "Rain Dance",
+      "gen": 2
+    },
+    {
+      "id": 241,
+      "name": "Sunny Day",
+      "gen": 2
+    },
+    {
+      "id": 242,
+      "name": "Crunch",
+      "gen": 2
+    },
+    {
+      "id": 243,
+      "name": "Mirror Coat",
+      "gen": 2
+    },
+    {
+      "id": 244,
+      "name": "Psych Up",
+      "gen": 2
+    },
+    {
+      "id": 245,
+      "name": "Extremespeed",
+      "gen": 2
+    },
+    {
+      "id": 246,
+      "name": "Ancientpower",
+      "gen": 2
+    },
+    {
+      "id": 247,
+      "name": "Shadow Ball",
+      "gen": 2
+    },
+    {
+      "id": 248,
+      "name": "Future Sight",
+      "gen": 2
+    },
+    {
+      "id": 249,
+      "name": "Rock Smash",
+      "gen": 2
+    },
+    {
+      "id": 250,
+      "name": "Whirlpool",
+      "gen": 2
+    },
+    {
+      "id": 251,
+      "name": "Beat Up",
+      "gen": 2
+    }
+  ]
+}

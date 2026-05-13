@@ -1,0 +1,4523 @@
+{
+  "_note": "Generated from pret/pokecrystal. species byte for Gen 2 writes is the dex# directly.",
+  "species": [
+    {
+      "dex": 1,
+      "name": "BULBASAUR",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 45,
+        "atk": 49,
+        "def": 49,
+        "spd": 45,
+        "satk": 65,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 2,
+      "name": "IVYSAUR",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 60,
+        "atk": 62,
+        "def": 63,
+        "spd": 60,
+        "satk": 80,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 3,
+      "name": "VENUSAUR",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 80,
+        "atk": 82,
+        "def": 83,
+        "spd": 80,
+        "satk": 100,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 4,
+      "name": "CHARMANDER",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 39,
+        "atk": 52,
+        "def": 43,
+        "spd": 65,
+        "satk": 60,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 5,
+      "name": "CHARMELEON",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 58,
+        "atk": 64,
+        "def": 58,
+        "spd": 80,
+        "satk": 80,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 6,
+      "name": "CHARIZARD",
+      "types": [
+        20,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 78,
+        "atk": 84,
+        "def": 78,
+        "spd": 100,
+        "satk": 109,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 7,
+      "name": "SQUIRTLE",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 44,
+        "atk": 48,
+        "def": 65,
+        "spd": 43,
+        "satk": 50,
+        "sdef": 64
+      }
+    },
+    {
+      "dex": 8,
+      "name": "WARTORTLE",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 59,
+        "atk": 63,
+        "def": 80,
+        "spd": 58,
+        "satk": 65,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 9,
+      "name": "BLASTOISE",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 79,
+        "atk": 83,
+        "def": 100,
+        "spd": 78,
+        "satk": 85,
+        "sdef": 105
+      }
+    },
+    {
+      "dex": 10,
+      "name": "CATERPIE",
+      "types": [
+        7,
+        7
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 45,
+        "atk": 30,
+        "def": 35,
+        "spd": 45,
+        "satk": 20,
+        "sdef": 20
+      }
+    },
+    {
+      "dex": 11,
+      "name": "METAPOD",
+      "types": [
+        7,
+        7
+      ],
+      "catch_rate": 120,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 20,
+        "def": 55,
+        "spd": 30,
+        "satk": 25,
+        "sdef": 25
+      }
+    },
+    {
+      "dex": 12,
+      "name": "BUTTERFREE",
+      "types": [
+        7,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 45,
+        "def": 50,
+        "spd": 70,
+        "satk": 80,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 13,
+      "name": "WEEDLE",
+      "types": [
+        7,
+        3
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 35,
+        "def": 30,
+        "spd": 50,
+        "satk": 20,
+        "sdef": 20
+      }
+    },
+    {
+      "dex": 14,
+      "name": "KAKUNA",
+      "types": [
+        7,
+        3
+      ],
+      "catch_rate": 120,
+      "growth_rate": 0,
+      "base": {
+        "hp": 45,
+        "atk": 25,
+        "def": 50,
+        "spd": 35,
+        "satk": 25,
+        "sdef": 25
+      }
+    },
+    {
+      "dex": 15,
+      "name": "BEEDRILL",
+      "types": [
+        7,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 80,
+        "def": 40,
+        "spd": 75,
+        "satk": 45,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 16,
+      "name": "PIDGEY",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 255,
+      "growth_rate": 3,
+      "base": {
+        "hp": 40,
+        "atk": 45,
+        "def": 40,
+        "spd": 56,
+        "satk": 35,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 17,
+      "name": "PIDGEOTTO",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 63,
+        "atk": 60,
+        "def": 55,
+        "spd": 71,
+        "satk": 50,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 18,
+      "name": "PIDGEOT",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 83,
+        "atk": 80,
+        "def": 75,
+        "spd": 91,
+        "satk": 70,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 19,
+      "name": "RATTATA",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 30,
+        "atk": 56,
+        "def": 35,
+        "spd": 72,
+        "satk": 25,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 20,
+      "name": "RATICATE",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 55,
+        "atk": 81,
+        "def": 60,
+        "spd": 97,
+        "satk": 50,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 21,
+      "name": "SPEAROW",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 60,
+        "def": 30,
+        "spd": 70,
+        "satk": 31,
+        "sdef": 31
+      }
+    },
+    {
+      "dex": 22,
+      "name": "FEAROW",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 90,
+        "def": 65,
+        "spd": 100,
+        "satk": 61,
+        "sdef": 61
+      }
+    },
+    {
+      "dex": 23,
+      "name": "EKANS",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 60,
+        "def": 44,
+        "spd": 55,
+        "satk": 40,
+        "sdef": 54
+      }
+    },
+    {
+      "dex": 24,
+      "name": "ARBOK",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 85,
+        "def": 69,
+        "spd": 80,
+        "satk": 65,
+        "sdef": 79
+      }
+    },
+    {
+      "dex": 25,
+      "name": "PIKACHU",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 55,
+        "def": 30,
+        "spd": 90,
+        "satk": 50,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 26,
+      "name": "RAICHU",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 90,
+        "def": 55,
+        "spd": 100,
+        "satk": 90,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 27,
+      "name": "SANDSHREW",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 75,
+        "def": 85,
+        "spd": 40,
+        "satk": 20,
+        "sdef": 30
+      }
+    },
+    {
+      "dex": 28,
+      "name": "SANDSLASH",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 75,
+        "atk": 100,
+        "def": 110,
+        "spd": 65,
+        "satk": 45,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 29,
+      "name": "NIDORAN♀",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 235,
+      "growth_rate": 3,
+      "base": {
+        "hp": 55,
+        "atk": 47,
+        "def": 52,
+        "spd": 41,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 30,
+      "name": "NIDORINA",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 70,
+        "atk": 62,
+        "def": 67,
+        "spd": 56,
+        "satk": 55,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 31,
+      "name": "NIDOQUEEN",
+      "types": [
+        3,
+        4
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 90,
+        "atk": 82,
+        "def": 87,
+        "spd": 76,
+        "satk": 75,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 32,
+      "name": "NIDORAN♂",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 235,
+      "growth_rate": 3,
+      "base": {
+        "hp": 46,
+        "atk": 57,
+        "def": 40,
+        "spd": 50,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 33,
+      "name": "NIDORINO",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 61,
+        "atk": 72,
+        "def": 57,
+        "spd": 65,
+        "satk": 55,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 34,
+      "name": "NIDOKING",
+      "types": [
+        3,
+        4
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 81,
+        "atk": 92,
+        "def": 77,
+        "spd": 85,
+        "satk": 85,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 35,
+      "name": "CLEFAIRY",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 150,
+      "growth_rate": 4,
+      "base": {
+        "hp": 70,
+        "atk": 45,
+        "def": 48,
+        "spd": 35,
+        "satk": 60,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 36,
+      "name": "CLEFABLE",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 25,
+      "growth_rate": 4,
+      "base": {
+        "hp": 95,
+        "atk": 70,
+        "def": 73,
+        "spd": 60,
+        "satk": 85,
+        "sdef": 90
+      }
+    },
+    {
+      "dex": 37,
+      "name": "VULPIX",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 38,
+        "atk": 41,
+        "def": 40,
+        "spd": 65,
+        "satk": 50,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 38,
+      "name": "NINETALES",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 73,
+        "atk": 76,
+        "def": 75,
+        "spd": 100,
+        "satk": 81,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 39,
+      "name": "JIGGLYPUFF",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 170,
+      "growth_rate": 4,
+      "base": {
+        "hp": 115,
+        "atk": 45,
+        "def": 20,
+        "spd": 20,
+        "satk": 45,
+        "sdef": 25
+      }
+    },
+    {
+      "dex": 40,
+      "name": "WIGGLYTUFF",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 50,
+      "growth_rate": 4,
+      "base": {
+        "hp": 140,
+        "atk": 70,
+        "def": 45,
+        "spd": 45,
+        "satk": 75,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 41,
+      "name": "ZUBAT",
+      "types": [
+        3,
+        2
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 45,
+        "def": 35,
+        "spd": 55,
+        "satk": 30,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 42,
+      "name": "GOLBAT",
+      "types": [
+        3,
+        2
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 75,
+        "atk": 80,
+        "def": 70,
+        "spd": 90,
+        "satk": 65,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 43,
+      "name": "ODDISH",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 255,
+      "growth_rate": 3,
+      "base": {
+        "hp": 45,
+        "atk": 50,
+        "def": 55,
+        "spd": 30,
+        "satk": 75,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 44,
+      "name": "GLOOM",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 60,
+        "atk": 65,
+        "def": 70,
+        "spd": 40,
+        "satk": 85,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 45,
+      "name": "VILEPLUME",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 75,
+        "atk": 80,
+        "def": 85,
+        "spd": 50,
+        "satk": 100,
+        "sdef": 90
+      }
+    },
+    {
+      "dex": 46,
+      "name": "PARAS",
+      "types": [
+        7,
+        22
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 70,
+        "def": 55,
+        "spd": 25,
+        "satk": 45,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 47,
+      "name": "PARASECT",
+      "types": [
+        7,
+        22
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 95,
+        "def": 80,
+        "spd": 30,
+        "satk": 60,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 48,
+      "name": "VENONAT",
+      "types": [
+        7,
+        3
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 55,
+        "def": 50,
+        "spd": 45,
+        "satk": 40,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 49,
+      "name": "VENOMOTH",
+      "types": [
+        7,
+        3
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 70,
+        "atk": 65,
+        "def": 60,
+        "spd": 90,
+        "satk": 90,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 50,
+      "name": "DIGLETT",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 10,
+        "atk": 55,
+        "def": 25,
+        "spd": 95,
+        "satk": 35,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 51,
+      "name": "DUGTRIO",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 50,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 80,
+        "def": 50,
+        "spd": 120,
+        "satk": 50,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 52,
+      "name": "MEOWTH",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 45,
+        "def": 35,
+        "spd": 90,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 53,
+      "name": "PERSIAN",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 70,
+        "def": 60,
+        "spd": 115,
+        "satk": 65,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 54,
+      "name": "PSYDUCK",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 52,
+        "def": 48,
+        "spd": 55,
+        "satk": 65,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 55,
+      "name": "GOLDUCK",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 80,
+        "atk": 82,
+        "def": 78,
+        "spd": 85,
+        "satk": 95,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 56,
+      "name": "MANKEY",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 80,
+        "def": 35,
+        "spd": 70,
+        "satk": 35,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 57,
+      "name": "PRIMEAPE",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 105,
+        "def": 60,
+        "spd": 95,
+        "satk": 60,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 58,
+      "name": "GROWLITHE",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 190,
+      "growth_rate": 5,
+      "base": {
+        "hp": 55,
+        "atk": 70,
+        "def": 45,
+        "spd": 60,
+        "satk": 70,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 59,
+      "name": "ARCANINE",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 75,
+      "growth_rate": 5,
+      "base": {
+        "hp": 90,
+        "atk": 110,
+        "def": 80,
+        "spd": 95,
+        "satk": 100,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 60,
+      "name": "POLIWAG",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 255,
+      "growth_rate": 3,
+      "base": {
+        "hp": 40,
+        "atk": 50,
+        "def": 40,
+        "spd": 90,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 61,
+      "name": "POLIWHIRL",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 65,
+        "atk": 65,
+        "def": 65,
+        "spd": 90,
+        "satk": 50,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 62,
+      "name": "POLIWRATH",
+      "types": [
+        21,
+        1
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 90,
+        "atk": 85,
+        "def": 95,
+        "spd": 70,
+        "satk": 70,
+        "sdef": 90
+      }
+    },
+    {
+      "dex": 63,
+      "name": "ABRA",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 200,
+      "growth_rate": 3,
+      "base": {
+        "hp": 25,
+        "atk": 20,
+        "def": 15,
+        "spd": 90,
+        "satk": 105,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 64,
+      "name": "KADABRA",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 100,
+      "growth_rate": 3,
+      "base": {
+        "hp": 40,
+        "atk": 35,
+        "def": 30,
+        "spd": 105,
+        "satk": 120,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 65,
+      "name": "ALAKAZAM",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 50,
+      "growth_rate": 3,
+      "base": {
+        "hp": 55,
+        "atk": 50,
+        "def": 45,
+        "spd": 120,
+        "satk": 135,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 66,
+      "name": "MACHOP",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 180,
+      "growth_rate": 3,
+      "base": {
+        "hp": 70,
+        "atk": 80,
+        "def": 50,
+        "spd": 35,
+        "satk": 35,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 67,
+      "name": "MACHOKE",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 90,
+      "growth_rate": 3,
+      "base": {
+        "hp": 80,
+        "atk": 100,
+        "def": 70,
+        "spd": 45,
+        "satk": 50,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 68,
+      "name": "MACHAMP",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 90,
+        "atk": 130,
+        "def": 80,
+        "spd": 55,
+        "satk": 65,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 69,
+      "name": "BELLSPROUT",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 255,
+      "growth_rate": 3,
+      "base": {
+        "hp": 50,
+        "atk": 75,
+        "def": 35,
+        "spd": 40,
+        "satk": 70,
+        "sdef": 30
+      }
+    },
+    {
+      "dex": 70,
+      "name": "WEEPINBELL",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 65,
+        "atk": 90,
+        "def": 50,
+        "spd": 55,
+        "satk": 85,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 71,
+      "name": "VICTREEBEL",
+      "types": [
+        22,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 80,
+        "atk": 105,
+        "def": 65,
+        "spd": 70,
+        "satk": 100,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 72,
+      "name": "TENTACOOL",
+      "types": [
+        21,
+        3
+      ],
+      "catch_rate": 190,
+      "growth_rate": 5,
+      "base": {
+        "hp": 40,
+        "atk": 40,
+        "def": 35,
+        "spd": 70,
+        "satk": 50,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 73,
+      "name": "TENTACRUEL",
+      "types": [
+        21,
+        3
+      ],
+      "catch_rate": 60,
+      "growth_rate": 5,
+      "base": {
+        "hp": 80,
+        "atk": 70,
+        "def": 65,
+        "spd": 100,
+        "satk": 80,
+        "sdef": 120
+      }
+    },
+    {
+      "dex": 74,
+      "name": "GEODUDE",
+      "types": [
+        5,
+        4
+      ],
+      "catch_rate": 255,
+      "growth_rate": 3,
+      "base": {
+        "hp": 40,
+        "atk": 80,
+        "def": 100,
+        "spd": 20,
+        "satk": 30,
+        "sdef": 30
+      }
+    },
+    {
+      "dex": 75,
+      "name": "GRAVELER",
+      "types": [
+        5,
+        4
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 55,
+        "atk": 95,
+        "def": 115,
+        "spd": 35,
+        "satk": 45,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 76,
+      "name": "GOLEM",
+      "types": [
+        5,
+        4
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 80,
+        "atk": 110,
+        "def": 130,
+        "spd": 45,
+        "satk": 55,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 77,
+      "name": "PONYTA",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 85,
+        "def": 55,
+        "spd": 90,
+        "satk": 65,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 78,
+      "name": "RAPIDASH",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 100,
+        "def": 70,
+        "spd": 105,
+        "satk": 80,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 79,
+      "name": "SLOWPOKE",
+      "types": [
+        21,
+        24
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 90,
+        "atk": 65,
+        "def": 65,
+        "spd": 15,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 80,
+      "name": "SLOWBRO",
+      "types": [
+        21,
+        24
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 95,
+        "atk": 75,
+        "def": 110,
+        "spd": 30,
+        "satk": 100,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 81,
+      "name": "MAGNEMITE",
+      "types": [
+        23,
+        9
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 25,
+        "atk": 35,
+        "def": 70,
+        "spd": 45,
+        "satk": 95,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 82,
+      "name": "MAGNETON",
+      "types": [
+        23,
+        9
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 60,
+        "def": 95,
+        "spd": 70,
+        "satk": 120,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 83,
+      "name": "FARFETCH'D",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 52,
+        "atk": 65,
+        "def": 55,
+        "spd": 60,
+        "satk": 58,
+        "sdef": 62
+      }
+    },
+    {
+      "dex": 84,
+      "name": "DODUO",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 85,
+        "def": 45,
+        "spd": 75,
+        "satk": 35,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 85,
+      "name": "DODRIO",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 110,
+        "def": 70,
+        "spd": 100,
+        "satk": 60,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 86,
+      "name": "SEEL",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 45,
+        "def": 55,
+        "spd": 45,
+        "satk": 45,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 87,
+      "name": "DEWGONG",
+      "types": [
+        21,
+        25
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 90,
+        "atk": 70,
+        "def": 80,
+        "spd": 70,
+        "satk": 70,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 88,
+      "name": "GRIMER",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 80,
+        "atk": 80,
+        "def": 50,
+        "spd": 25,
+        "satk": 40,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 89,
+      "name": "MUK",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 105,
+        "atk": 105,
+        "def": 75,
+        "spd": 50,
+        "satk": 65,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 90,
+      "name": "SHELLDER",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 190,
+      "growth_rate": 5,
+      "base": {
+        "hp": 30,
+        "atk": 65,
+        "def": 100,
+        "spd": 40,
+        "satk": 45,
+        "sdef": 25
+      }
+    },
+    {
+      "dex": 91,
+      "name": "CLOYSTER",
+      "types": [
+        21,
+        25
+      ],
+      "catch_rate": 60,
+      "growth_rate": 5,
+      "base": {
+        "hp": 50,
+        "atk": 95,
+        "def": 180,
+        "spd": 70,
+        "satk": 85,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 92,
+      "name": "GASTLY",
+      "types": [
+        8,
+        3
+      ],
+      "catch_rate": 190,
+      "growth_rate": 3,
+      "base": {
+        "hp": 30,
+        "atk": 35,
+        "def": 30,
+        "spd": 80,
+        "satk": 100,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 93,
+      "name": "HAUNTER",
+      "types": [
+        8,
+        3
+      ],
+      "catch_rate": 90,
+      "growth_rate": 3,
+      "base": {
+        "hp": 45,
+        "atk": 50,
+        "def": 45,
+        "spd": 95,
+        "satk": 115,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 94,
+      "name": "GENGAR",
+      "types": [
+        8,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 60,
+        "atk": 65,
+        "def": 60,
+        "spd": 110,
+        "satk": 130,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 95,
+      "name": "ONIX",
+      "types": [
+        5,
+        4
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 45,
+        "def": 160,
+        "spd": 70,
+        "satk": 30,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 96,
+      "name": "DROWZEE",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 48,
+        "def": 45,
+        "spd": 42,
+        "satk": 43,
+        "sdef": 90
+      }
+    },
+    {
+      "dex": 97,
+      "name": "HYPNO",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 85,
+        "atk": 73,
+        "def": 70,
+        "spd": 67,
+        "satk": 73,
+        "sdef": 115
+      }
+    },
+    {
+      "dex": 98,
+      "name": "KRABBY",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 225,
+      "growth_rate": 0,
+      "base": {
+        "hp": 30,
+        "atk": 105,
+        "def": 90,
+        "spd": 50,
+        "satk": 25,
+        "sdef": 25
+      }
+    },
+    {
+      "dex": 99,
+      "name": "KINGLER",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 55,
+        "atk": 130,
+        "def": 115,
+        "spd": 75,
+        "satk": 50,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 100,
+      "name": "VOLTORB",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 30,
+        "def": 50,
+        "spd": 100,
+        "satk": 55,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 101,
+      "name": "ELECTRODE",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 50,
+        "def": 70,
+        "spd": 140,
+        "satk": 80,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 102,
+      "name": "EXEGGCUTE",
+      "types": [
+        22,
+        24
+      ],
+      "catch_rate": 90,
+      "growth_rate": 5,
+      "base": {
+        "hp": 60,
+        "atk": 40,
+        "def": 80,
+        "spd": 40,
+        "satk": 60,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 103,
+      "name": "EXEGGUTOR",
+      "types": [
+        22,
+        24
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 95,
+        "atk": 95,
+        "def": 85,
+        "spd": 55,
+        "satk": 125,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 104,
+      "name": "CUBONE",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 50,
+        "def": 95,
+        "spd": 35,
+        "satk": 40,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 105,
+      "name": "MAROWAK",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 80,
+        "def": 110,
+        "spd": 45,
+        "satk": 50,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 106,
+      "name": "HITMONLEE",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 120,
+        "def": 53,
+        "spd": 87,
+        "satk": 35,
+        "sdef": 110
+      }
+    },
+    {
+      "dex": 107,
+      "name": "HITMONCHAN",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 105,
+        "def": 79,
+        "spd": 76,
+        "satk": 35,
+        "sdef": 110
+      }
+    },
+    {
+      "dex": 108,
+      "name": "LICKITUNG",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 90,
+        "atk": 55,
+        "def": 75,
+        "spd": 30,
+        "satk": 60,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 109,
+      "name": "KOFFING",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 65,
+        "def": 95,
+        "spd": 35,
+        "satk": 60,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 110,
+      "name": "WEEZING",
+      "types": [
+        3,
+        3
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 90,
+        "def": 120,
+        "spd": 60,
+        "satk": 85,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 111,
+      "name": "RHYHORN",
+      "types": [
+        4,
+        5
+      ],
+      "catch_rate": 120,
+      "growth_rate": 5,
+      "base": {
+        "hp": 80,
+        "atk": 85,
+        "def": 95,
+        "spd": 25,
+        "satk": 30,
+        "sdef": 30
+      }
+    },
+    {
+      "dex": 112,
+      "name": "RHYDON",
+      "types": [
+        4,
+        5
+      ],
+      "catch_rate": 60,
+      "growth_rate": 5,
+      "base": {
+        "hp": 105,
+        "atk": 130,
+        "def": 120,
+        "spd": 40,
+        "satk": 45,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 113,
+      "name": "CHANSEY",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 30,
+      "growth_rate": 4,
+      "base": {
+        "hp": 250,
+        "atk": 5,
+        "def": 5,
+        "spd": 50,
+        "satk": 35,
+        "sdef": 105
+      }
+    },
+    {
+      "dex": 114,
+      "name": "TANGELA",
+      "types": [
+        22,
+        22
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 55,
+        "def": 115,
+        "spd": 60,
+        "satk": 100,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 115,
+      "name": "KANGASKHAN",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 105,
+        "atk": 95,
+        "def": 80,
+        "spd": 90,
+        "satk": 40,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 116,
+      "name": "HORSEA",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 225,
+      "growth_rate": 0,
+      "base": {
+        "hp": 30,
+        "atk": 40,
+        "def": 70,
+        "spd": 60,
+        "satk": 70,
+        "sdef": 25
+      }
+    },
+    {
+      "dex": 117,
+      "name": "SEADRA",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 55,
+        "atk": 65,
+        "def": 95,
+        "spd": 85,
+        "satk": 95,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 118,
+      "name": "GOLDEEN",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 225,
+      "growth_rate": 0,
+      "base": {
+        "hp": 45,
+        "atk": 67,
+        "def": 60,
+        "spd": 63,
+        "satk": 35,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 119,
+      "name": "SEAKING",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 80,
+        "atk": 92,
+        "def": 65,
+        "spd": 68,
+        "satk": 65,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 120,
+      "name": "STARYU",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 225,
+      "growth_rate": 5,
+      "base": {
+        "hp": 30,
+        "atk": 45,
+        "def": 55,
+        "spd": 85,
+        "satk": 70,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 121,
+      "name": "STARMIE",
+      "types": [
+        21,
+        24
+      ],
+      "catch_rate": 60,
+      "growth_rate": 5,
+      "base": {
+        "hp": 60,
+        "atk": 75,
+        "def": 85,
+        "spd": 115,
+        "satk": 100,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 122,
+      "name": "MR.MIME",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 45,
+        "def": 65,
+        "spd": 90,
+        "satk": 100,
+        "sdef": 120
+      }
+    },
+    {
+      "dex": 123,
+      "name": "SCYTHER",
+      "types": [
+        7,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 70,
+        "atk": 110,
+        "def": 80,
+        "spd": 105,
+        "satk": 55,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 124,
+      "name": "JYNX",
+      "types": [
+        25,
+        24
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 50,
+        "def": 35,
+        "spd": 95,
+        "satk": 115,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 125,
+      "name": "ELECTABUZZ",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 83,
+        "def": 57,
+        "spd": 105,
+        "satk": 95,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 126,
+      "name": "MAGMAR",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 95,
+        "def": 57,
+        "spd": 93,
+        "satk": 100,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 127,
+      "name": "PINSIR",
+      "types": [
+        7,
+        7
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 65,
+        "atk": 125,
+        "def": 100,
+        "spd": 85,
+        "satk": 55,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 128,
+      "name": "TAUROS",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 75,
+        "atk": 100,
+        "def": 95,
+        "spd": 110,
+        "satk": 40,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 129,
+      "name": "MAGIKARP",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 255,
+      "growth_rate": 5,
+      "base": {
+        "hp": 20,
+        "atk": 10,
+        "def": 55,
+        "spd": 80,
+        "satk": 15,
+        "sdef": 20
+      }
+    },
+    {
+      "dex": 130,
+      "name": "GYARADOS",
+      "types": [
+        21,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 95,
+        "atk": 125,
+        "def": 79,
+        "spd": 81,
+        "satk": 60,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 131,
+      "name": "LAPRAS",
+      "types": [
+        21,
+        25
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 130,
+        "atk": 85,
+        "def": 80,
+        "spd": 60,
+        "satk": 85,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 132,
+      "name": "DITTO",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 35,
+      "growth_rate": 0,
+      "base": {
+        "hp": 48,
+        "atk": 48,
+        "def": 48,
+        "spd": 48,
+        "satk": 48,
+        "sdef": 48
+      }
+    },
+    {
+      "dex": 133,
+      "name": "EEVEE",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 55,
+        "atk": 55,
+        "def": 50,
+        "spd": 55,
+        "satk": 45,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 134,
+      "name": "VAPOREON",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 130,
+        "atk": 65,
+        "def": 60,
+        "spd": 65,
+        "satk": 110,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 135,
+      "name": "JOLTEON",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 65,
+        "def": 60,
+        "spd": 130,
+        "satk": 110,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 136,
+      "name": "FLAREON",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 130,
+        "def": 60,
+        "spd": 65,
+        "satk": 95,
+        "sdef": 110
+      }
+    },
+    {
+      "dex": 137,
+      "name": "PORYGON",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 60,
+        "def": 70,
+        "spd": 40,
+        "satk": 85,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 138,
+      "name": "OMANYTE",
+      "types": [
+        5,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 40,
+        "def": 100,
+        "spd": 35,
+        "satk": 90,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 139,
+      "name": "OMASTAR",
+      "types": [
+        5,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 70,
+        "atk": 60,
+        "def": 125,
+        "spd": 55,
+        "satk": 115,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 140,
+      "name": "KABUTO",
+      "types": [
+        5,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 30,
+        "atk": 80,
+        "def": 90,
+        "spd": 55,
+        "satk": 55,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 141,
+      "name": "KABUTOPS",
+      "types": [
+        5,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 115,
+        "def": 105,
+        "spd": 80,
+        "satk": 65,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 142,
+      "name": "AERODACTYL",
+      "types": [
+        5,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 80,
+        "atk": 105,
+        "def": 65,
+        "spd": 130,
+        "satk": 60,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 143,
+      "name": "SNORLAX",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 25,
+      "growth_rate": 5,
+      "base": {
+        "hp": 160,
+        "atk": 110,
+        "def": 65,
+        "spd": 30,
+        "satk": 65,
+        "sdef": 110
+      }
+    },
+    {
+      "dex": 144,
+      "name": "ARTICUNO",
+      "types": [
+        25,
+        2
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 90,
+        "atk": 85,
+        "def": 100,
+        "spd": 85,
+        "satk": 95,
+        "sdef": 125
+      }
+    },
+    {
+      "dex": 145,
+      "name": "ZAPDOS",
+      "types": [
+        23,
+        2
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 90,
+        "atk": 90,
+        "def": 85,
+        "spd": 100,
+        "satk": 125,
+        "sdef": 90
+      }
+    },
+    {
+      "dex": 146,
+      "name": "MOLTRES",
+      "types": [
+        20,
+        2
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 90,
+        "atk": 100,
+        "def": 90,
+        "spd": 90,
+        "satk": 125,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 147,
+      "name": "DRATINI",
+      "types": [
+        26,
+        26
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 41,
+        "atk": 64,
+        "def": 45,
+        "spd": 50,
+        "satk": 50,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 148,
+      "name": "DRAGONAIR",
+      "types": [
+        26,
+        26
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 61,
+        "atk": 84,
+        "def": 65,
+        "spd": 70,
+        "satk": 70,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 149,
+      "name": "DRAGONITE",
+      "types": [
+        26,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 91,
+        "atk": 134,
+        "def": 95,
+        "spd": 80,
+        "satk": 100,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 150,
+      "name": "MEWTWO",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 106,
+        "atk": 110,
+        "def": 90,
+        "spd": 130,
+        "satk": 154,
+        "sdef": 90
+      }
+    },
+    {
+      "dex": 151,
+      "name": "MEW",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 100,
+        "atk": 100,
+        "def": 100,
+        "spd": 100,
+        "satk": 100,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 152,
+      "name": "CHIKORITA",
+      "types": [
+        22,
+        22
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 45,
+        "atk": 49,
+        "def": 65,
+        "spd": 45,
+        "satk": 49,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 153,
+      "name": "BAYLEEF",
+      "types": [
+        22,
+        22
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 60,
+        "atk": 62,
+        "def": 80,
+        "spd": 60,
+        "satk": 63,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 154,
+      "name": "MEGANIUM",
+      "types": [
+        22,
+        22
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 80,
+        "atk": 82,
+        "def": 100,
+        "spd": 80,
+        "satk": 83,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 155,
+      "name": "CYNDAQUIL",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 39,
+        "atk": 52,
+        "def": 43,
+        "spd": 65,
+        "satk": 60,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 156,
+      "name": "QUILAVA",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 58,
+        "atk": 64,
+        "def": 58,
+        "spd": 80,
+        "satk": 80,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 157,
+      "name": "TYPHLOSION",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 78,
+        "atk": 84,
+        "def": 78,
+        "spd": 100,
+        "satk": 109,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 158,
+      "name": "TOTODILE",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 50,
+        "atk": 65,
+        "def": 64,
+        "spd": 43,
+        "satk": 44,
+        "sdef": 48
+      }
+    },
+    {
+      "dex": 159,
+      "name": "CROCONAW",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 65,
+        "atk": 80,
+        "def": 80,
+        "spd": 58,
+        "satk": 59,
+        "sdef": 63
+      }
+    },
+    {
+      "dex": 160,
+      "name": "FERALIGATR",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 85,
+        "atk": 105,
+        "def": 100,
+        "spd": 78,
+        "satk": 79,
+        "sdef": 83
+      }
+    },
+    {
+      "dex": 161,
+      "name": "SENTRET",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 46,
+        "def": 34,
+        "spd": 20,
+        "satk": 35,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 162,
+      "name": "FURRET",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 85,
+        "atk": 76,
+        "def": 64,
+        "spd": 90,
+        "satk": 45,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 163,
+      "name": "HOOTHOOT",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 30,
+        "def": 30,
+        "spd": 50,
+        "satk": 36,
+        "sdef": 56
+      }
+    },
+    {
+      "dex": 164,
+      "name": "NOCTOWL",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 100,
+        "atk": 50,
+        "def": 50,
+        "spd": 70,
+        "satk": 76,
+        "sdef": 96
+      }
+    },
+    {
+      "dex": 165,
+      "name": "LEDYBA",
+      "types": [
+        7,
+        2
+      ],
+      "catch_rate": 255,
+      "growth_rate": 4,
+      "base": {
+        "hp": 40,
+        "atk": 20,
+        "def": 30,
+        "spd": 55,
+        "satk": 40,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 166,
+      "name": "LEDIAN",
+      "types": [
+        7,
+        2
+      ],
+      "catch_rate": 90,
+      "growth_rate": 4,
+      "base": {
+        "hp": 55,
+        "atk": 35,
+        "def": 50,
+        "spd": 85,
+        "satk": 55,
+        "sdef": 110
+      }
+    },
+    {
+      "dex": 167,
+      "name": "SPINARAK",
+      "types": [
+        7,
+        3
+      ],
+      "catch_rate": 255,
+      "growth_rate": 4,
+      "base": {
+        "hp": 40,
+        "atk": 60,
+        "def": 40,
+        "spd": 30,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 168,
+      "name": "ARIADOS",
+      "types": [
+        7,
+        3
+      ],
+      "catch_rate": 90,
+      "growth_rate": 4,
+      "base": {
+        "hp": 70,
+        "atk": 90,
+        "def": 70,
+        "spd": 40,
+        "satk": 60,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 169,
+      "name": "CROBAT",
+      "types": [
+        3,
+        2
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 85,
+        "atk": 90,
+        "def": 80,
+        "spd": 130,
+        "satk": 70,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 170,
+      "name": "CHINCHOU",
+      "types": [
+        21,
+        23
+      ],
+      "catch_rate": 190,
+      "growth_rate": 5,
+      "base": {
+        "hp": 75,
+        "atk": 38,
+        "def": 38,
+        "spd": 67,
+        "satk": 56,
+        "sdef": 56
+      }
+    },
+    {
+      "dex": 171,
+      "name": "LANTURN",
+      "types": [
+        21,
+        23
+      ],
+      "catch_rate": 75,
+      "growth_rate": 5,
+      "base": {
+        "hp": 125,
+        "atk": 58,
+        "def": 58,
+        "spd": 67,
+        "satk": 76,
+        "sdef": 76
+      }
+    },
+    {
+      "dex": 172,
+      "name": "PICHU",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 20,
+        "atk": 40,
+        "def": 15,
+        "spd": 60,
+        "satk": 35,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 173,
+      "name": "CLEFFA",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 150,
+      "growth_rate": 4,
+      "base": {
+        "hp": 50,
+        "atk": 25,
+        "def": 28,
+        "spd": 15,
+        "satk": 45,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 174,
+      "name": "IGGLYBUFF",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 170,
+      "growth_rate": 4,
+      "base": {
+        "hp": 90,
+        "atk": 30,
+        "def": 15,
+        "spd": 15,
+        "satk": 40,
+        "sdef": 20
+      }
+    },
+    {
+      "dex": 175,
+      "name": "TOGEPI",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 190,
+      "growth_rate": 4,
+      "base": {
+        "hp": 35,
+        "atk": 20,
+        "def": 65,
+        "spd": 20,
+        "satk": 40,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 176,
+      "name": "TOGETIC",
+      "types": [
+        0,
+        2
+      ],
+      "catch_rate": 75,
+      "growth_rate": 4,
+      "base": {
+        "hp": 55,
+        "atk": 40,
+        "def": 85,
+        "spd": 40,
+        "satk": 80,
+        "sdef": 105
+      }
+    },
+    {
+      "dex": 177,
+      "name": "NATU",
+      "types": [
+        24,
+        2
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 50,
+        "def": 45,
+        "spd": 70,
+        "satk": 70,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 178,
+      "name": "XATU",
+      "types": [
+        24,
+        2
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 75,
+        "def": 70,
+        "spd": 95,
+        "satk": 95,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 179,
+      "name": "MAREEP",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 235,
+      "growth_rate": 3,
+      "base": {
+        "hp": 55,
+        "atk": 40,
+        "def": 40,
+        "spd": 35,
+        "satk": 65,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 180,
+      "name": "FLAAFFY",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 70,
+        "atk": 55,
+        "def": 55,
+        "spd": 45,
+        "satk": 80,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 181,
+      "name": "AMPHAROS",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 90,
+        "atk": 75,
+        "def": 75,
+        "spd": 55,
+        "satk": 115,
+        "sdef": 90
+      }
+    },
+    {
+      "dex": 182,
+      "name": "BELLOSSOM",
+      "types": [
+        22,
+        22
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 75,
+        "atk": 80,
+        "def": 85,
+        "spd": 50,
+        "satk": 90,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 183,
+      "name": "MARILL",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 190,
+      "growth_rate": 4,
+      "base": {
+        "hp": 70,
+        "atk": 20,
+        "def": 50,
+        "spd": 40,
+        "satk": 20,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 184,
+      "name": "AZUMARILL",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 75,
+      "growth_rate": 4,
+      "base": {
+        "hp": 100,
+        "atk": 50,
+        "def": 80,
+        "spd": 50,
+        "satk": 50,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 185,
+      "name": "SUDOWOODO",
+      "types": [
+        5,
+        5
+      ],
+      "catch_rate": 65,
+      "growth_rate": 0,
+      "base": {
+        "hp": 70,
+        "atk": 100,
+        "def": 115,
+        "spd": 30,
+        "satk": 30,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 186,
+      "name": "POLITOED",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 90,
+        "atk": 75,
+        "def": 75,
+        "spd": 70,
+        "satk": 90,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 187,
+      "name": "HOPPIP",
+      "types": [
+        22,
+        2
+      ],
+      "catch_rate": 255,
+      "growth_rate": 3,
+      "base": {
+        "hp": 35,
+        "atk": 35,
+        "def": 40,
+        "spd": 50,
+        "satk": 35,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 188,
+      "name": "SKIPLOOM",
+      "types": [
+        22,
+        2
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 55,
+        "atk": 45,
+        "def": 50,
+        "spd": 80,
+        "satk": 45,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 189,
+      "name": "JUMPLUFF",
+      "types": [
+        22,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 75,
+        "atk": 55,
+        "def": 70,
+        "spd": 110,
+        "satk": 55,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 190,
+      "name": "AIPOM",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 4,
+      "base": {
+        "hp": 55,
+        "atk": 70,
+        "def": 55,
+        "spd": 85,
+        "satk": 40,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 191,
+      "name": "SUNKERN",
+      "types": [
+        22,
+        22
+      ],
+      "catch_rate": 235,
+      "growth_rate": 3,
+      "base": {
+        "hp": 30,
+        "atk": 30,
+        "def": 30,
+        "spd": 30,
+        "satk": 30,
+        "sdef": 30
+      }
+    },
+    {
+      "dex": 192,
+      "name": "SUNFLORA",
+      "types": [
+        22,
+        22
+      ],
+      "catch_rate": 120,
+      "growth_rate": 3,
+      "base": {
+        "hp": 75,
+        "atk": 75,
+        "def": 55,
+        "spd": 30,
+        "satk": 105,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 193,
+      "name": "YANMA",
+      "types": [
+        7,
+        2
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 65,
+        "def": 45,
+        "spd": 95,
+        "satk": 75,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 194,
+      "name": "WOOPER",
+      "types": [
+        21,
+        4
+      ],
+      "catch_rate": 255,
+      "growth_rate": 0,
+      "base": {
+        "hp": 55,
+        "atk": 45,
+        "def": 45,
+        "spd": 15,
+        "satk": 25,
+        "sdef": 25
+      }
+    },
+    {
+      "dex": 195,
+      "name": "QUAGSIRE",
+      "types": [
+        21,
+        4
+      ],
+      "catch_rate": 90,
+      "growth_rate": 0,
+      "base": {
+        "hp": 95,
+        "atk": 85,
+        "def": 85,
+        "spd": 35,
+        "satk": 65,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 196,
+      "name": "ESPEON",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 65,
+        "def": 60,
+        "spd": 110,
+        "satk": 130,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 197,
+      "name": "UMBREON",
+      "types": [
+        27,
+        27
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 95,
+        "atk": 65,
+        "def": 110,
+        "spd": 65,
+        "satk": 60,
+        "sdef": 130
+      }
+    },
+    {
+      "dex": 198,
+      "name": "MURKROW",
+      "types": [
+        27,
+        2
+      ],
+      "catch_rate": 30,
+      "growth_rate": 3,
+      "base": {
+        "hp": 60,
+        "atk": 85,
+        "def": 42,
+        "spd": 91,
+        "satk": 85,
+        "sdef": 42
+      }
+    },
+    {
+      "dex": 199,
+      "name": "SLOWKING",
+      "types": [
+        21,
+        24
+      ],
+      "catch_rate": 70,
+      "growth_rate": 0,
+      "base": {
+        "hp": 95,
+        "atk": 75,
+        "def": 80,
+        "spd": 30,
+        "satk": 100,
+        "sdef": 110
+      }
+    },
+    {
+      "dex": 200,
+      "name": "MISDREAVUS",
+      "types": [
+        8,
+        8
+      ],
+      "catch_rate": 45,
+      "growth_rate": 4,
+      "base": {
+        "hp": 60,
+        "atk": 60,
+        "def": 60,
+        "spd": 85,
+        "satk": 85,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 201,
+      "name": "UNOWN",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 225,
+      "growth_rate": 0,
+      "base": {
+        "hp": 48,
+        "atk": 72,
+        "def": 48,
+        "spd": 48,
+        "satk": 72,
+        "sdef": 48
+      }
+    },
+    {
+      "dex": 202,
+      "name": "WOBBUFFET",
+      "types": [
+        24,
+        24
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 190,
+        "atk": 33,
+        "def": 58,
+        "spd": 33,
+        "satk": 33,
+        "sdef": 58
+      }
+    },
+    {
+      "dex": 203,
+      "name": "GIRAFARIG",
+      "types": [
+        0,
+        24
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 70,
+        "atk": 80,
+        "def": 65,
+        "spd": 85,
+        "satk": 90,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 204,
+      "name": "PINECO",
+      "types": [
+        7,
+        7
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 65,
+        "def": 90,
+        "spd": 15,
+        "satk": 35,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 205,
+      "name": "FORRETRESS",
+      "types": [
+        7,
+        9
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 75,
+        "atk": 90,
+        "def": 140,
+        "spd": 40,
+        "satk": 60,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 206,
+      "name": "DUNSPARCE",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 100,
+        "atk": 70,
+        "def": 70,
+        "spd": 45,
+        "satk": 65,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 207,
+      "name": "GLIGAR",
+      "types": [
+        4,
+        2
+      ],
+      "catch_rate": 60,
+      "growth_rate": 3,
+      "base": {
+        "hp": 65,
+        "atk": 75,
+        "def": 105,
+        "spd": 85,
+        "satk": 35,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 208,
+      "name": "STEELIX",
+      "types": [
+        9,
+        4
+      ],
+      "catch_rate": 25,
+      "growth_rate": 0,
+      "base": {
+        "hp": 75,
+        "atk": 85,
+        "def": 200,
+        "spd": 30,
+        "satk": 55,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 209,
+      "name": "SNUBBULL",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 190,
+      "growth_rate": 4,
+      "base": {
+        "hp": 60,
+        "atk": 80,
+        "def": 50,
+        "spd": 30,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 210,
+      "name": "GRANBULL",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 75,
+      "growth_rate": 4,
+      "base": {
+        "hp": 90,
+        "atk": 120,
+        "def": 75,
+        "spd": 45,
+        "satk": 60,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 211,
+      "name": "QWILFISH",
+      "types": [
+        21,
+        3
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 65,
+        "atk": 95,
+        "def": 75,
+        "spd": 85,
+        "satk": 55,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 212,
+      "name": "SCIZOR",
+      "types": [
+        7,
+        9
+      ],
+      "catch_rate": 25,
+      "growth_rate": 0,
+      "base": {
+        "hp": 70,
+        "atk": 130,
+        "def": 100,
+        "spd": 65,
+        "satk": 55,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 213,
+      "name": "SHUCKLE",
+      "types": [
+        7,
+        5
+      ],
+      "catch_rate": 190,
+      "growth_rate": 3,
+      "base": {
+        "hp": 20,
+        "atk": 10,
+        "def": 230,
+        "spd": 5,
+        "satk": 10,
+        "sdef": 230
+      }
+    },
+    {
+      "dex": 214,
+      "name": "HERACROSS",
+      "types": [
+        7,
+        1
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 80,
+        "atk": 125,
+        "def": 75,
+        "spd": 85,
+        "satk": 40,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 215,
+      "name": "SNEASEL",
+      "types": [
+        27,
+        25
+      ],
+      "catch_rate": 60,
+      "growth_rate": 3,
+      "base": {
+        "hp": 55,
+        "atk": 95,
+        "def": 55,
+        "spd": 115,
+        "satk": 35,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 216,
+      "name": "TEDDIURSA",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 120,
+      "growth_rate": 0,
+      "base": {
+        "hp": 60,
+        "atk": 80,
+        "def": 50,
+        "spd": 40,
+        "satk": 50,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 217,
+      "name": "URSARING",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 90,
+        "atk": 130,
+        "def": 75,
+        "spd": 55,
+        "satk": 75,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 218,
+      "name": "SLUGMA",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 40,
+        "atk": 40,
+        "def": 40,
+        "spd": 20,
+        "satk": 70,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 219,
+      "name": "MAGCARGO",
+      "types": [
+        20,
+        5
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 50,
+        "def": 120,
+        "spd": 30,
+        "satk": 80,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 220,
+      "name": "SWINUB",
+      "types": [
+        25,
+        4
+      ],
+      "catch_rate": 225,
+      "growth_rate": 5,
+      "base": {
+        "hp": 50,
+        "atk": 50,
+        "def": 40,
+        "spd": 50,
+        "satk": 30,
+        "sdef": 30
+      }
+    },
+    {
+      "dex": 221,
+      "name": "PILOSWINE",
+      "types": [
+        25,
+        4
+      ],
+      "catch_rate": 75,
+      "growth_rate": 5,
+      "base": {
+        "hp": 100,
+        "atk": 100,
+        "def": 80,
+        "spd": 50,
+        "satk": 60,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 222,
+      "name": "CORSOLA",
+      "types": [
+        21,
+        5
+      ],
+      "catch_rate": 60,
+      "growth_rate": 4,
+      "base": {
+        "hp": 55,
+        "atk": 55,
+        "def": 85,
+        "spd": 35,
+        "satk": 65,
+        "sdef": 85
+      }
+    },
+    {
+      "dex": 223,
+      "name": "REMORAID",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 190,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 65,
+        "def": 35,
+        "spd": 65,
+        "satk": 65,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 224,
+      "name": "OCTILLERY",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 75,
+        "atk": 105,
+        "def": 75,
+        "spd": 45,
+        "satk": 105,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 225,
+      "name": "DELIBIRD",
+      "types": [
+        25,
+        2
+      ],
+      "catch_rate": 45,
+      "growth_rate": 4,
+      "base": {
+        "hp": 45,
+        "atk": 55,
+        "def": 45,
+        "spd": 75,
+        "satk": 65,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 226,
+      "name": "MANTINE",
+      "types": [
+        21,
+        2
+      ],
+      "catch_rate": 25,
+      "growth_rate": 5,
+      "base": {
+        "hp": 65,
+        "atk": 40,
+        "def": 70,
+        "spd": 70,
+        "satk": 80,
+        "sdef": 140
+      }
+    },
+    {
+      "dex": 227,
+      "name": "SKARMORY",
+      "types": [
+        9,
+        2
+      ],
+      "catch_rate": 25,
+      "growth_rate": 5,
+      "base": {
+        "hp": 65,
+        "atk": 80,
+        "def": 140,
+        "spd": 70,
+        "satk": 40,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 228,
+      "name": "HOUNDOUR",
+      "types": [
+        27,
+        20
+      ],
+      "catch_rate": 120,
+      "growth_rate": 5,
+      "base": {
+        "hp": 45,
+        "atk": 60,
+        "def": 30,
+        "spd": 65,
+        "satk": 80,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 229,
+      "name": "HOUNDOOM",
+      "types": [
+        27,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 75,
+        "atk": 90,
+        "def": 50,
+        "spd": 95,
+        "satk": 110,
+        "sdef": 80
+      }
+    },
+    {
+      "dex": 230,
+      "name": "KINGDRA",
+      "types": [
+        21,
+        26
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 75,
+        "atk": 95,
+        "def": 95,
+        "spd": 85,
+        "satk": 95,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 231,
+      "name": "PHANPY",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 120,
+      "growth_rate": 0,
+      "base": {
+        "hp": 90,
+        "atk": 60,
+        "def": 60,
+        "spd": 40,
+        "satk": 40,
+        "sdef": 40
+      }
+    },
+    {
+      "dex": 232,
+      "name": "DONPHAN",
+      "types": [
+        4,
+        4
+      ],
+      "catch_rate": 60,
+      "growth_rate": 0,
+      "base": {
+        "hp": 90,
+        "atk": 120,
+        "def": 120,
+        "spd": 50,
+        "satk": 60,
+        "sdef": 60
+      }
+    },
+    {
+      "dex": 233,
+      "name": "PORYGON2",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 85,
+        "atk": 80,
+        "def": 90,
+        "spd": 60,
+        "satk": 105,
+        "sdef": 95
+      }
+    },
+    {
+      "dex": 234,
+      "name": "STANTLER",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 73,
+        "atk": 95,
+        "def": 62,
+        "spd": 85,
+        "satk": 85,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 235,
+      "name": "SMEARGLE",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 4,
+      "base": {
+        "hp": 55,
+        "atk": 20,
+        "def": 35,
+        "spd": 75,
+        "satk": 20,
+        "sdef": 45
+      }
+    },
+    {
+      "dex": 236,
+      "name": "TYROGUE",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 75,
+      "growth_rate": 0,
+      "base": {
+        "hp": 35,
+        "atk": 35,
+        "def": 35,
+        "spd": 35,
+        "satk": 35,
+        "sdef": 35
+      }
+    },
+    {
+      "dex": 237,
+      "name": "HITMONTOP",
+      "types": [
+        1,
+        1
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 50,
+        "atk": 95,
+        "def": 95,
+        "spd": 70,
+        "satk": 35,
+        "sdef": 110
+      }
+    },
+    {
+      "dex": 238,
+      "name": "SMOOCHUM",
+      "types": [
+        25,
+        24
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 45,
+        "atk": 30,
+        "def": 15,
+        "spd": 65,
+        "satk": 85,
+        "sdef": 65
+      }
+    },
+    {
+      "dex": 239,
+      "name": "ELEKID",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 45,
+        "atk": 63,
+        "def": 37,
+        "spd": 95,
+        "satk": 65,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 240,
+      "name": "MAGBY",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 45,
+      "growth_rate": 0,
+      "base": {
+        "hp": 45,
+        "atk": 75,
+        "def": 37,
+        "spd": 83,
+        "satk": 70,
+        "sdef": 55
+      }
+    },
+    {
+      "dex": 241,
+      "name": "MILTANK",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 95,
+        "atk": 80,
+        "def": 105,
+        "spd": 100,
+        "satk": 40,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 242,
+      "name": "BLISSEY",
+      "types": [
+        0,
+        0
+      ],
+      "catch_rate": 30,
+      "growth_rate": 4,
+      "base": {
+        "hp": 255,
+        "atk": 10,
+        "def": 10,
+        "spd": 55,
+        "satk": 75,
+        "sdef": 135
+      }
+    },
+    {
+      "dex": 243,
+      "name": "RAIKOU",
+      "types": [
+        23,
+        23
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 90,
+        "atk": 85,
+        "def": 75,
+        "spd": 115,
+        "satk": 115,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 244,
+      "name": "ENTEI",
+      "types": [
+        20,
+        20
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 115,
+        "atk": 115,
+        "def": 85,
+        "spd": 100,
+        "satk": 90,
+        "sdef": 75
+      }
+    },
+    {
+      "dex": 245,
+      "name": "SUICUNE",
+      "types": [
+        21,
+        21
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 100,
+        "atk": 75,
+        "def": 115,
+        "spd": 85,
+        "satk": 90,
+        "sdef": 115
+      }
+    },
+    {
+      "dex": 246,
+      "name": "LARVITAR",
+      "types": [
+        5,
+        4
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 50,
+        "atk": 64,
+        "def": 50,
+        "spd": 41,
+        "satk": 45,
+        "sdef": 50
+      }
+    },
+    {
+      "dex": 247,
+      "name": "PUPITAR",
+      "types": [
+        5,
+        4
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 70,
+        "atk": 84,
+        "def": 70,
+        "spd": 51,
+        "satk": 65,
+        "sdef": 70
+      }
+    },
+    {
+      "dex": 248,
+      "name": "TYRANITAR",
+      "types": [
+        5,
+        27
+      ],
+      "catch_rate": 45,
+      "growth_rate": 5,
+      "base": {
+        "hp": 100,
+        "atk": 134,
+        "def": 110,
+        "spd": 61,
+        "satk": 95,
+        "sdef": 100
+      }
+    },
+    {
+      "dex": 249,
+      "name": "LUGIA",
+      "types": [
+        24,
+        2
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 106,
+        "atk": 90,
+        "def": 130,
+        "spd": 110,
+        "satk": 90,
+        "sdef": 154
+      }
+    },
+    {
+      "dex": 250,
+      "name": "HO-OH",
+      "types": [
+        20,
+        2
+      ],
+      "catch_rate": 3,
+      "growth_rate": 5,
+      "base": {
+        "hp": 106,
+        "atk": 130,
+        "def": 90,
+        "spd": 90,
+        "satk": 110,
+        "sdef": 154
+      }
+    },
+    {
+      "dex": 251,
+      "name": "CELEBI",
+      "types": [
+        24,
+        22
+      ],
+      "catch_rate": 45,
+      "growth_rate": 3,
+      "base": {
+        "hp": 100,
+        "atk": 100,
+        "def": 100,
+        "spd": 100,
+        "satk": 100,
+        "sdef": 100
+      }
+    }
+  ]
+}

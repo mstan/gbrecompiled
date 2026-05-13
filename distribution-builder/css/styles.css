@@ -1,0 +1,150 @@
+:root {
+  --bg: #1b1b1f;
+  --card: #26262b;
+  --text: #e8e8ea;
+  --muted: #999;
+  --accent: #f4c542;
+  --accent-fg: #1b1b1f;
+  --border: #3a3a40;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1rem 4rem;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  max-width: 760px;
+  margin: 0 auto 1.5rem;
+  text-align: center;
+}
+
+header h1 {
+  margin: 0 0 0.4rem;
+  font-size: 1.6rem;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+}
+
+.card h2 {
+  margin: 0 0 0.8rem;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+
+.row {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.8rem;
+}
+
+.grid-4 {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+input[type="text"],
+input[type="number"],
+input[type="file"],
+select {
+  background: #15151a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+}
+
+input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
+
+button {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 0;
+  border-radius: 4px;
+  padding: 0.5rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.05); }
+button:active { filter: brightness(0.9); }
+
+.status {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.hint {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+code {
+  background: #15151a;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+}
+
+pre {
+  background: #15151a;
+  color: #cfcfd2;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.85rem;
+  overflow-x: auto;
+  margin: 0.6rem 0 0;
+}
+
+details summary {
+  cursor: pointer;
+  color: var(--muted);
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+body[data-gen="1"] .gen-2-only { display: none; }
+body[data-gen="2"] .gen-1-only { display: none; }

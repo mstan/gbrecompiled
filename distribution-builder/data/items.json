@@ -1,0 +1,897 @@
+{
+  "_note": "Held-item IDs as the cart stores them. ID 0 is no held item; TERU-SAMA placeholder slots are omitted.",
+  "items": [
+    {
+      "id": 0,
+      "name": "(none)"
+    },
+    {
+      "id": 1,
+      "name": "Master Ball"
+    },
+    {
+      "id": 2,
+      "name": "Ultra Ball"
+    },
+    {
+      "id": 3,
+      "name": "Brightpowder"
+    },
+    {
+      "id": 4,
+      "name": "Great Ball"
+    },
+    {
+      "id": 5,
+      "name": "Poke Ball"
+    },
+    {
+      "id": 7,
+      "name": "Bicycle"
+    },
+    {
+      "id": 8,
+      "name": "Moon Stone"
+    },
+    {
+      "id": 9,
+      "name": "Antidote"
+    },
+    {
+      "id": 10,
+      "name": "Burn Heal"
+    },
+    {
+      "id": 11,
+      "name": "Ice Heal"
+    },
+    {
+      "id": 12,
+      "name": "Awakening"
+    },
+    {
+      "id": 13,
+      "name": "Parlyz Heal"
+    },
+    {
+      "id": 14,
+      "name": "Full Restore"
+    },
+    {
+      "id": 15,
+      "name": "Max Potion"
+    },
+    {
+      "id": 16,
+      "name": "Hyper Potion"
+    },
+    {
+      "id": 17,
+      "name": "Super Potion"
+    },
+    {
+      "id": 18,
+      "name": "Potion"
+    },
+    {
+      "id": 19,
+      "name": "Escape Rope"
+    },
+    {
+      "id": 20,
+      "name": "Repel"
+    },
+    {
+      "id": 21,
+      "name": "Max Elixer"
+    },
+    {
+      "id": 22,
+      "name": "Fire Stone"
+    },
+    {
+      "id": 23,
+      "name": "Thunderstone"
+    },
+    {
+      "id": 24,
+      "name": "Water Stone"
+    },
+    {
+      "id": 26,
+      "name": "HP Up"
+    },
+    {
+      "id": 27,
+      "name": "Protein"
+    },
+    {
+      "id": 28,
+      "name": "Iron"
+    },
+    {
+      "id": 29,
+      "name": "Carbos"
+    },
+    {
+      "id": 30,
+      "name": "Lucky Punch"
+    },
+    {
+      "id": 31,
+      "name": "Calcium"
+    },
+    {
+      "id": 32,
+      "name": "Rare Candy"
+    },
+    {
+      "id": 33,
+      "name": "X Accuracy"
+    },
+    {
+      "id": 34,
+      "name": "Leaf Stone"
+    },
+    {
+      "id": 35,
+      "name": "Metal Powder"
+    },
+    {
+      "id": 36,
+      "name": "Nugget"
+    },
+    {
+      "id": 37,
+      "name": "Poke Doll"
+    },
+    {
+      "id": 38,
+      "name": "Full Heal"
+    },
+    {
+      "id": 39,
+      "name": "Revive"
+    },
+    {
+      "id": 40,
+      "name": "Max Revive"
+    },
+    {
+      "id": 41,
+      "name": "Guard Spec."
+    },
+    {
+      "id": 42,
+      "name": "Super Repel"
+    },
+    {
+      "id": 43,
+      "name": "Max Repel"
+    },
+    {
+      "id": 44,
+      "name": "Dire Hit"
+    },
+    {
+      "id": 46,
+      "name": "Fresh Water"
+    },
+    {
+      "id": 47,
+      "name": "Soda Pop"
+    },
+    {
+      "id": 48,
+      "name": "Lemonade"
+    },
+    {
+      "id": 49,
+      "name": "X Attack"
+    },
+    {
+      "id": 51,
+      "name": "X Defend"
+    },
+    {
+      "id": 52,
+      "name": "X Speed"
+    },
+    {
+      "id": 53,
+      "name": "X Special"
+    },
+    {
+      "id": 54,
+      "name": "Coin Case"
+    },
+    {
+      "id": 55,
+      "name": "Itemfinder"
+    },
+    {
+      "id": 57,
+      "name": "Exp.Share"
+    },
+    {
+      "id": 58,
+      "name": "Old Rod"
+    },
+    {
+      "id": 59,
+      "name": "Good Rod"
+    },
+    {
+      "id": 60,
+      "name": "Silver Leaf"
+    },
+    {
+      "id": 61,
+      "name": "Super Rod"
+    },
+    {
+      "id": 62,
+      "name": "PP Up"
+    },
+    {
+      "id": 63,
+      "name": "Ether"
+    },
+    {
+      "id": 64,
+      "name": "Max Ether"
+    },
+    {
+      "id": 65,
+      "name": "Elixer"
+    },
+    {
+      "id": 66,
+      "name": "Red Scale"
+    },
+    {
+      "id": 67,
+      "name": "Secretpotion"
+    },
+    {
+      "id": 68,
+      "name": "S.S.Ticket"
+    },
+    {
+      "id": 69,
+      "name": "Mystery Egg"
+    },
+    {
+      "id": 70,
+      "name": "Clear Bell"
+    },
+    {
+      "id": 71,
+      "name": "Silver Wing"
+    },
+    {
+      "id": 72,
+      "name": "Moomoo Milk"
+    },
+    {
+      "id": 73,
+      "name": "Quick Claw"
+    },
+    {
+      "id": 74,
+      "name": "Psncureberry"
+    },
+    {
+      "id": 75,
+      "name": "Gold Leaf"
+    },
+    {
+      "id": 76,
+      "name": "Soft Sand"
+    },
+    {
+      "id": 77,
+      "name": "Sharp Beak"
+    },
+    {
+      "id": 78,
+      "name": "Przcureberry"
+    },
+    {
+      "id": 79,
+      "name": "Burnt Berry"
+    },
+    {
+      "id": 80,
+      "name": "Ice Berry"
+    },
+    {
+      "id": 81,
+      "name": "Poison Barb"
+    },
+    {
+      "id": 82,
+      "name": "King'S Rock"
+    },
+    {
+      "id": 83,
+      "name": "Bitter Berry"
+    },
+    {
+      "id": 84,
+      "name": "Mint Berry"
+    },
+    {
+      "id": 85,
+      "name": "Red Apricorn"
+    },
+    {
+      "id": 86,
+      "name": "Tinymushroom"
+    },
+    {
+      "id": 87,
+      "name": "Big Mushroom"
+    },
+    {
+      "id": 88,
+      "name": "Silverpowder"
+    },
+    {
+      "id": 89,
+      "name": "Blu Apricorn"
+    },
+    {
+      "id": 91,
+      "name": "Amulet Coin"
+    },
+    {
+      "id": 92,
+      "name": "Ylw Apricorn"
+    },
+    {
+      "id": 93,
+      "name": "Grn Apricorn"
+    },
+    {
+      "id": 94,
+      "name": "Cleanse Tag"
+    },
+    {
+      "id": 95,
+      "name": "Mystic Water"
+    },
+    {
+      "id": 96,
+      "name": "Twistedspoon"
+    },
+    {
+      "id": 97,
+      "name": "Wht Apricorn"
+    },
+    {
+      "id": 98,
+      "name": "Blackbelt"
+    },
+    {
+      "id": 99,
+      "name": "Blk Apricorn"
+    },
+    {
+      "id": 101,
+      "name": "Pnk Apricorn"
+    },
+    {
+      "id": 102,
+      "name": "Blackglasses"
+    },
+    {
+      "id": 103,
+      "name": "Slowpoketail"
+    },
+    {
+      "id": 104,
+      "name": "Pink Bow"
+    },
+    {
+      "id": 105,
+      "name": "Stick"
+    },
+    {
+      "id": 106,
+      "name": "Smoke Ball"
+    },
+    {
+      "id": 107,
+      "name": "Nevermeltice"
+    },
+    {
+      "id": 108,
+      "name": "Magnet"
+    },
+    {
+      "id": 109,
+      "name": "Miracleberry"
+    },
+    {
+      "id": 110,
+      "name": "Pearl"
+    },
+    {
+      "id": 111,
+      "name": "Big Pearl"
+    },
+    {
+      "id": 112,
+      "name": "Everstone"
+    },
+    {
+      "id": 113,
+      "name": "Spell Tag"
+    },
+    {
+      "id": 114,
+      "name": "Ragecandybar"
+    },
+    {
+      "id": 115,
+      "name": "Gs Ball"
+    },
+    {
+      "id": 116,
+      "name": "Blue Card"
+    },
+    {
+      "id": 117,
+      "name": "Miracle Seed"
+    },
+    {
+      "id": 118,
+      "name": "Thick Club"
+    },
+    {
+      "id": 119,
+      "name": "Focus Band"
+    },
+    {
+      "id": 121,
+      "name": "Energypowder"
+    },
+    {
+      "id": 122,
+      "name": "Energy Root"
+    },
+    {
+      "id": 123,
+      "name": "Heal Powder"
+    },
+    {
+      "id": 124,
+      "name": "Revival Herb"
+    },
+    {
+      "id": 125,
+      "name": "Hard Stone"
+    },
+    {
+      "id": 126,
+      "name": "Lucky Egg"
+    },
+    {
+      "id": 127,
+      "name": "Card Key"
+    },
+    {
+      "id": 128,
+      "name": "Machine Part"
+    },
+    {
+      "id": 129,
+      "name": "Egg Ticket"
+    },
+    {
+      "id": 130,
+      "name": "Lost Item"
+    },
+    {
+      "id": 131,
+      "name": "Stardust"
+    },
+    {
+      "id": 132,
+      "name": "Star Piece"
+    },
+    {
+      "id": 133,
+      "name": "Basement Key"
+    },
+    {
+      "id": 134,
+      "name": "Pass"
+    },
+    {
+      "id": 138,
+      "name": "Charcoal"
+    },
+    {
+      "id": 139,
+      "name": "Berry Juice"
+    },
+    {
+      "id": 140,
+      "name": "Scope Lens"
+    },
+    {
+      "id": 143,
+      "name": "Metal Coat"
+    },
+    {
+      "id": 144,
+      "name": "Dragon Fang"
+    },
+    {
+      "id": 146,
+      "name": "Leftovers"
+    },
+    {
+      "id": 150,
+      "name": "Mysteryberry"
+    },
+    {
+      "id": 151,
+      "name": "Dragon Scale"
+    },
+    {
+      "id": 152,
+      "name": "Berserk Gene"
+    },
+    {
+      "id": 156,
+      "name": "Sacred Ash"
+    },
+    {
+      "id": 157,
+      "name": "Heavy Ball"
+    },
+    {
+      "id": 158,
+      "name": "Flower Mail"
+    },
+    {
+      "id": 159,
+      "name": "Level Ball"
+    },
+    {
+      "id": 160,
+      "name": "Lure Ball"
+    },
+    {
+      "id": 161,
+      "name": "Fast Ball"
+    },
+    {
+      "id": 163,
+      "name": "Light Ball"
+    },
+    {
+      "id": 164,
+      "name": "Friend Ball"
+    },
+    {
+      "id": 165,
+      "name": "Moon Ball"
+    },
+    {
+      "id": 166,
+      "name": "Love Ball"
+    },
+    {
+      "id": 167,
+      "name": "Normal Box"
+    },
+    {
+      "id": 168,
+      "name": "Gorgeous Box"
+    },
+    {
+      "id": 169,
+      "name": "Sun Stone"
+    },
+    {
+      "id": 170,
+      "name": "Polkadot Bow"
+    },
+    {
+      "id": 172,
+      "name": "Up-Grade"
+    },
+    {
+      "id": 173,
+      "name": "Berry"
+    },
+    {
+      "id": 174,
+      "name": "Gold Berry"
+    },
+    {
+      "id": 175,
+      "name": "Squirtbottle"
+    },
+    {
+      "id": 177,
+      "name": "Park Ball"
+    },
+    {
+      "id": 178,
+      "name": "Rainbow Wing"
+    },
+    {
+      "id": 180,
+      "name": "Brick Piece"
+    },
+    {
+      "id": 181,
+      "name": "Surf Mail"
+    },
+    {
+      "id": 182,
+      "name": "Litebluemail"
+    },
+    {
+      "id": 183,
+      "name": "Portraitmail"
+    },
+    {
+      "id": 184,
+      "name": "Lovely Mail"
+    },
+    {
+      "id": 185,
+      "name": "Eon Mail"
+    },
+    {
+      "id": 186,
+      "name": "Morph Mail"
+    },
+    {
+      "id": 187,
+      "name": "Bluesky Mail"
+    },
+    {
+      "id": 188,
+      "name": "Music Mail"
+    },
+    {
+      "id": 189,
+      "name": "Mirage Mail"
+    },
+    {
+      "id": 191,
+      "name": "TM01"
+    },
+    {
+      "id": 192,
+      "name": "TM02"
+    },
+    {
+      "id": 193,
+      "name": "TM03"
+    },
+    {
+      "id": 194,
+      "name": "TM04"
+    },
+    {
+      "id": 196,
+      "name": "TM05"
+    },
+    {
+      "id": 197,
+      "name": "TM06"
+    },
+    {
+      "id": 198,
+      "name": "TM07"
+    },
+    {
+      "id": 199,
+      "name": "TM08"
+    },
+    {
+      "id": 200,
+      "name": "TM09"
+    },
+    {
+      "id": 201,
+      "name": "TM10"
+    },
+    {
+      "id": 202,
+      "name": "TM11"
+    },
+    {
+      "id": 203,
+      "name": "TM12"
+    },
+    {
+      "id": 204,
+      "name": "TM13"
+    },
+    {
+      "id": 205,
+      "name": "TM14"
+    },
+    {
+      "id": 206,
+      "name": "TM15"
+    },
+    {
+      "id": 207,
+      "name": "TM16"
+    },
+    {
+      "id": 208,
+      "name": "TM17"
+    },
+    {
+      "id": 209,
+      "name": "TM18"
+    },
+    {
+      "id": 210,
+      "name": "TM19"
+    },
+    {
+      "id": 211,
+      "name": "TM20"
+    },
+    {
+      "id": 212,
+      "name": "TM21"
+    },
+    {
+      "id": 213,
+      "name": "TM22"
+    },
+    {
+      "id": 214,
+      "name": "TM23"
+    },
+    {
+      "id": 215,
+      "name": "TM24"
+    },
+    {
+      "id": 216,
+      "name": "TM25"
+    },
+    {
+      "id": 217,
+      "name": "TM26"
+    },
+    {
+      "id": 218,
+      "name": "TM27"
+    },
+    {
+      "id": 219,
+      "name": "TM28"
+    },
+    {
+      "id": 221,
+      "name": "TM29"
+    },
+    {
+      "id": 222,
+      "name": "TM30"
+    },
+    {
+      "id": 223,
+      "name": "TM31"
+    },
+    {
+      "id": 224,
+      "name": "TM32"
+    },
+    {
+      "id": 225,
+      "name": "TM33"
+    },
+    {
+      "id": 226,
+      "name": "TM34"
+    },
+    {
+      "id": 227,
+      "name": "TM35"
+    },
+    {
+      "id": 228,
+      "name": "TM36"
+    },
+    {
+      "id": 229,
+      "name": "TM37"
+    },
+    {
+      "id": 230,
+      "name": "TM38"
+    },
+    {
+      "id": 231,
+      "name": "TM39"
+    },
+    {
+      "id": 232,
+      "name": "TM40"
+    },
+    {
+      "id": 233,
+      "name": "TM41"
+    },
+    {
+      "id": 234,
+      "name": "TM42"
+    },
+    {
+      "id": 235,
+      "name": "TM43"
+    },
+    {
+      "id": 236,
+      "name": "TM44"
+    },
+    {
+      "id": 237,
+      "name": "TM45"
+    },
+    {
+      "id": 238,
+      "name": "TM46"
+    },
+    {
+      "id": 239,
+      "name": "TM47"
+    },
+    {
+      "id": 240,
+      "name": "TM48"
+    },
+    {
+      "id": 241,
+      "name": "TM49"
+    },
+    {
+      "id": 242,
+      "name": "TM50"
+    },
+    {
+      "id": 243,
+      "name": "HM01"
+    },
+    {
+      "id": 244,
+      "name": "HM02"
+    },
+    {
+      "id": 245,
+      "name": "HM03"
+    },
+    {
+      "id": 246,
+      "name": "HM04"
+    },
+    {
+      "id": 247,
+      "name": "HM05"
+    },
+    {
+      "id": 248,
+      "name": "HM06"
+    },
+    {
+      "id": 249,
+      "name": "HM07"
+    }
+  ]
+}

@@ -21,19 +21,35 @@
  *      specifies, so e.g. a level-50 Mewtwo .pk2 lands as a level-50
  *      Mewtwo with the exact stats the file recorded.
  *
- *   2. `.gbmon` — our own simple text format. Routes through the
- *      Gen 1 / Gen 2 builder so stats and moves auto-fill from
- *      the cart's own ROM tables based on species/level/shiny.
- *      Useful for hand-written events or the planned HTML builder.
+ *   2. `.pkm` — our own simple text format, generation-agnostic.
+ *      The same file applies on either Gen 1 or Gen 2 carts; the
+ *      runtime fills in any unspecified field from the cart's own
+ *      tables, and silently ignores keys that don't apply to the
+ *      active gen (e.g. `held_item` on a Gen 1 cart). Routes
+ *      through the Gen 1 / Gen 2 builder for the stat math, then
+ *      post-patches any explicit overrides from the file.
  *
- *      # Example: shiny lvl-70 Mewtwo
- *      species  = MEWTWO     # or numeric dex#
- *      level    = 70
- *      shiny    = true
- *      nickname = TYRANT     # optional, overrides default
+ *      All recognized keys (every field optional except `species`
+ *      and `level`):
  *
- * Both kinds live side-by-side in the same injects/ folder; format
- * is detected by file extension + length.
+ *        species     = MEWTWO        # name or numeric dex#
+ *        level       = 70            # 2..100
+ *        shiny       = true          # canonical Gen-2 shiny DVs
+ *        nickname    = TYRANT
+ *        ot_name     = NINTNDO       # max 10 chars
+ *        ot_id       = 12345         # 0..65535
+ *        moves       = 94,105,86,87  # 1-4 numeric move IDs, comma-sep
+ *        dvs         = 15,15,15,15   # atk,def,spd,spc each 0..15 (overrides shiny)
+ *        held_item   = 1             # gen 2 only (silently ignored on gen 1)
+ *        happiness   = 250           # gen 2 only, 0..255
+ *        pokerus     = 0             # gen 2 only, raw byte
+ *        catch_rate  = 45            # gen 1 only, 1..255
+ *
+ *      Comments start with `#`. Unknown keys are silently skipped
+ *      so future runtimes can add fields without breaking old files.
+ *
+ * Both `.pkm` and `.pk1`/`.pk2` files live side-by-side in the same
+ * injects/ folder; format is detected by file extension + length.
  */
 
 #ifndef MOCK_INJECT_FILE_H
@@ -58,7 +74,7 @@ typedef struct {
 
 #define GB_INJECT_FILE_MAX 64
 
-/* Scan `injects/<game_id>/*.{gbmon,pk1,pk2}` and fill up to `max`
+/* Scan `injects/<game_id>/*.{pkm,pk1,pk2}` and fill up to `max`
  * entries into `out`. Pass the live GBContext so the scanner can
  * resolve species names from the cart's own ROM tables to build a
  * friendlier display label than the bare filename. Returns the
@@ -67,6 +83,15 @@ typedef struct {
  * menu open. */
 int gb_inject_file_scan(const GBContext* ctx, const char* game_id,
                         GBInjectFileEntry* out, int max);
+
+/* Build a human-readable, multi-line description of an entry's
+ * contents — species, level, moves, OT, DVs, etc. Output is plain
+ * ASCII suitable for ImGui::TextWrapped or stderr. Returns false if
+ * the file can't be read; on failure `out` receives a one-line
+ * error. Safe to call after a successful scan. */
+bool gb_inject_file_describe(const GBContext* ctx,
+                             const GBInjectFileEntry* entry,
+                             char* out, size_t out_size);
 
 /* Parse and apply the file at `entry->full_path`. Routes through
  * the active cart's inject_builder; only species/level/shiny

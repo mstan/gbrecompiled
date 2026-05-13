@@ -35,6 +35,8 @@ typedef struct {
     uint16_t rom_off_evos;          /* EvosMovesPointerTable — by pokedex# */
     uint8_t  rom_bank_dex_order;
     uint16_t rom_off_dex_order;     /* PokedexOrder — internal_id → dex# */
+    uint8_t  rom_bank_moves;
+    uint16_t rom_off_moves;         /* MoveNames — variable-length names */
     /* WRAM offsets (Gen 1 doesn't use CGB WRAM banking — all in
      * the fixed $D000-$DFFF region, which lives at offset 0x1000
      * in our flat 8-bank buffer). */
@@ -54,6 +56,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x07, 0x421E,
         0x0E, 0x705C,
         0x10, 0x5024,
+        0x2C, 0x4000,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
     },
     {
@@ -62,6 +65,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x07, 0x421E,
         0x0E, 0x705C,
         0x10, 0x5024,
+        0x2C, 0x4000,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
     },
     {
@@ -70,6 +74,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x3A, 0x4000,
         0x0E, 0x71E5,
         0x10, 0x50B1,
+        0x2F, 0x4000,
         0xD162, 0xD163, 0xD16A, 0xD272, 0xD2B4, 0xD358, 0xD157,
     },
 };
@@ -325,6 +330,65 @@ bool gb_mock_gen1_species_name_by_internal(const GBContext* ctx,
     }
     out[i] = '\0';
     return true;
+}
+
+/* Scan the cart's MoveNames table (variable-length, $50-terminated
+ * names packed back-to-back) for a case-insensitive match. The cart
+ * stores 165 move IDs in Gen 1; we cap at 200 as a safety net. */
+int gb_mock_gen1_move_id_for_name(const GBContext* ctx, const char* name) {
+    if (!name || !*name) return -1;
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->rom) return -1;
+    size_t off = rom_addr(c->rom_bank_moves, c->rom_off_moves);
+    char buf[24];
+    for (int move_id = 1; move_id <= 200; move_id++) {
+        size_t i = 0;
+        while (off < ctx->rom_size && ctx->rom[off] != 0x50 &&
+               i < sizeof(buf) - 1) {
+            buf[i++] = decode_charmap_byte(ctx->rom[off]);
+            off++;
+        }
+        buf[i] = '\0';
+        if (off < ctx->rom_size && ctx->rom[off] == 0x50) off++;
+        /* Case-insensitive compare; trailing whitespace tolerated. */
+        int j = 0;
+        while (buf[j] && name[j]) {
+            int a = (unsigned char)buf[j], b = (unsigned char)name[j];
+            if (a >= 'a' && a <= 'z') a -= 32;
+            if (b >= 'a' && b <= 'z') b -= 32;
+            if (a != b) break;
+            j++;
+        }
+        if (buf[j] == '\0' && name[j] == '\0') return move_id;
+        if (i == 0) break; /* hit padding / end of table */
+    }
+    return -1;
+}
+
+/* Reverse: walk MoveNames to the Nth entry. Empty entries yield "". */
+bool gb_mock_gen1_move_name(const GBContext* ctx, int move_id,
+                            char* out, size_t out_size) {
+    if (!out || out_size < 2) return false;
+    out[0] = '\0';
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->rom) return false;
+    if (move_id < 1 || move_id > 200) return false;
+    size_t off = rom_addr(c->rom_bank_moves, c->rom_off_moves);
+    for (int id = 1; id <= move_id; id++) {
+        size_t start = off;
+        while (off < ctx->rom_size && ctx->rom[off] != 0x50) off++;
+        if (off >= ctx->rom_size) return false;
+        if (id == move_id) {
+            size_t i = 0;
+            for (size_t p = start; p < off && i + 1 < out_size; p++) {
+                out[i++] = decode_charmap_byte(ctx->rom[p]);
+            }
+            out[i] = '\0';
+            return true;
+        }
+        off++;
+    }
+    return false;
 }
 
 int gb_mock_gen1_dex_for_name(const GBContext* ctx, const char* name) {

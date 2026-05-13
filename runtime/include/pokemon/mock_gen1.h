@@ -62,6 +62,16 @@ bool gb_mock_gen1_species_name_by_internal(const GBContext* ctx,
                                            int internal_id,
                                            char* out, size_t out_size);
 
+/* Linear scan of MoveNames for an ASCII move name match.
+ * Case-insensitive. Returns 1-based move ID (1..165) on hit, -1 on
+ * miss or non-Gen-1 cart. */
+int gb_mock_gen1_move_id_for_name(const GBContext* ctx, const char* name);
+
+/* Reverse: look up move name by 1-based ID. out must be at least 16
+ * bytes. Returns false on out-of-range or non-Gen-1 cart. */
+bool gb_mock_gen1_move_name(const GBContext* ctx, int move_id,
+                            char* out, size_t out_size);
+
 /* Build + inject a Pokemon into the next party slot.
  *   species : 1..151
  *   level   : 2..100

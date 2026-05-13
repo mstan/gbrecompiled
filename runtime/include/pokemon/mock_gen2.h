@@ -87,6 +87,16 @@ uint8_t gb_mock_gen2_party_count(const GBContext* ctx);
  * non-Gen-2 cart. Used by the file-based injector. */
 int gb_mock_gen2_dex_for_name(const GBContext* ctx, const char* name);
 
+/* Linear scan of MoveNames for an ASCII move name match.
+ * Case-insensitive. Returns 1-based move ID (1..251) on hit, -1 on
+ * miss or non-Gen-2 cart. */
+int gb_mock_gen2_move_id_for_name(const GBContext* ctx, const char* name);
+
+/* Reverse: look up move name by 1-based ID. out must be at least 16
+ * bytes. Returns false on out-of-range or non-Gen-2 cart. */
+bool gb_mock_gen2_move_name(const GBContext* ctx, int move_id,
+                            char* out, size_t out_size);
+
 /* Decode the Gen 2-charmapped name of a species (1..251) from the
  * active cart's PokemonNames table into out (ASCII, NUL-terminated).
  * Out must be at least 11 bytes. Returns false on out-of-range or

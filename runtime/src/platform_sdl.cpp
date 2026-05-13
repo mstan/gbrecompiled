@@ -99,9 +99,13 @@ static int g_builder_level = 50;
 static bool g_builder_shiny = false;
 static const char* g_builder_last_msg = NULL;
 /* Events / file-based injects: selected entry index + last-action
- * caption. Reset on menu close along with the rest. */
+ * caption + scanned-files cache. All reset on menu close so the
+ * next open rescans the folder (picks up new files dropped while
+ * the menu was closed) and shows the section fresh. */
 static int  g_event_sel_idx = 0;
 static char g_event_last_msg[160] = "";
+static GBInjectFileEntry g_event_files[GB_INJECT_FILE_MAX];
+static int  g_event_files_count = -1;  /* -1 sentinel = needs rescan */
 static void reset_menu_ephemeral_state(void) {
     g_mg_item_idx = 0;
     g_mg_deco_idx = 0;
@@ -112,6 +116,7 @@ static void reset_menu_ephemeral_state(void) {
     g_builder_last_msg = NULL;
     g_event_sel_idx = 0;
     g_event_last_msg[0] = '\0';
+    g_event_files_count = -1;
 }
 static int g_speed_percent = 100;
 static int g_palette_idx = 0;
@@ -3123,7 +3128,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             int builder_species_count = builder_gen2
                 ? GB_MOCK_GEN2_SPECIES_COUNT : GB_MOCK_GEN1_SPECIES_COUNT;
             ImGui::Spacing();
-            if (ImGui::CollapsingHeader("Pokemon Builder")) {
+            if (ImGui::CollapsingHeader("Custom Pokemon & Distributions")) {
                 ImGui::PushTextWrapPos(0.0f);
 
                 /* Species name cache — rebuilt the first time the
@@ -3170,7 +3175,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 ImGui::SliderInt("Level##builder", &g_builder_level, 2, 100,
                                  "%d", ImGuiSliderFlags_NoInput);
                 ImGui::Checkbox("Shiny##builder", &g_builder_shiny);
-                if (ImGui::Button("Receive Pokemon##builder")) {
+                if (ImGui::Button("Send Pokemon##builder")) {
                     bool ok = builder_gen2
                         ? gb_mock_gen2_inject_builder(g_registered_ctx,
                               g_builder_species, g_builder_level, g_builder_shiny)
@@ -3190,41 +3195,69 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     ImGui::TextDisabled("Moves and stats are auto-filled from the cart's own data tables. OT becomes the player.");
                 }
 
-                /* Events — scan injects/<game_id>/ for .gbmon / .pk1 / .pk2
-                 * files. Listed in a dropdown; Apply button injects. */
+                /* Distributions — scan injects/<game_id>/ for .pkm / .pk1
+                 * / .pk2 files. Listed in a dropdown; details panel
+                 * shows the file's contents; Apply button injects. */
                 ImGui::Spacing();
-                ImGui::TextDisabled("Events (injects/%s/)", g_active_game_id.c_str());
-                static GBInjectFileEntry s_events[GB_INJECT_FILE_MAX];
-                static int s_event_count = -1;
-                if (s_event_count < 0) {
-                    s_event_count = gb_inject_file_scan(g_registered_ctx,
-                                                        g_active_game_id.c_str(),
-                                                        s_events, GB_INJECT_FILE_MAX);
+                ImGui::TextDisabled("Distributions");
+                if (g_event_files_count < 0) {
+                    g_event_files_count = gb_inject_file_scan(
+                        g_registered_ctx, g_active_game_id.c_str(),
+                        g_event_files, GB_INJECT_FILE_MAX);
                 }
-                if (s_event_count == 0) {
-                    ImGui::TextDisabled("(no event files found)");
+                if (g_event_files_count == 0) {
+                    ImGui::TextDisabled(
+                        "(no distribution files found)\n"
+                        "Drop .pkm / .pk1 / .pk2 files into injects/%s/ to inject distributions.\n"
+                        "\n"
+                        ".pkm keys (all optional except species + level):\n"
+                        "  species, level, shiny, nickname\n"
+                        "  ot_name, ot_id\n"
+                        "  moves       (names or IDs, comma-separated, up to 4)\n"
+                        "  dvs         (atk,def,spd,spc 0..15)\n"
+                        "  held_item, happiness, pokerus   (gen 2 only)\n"
+                        "  catch_rate                       (gen 1 only)",
+                        g_active_game_id.c_str());
                 } else {
                     if (g_event_sel_idx < 0) g_event_sel_idx = 0;
-                    if (g_event_sel_idx >= s_event_count) g_event_sel_idx = 0;
-                    if (ImGui::BeginCombo("Event##event_pick",
-                                          s_events[g_event_sel_idx].display)) {
-                        for (int i = 0; i < s_event_count; i++) {
+                    if (g_event_sel_idx >= g_event_files_count) g_event_sel_idx = 0;
+                    if (ImGui::BeginCombo("Distribution##event_pick",
+                                          g_event_files[g_event_sel_idx].display)) {
+                        for (int i = 0; i < g_event_files_count; i++) {
                             bool selected = (i == g_event_sel_idx);
-                            if (ImGui::Selectable(s_events[i].display, selected)) {
+                            /* PushID makes each Selectable's internal
+                             * ID unique even when two files happen
+                             * to produce the same display string. */
+                            ImGui::PushID(i);
+                            if (ImGui::Selectable(g_event_files[i].display, selected)) {
                                 g_event_sel_idx = i;
                             }
                             if (selected) ImGui::SetItemDefaultFocus();
+                            ImGui::PopID();
                         }
                         ImGui::EndCombo();
                     }
-                    if (ImGui::Button("Apply Event##event_apply")) {
+                    /* Selected entry details panel. Re-parses the file
+                     * each frame the menu is open — cheap, and means
+                     * editing a file on disk shows fresh details on
+                     * the next open. Apply button sits below it so
+                     * the user reads the contents before committing. */
+                    char details[512];
+                    if (gb_inject_file_describe(g_registered_ctx,
+                                                &g_event_files[g_event_sel_idx],
+                                                details, sizeof(details))) {
+                        ImGui::Separator();
+                        ImGui::TextUnformatted(details);
+                        ImGui::Spacing();
+                    }
+                    if (ImGui::Button("Send Pokemon##event_apply")) {
                         char err[128];
                         if (gb_inject_file_apply(g_registered_ctx,
-                                                 &s_events[g_event_sel_idx],
+                                                 &g_event_files[g_event_sel_idx],
                                                  err, sizeof(err))) {
                             snprintf(g_event_last_msg, sizeof(g_event_last_msg),
                                      "Applied %s - check your party.",
-                                     s_events[g_event_sel_idx].filename);
+                                     g_event_files[g_event_sel_idx].filename);
                         } else {
                             snprintf(g_event_last_msg, sizeof(g_event_last_msg),
                                      "Apply failed: %s", err);
@@ -3232,9 +3265,6 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                     }
                     if (g_event_last_msg[0]) {
                         ImGui::TextDisabled("%s", g_event_last_msg);
-                    } else {
-                        ImGui::TextDisabled("Drop .gbmon / .pk1 / .pk2 files into injects/%s/ - they appear here.",
-                                            g_active_game_id.c_str());
                     }
                 }
                 ImGui::PopTextWrapPos();

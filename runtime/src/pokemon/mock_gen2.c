@@ -40,6 +40,8 @@ typedef struct {
     uint16_t rom_off_names;         /* PokemonNames */
     uint8_t  rom_bank_evos;
     uint16_t rom_off_evos;          /* EvosAttacksPointers */
+    uint8_t  rom_bank_moves;
+    uint16_t rom_off_moves;         /* MoveNames — variable-length names */
     /* WRAM bank 1 offsets ($D000-$DFFF range) */
     uint16_t wram_party_count;
     uint16_t wram_party_species;
@@ -56,6 +58,7 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x14, 0x5B0B,
         0x6C, 0x4B74,
         0x10, 0x67BD,
+        0x6C, 0x5574,
         0xDA22, 0xDA23, 0xDA2A, 0xDB4A, 0xDB8C, 0xD1A1, 0xD1A3,
     },
     {
@@ -63,6 +66,7 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x14, 0x5B0B,
         0x6C, 0x4B74,
         0x10, 0x67BD,
+        0x6C, 0x5574,
         0xDA22, 0xDA23, 0xDA2A, 0xDB4A, 0xDB8C, 0xD1A1, 0xD1A3,
     },
     {
@@ -70,6 +74,7 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x14, 0x5424,
         0x14, 0x7384,
         0x10, 0x65B1,
+        0x72, 0x5F29,
         0xDCD7, 0xDCD8, 0xDCDF, 0xDDFF, 0xDE41, 0xD47B, 0xD47D,
     },
 };
@@ -276,6 +281,65 @@ static char decode_charmap_byte(uint8_t c) {
     if (c == 0xF1)              return '.';
     if (c >= 0xF6 && c <= 0xFF) return (char)('0' + (c - 0xF6));
     return '?';
+}
+
+/* Scan MoveNames for a case-insensitive match. Gen 2 has 251 move
+ * IDs; cap at 256 as safety. */
+int gb_mock_gen2_move_id_for_name(const GBContext* ctx, const char* name) {
+    if (!name || !*name) return -1;
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->rom) return -1;
+    size_t off = rom_addr(c->rom_bank_moves, c->rom_off_moves);
+    char buf[24];
+    for (int move_id = 1; move_id <= 256; move_id++) {
+        size_t i = 0;
+        while (off < ctx->rom_size && ctx->rom[off] != 0x50 &&
+               i < sizeof(buf) - 1) {
+            buf[i++] = decode_charmap_byte(ctx->rom[off]);
+            off++;
+        }
+        buf[i] = '\0';
+        if (off < ctx->rom_size && ctx->rom[off] == 0x50) off++;
+        int j = 0;
+        while (buf[j] && name[j]) {
+            int a = (unsigned char)buf[j], b = (unsigned char)name[j];
+            if (a >= 'a' && a <= 'z') a -= 32;
+            if (b >= 'a' && b <= 'z') b -= 32;
+            if (a != b) break;
+            j++;
+        }
+        if (buf[j] == '\0' && name[j] == '\0') return move_id;
+        if (i == 0) break;
+    }
+    return -1;
+}
+
+/* Reverse: walk the variable-length MoveNames table to the Nth entry
+ * and decode it to ASCII. Returns false on out-of-range or non-Gen-2
+ * cart. Empty entries (Gen 2 has gaps in the move list) yield "-". */
+bool gb_mock_gen2_move_name(const GBContext* ctx, int move_id,
+                            char* out, size_t out_size) {
+    if (!out || out_size < 2) return false;
+    out[0] = '\0';
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->rom) return false;
+    if (move_id < 1 || move_id > 256) return false;
+    size_t off = rom_addr(c->rom_bank_moves, c->rom_off_moves);
+    for (int id = 1; id <= move_id; id++) {
+        size_t start = off;
+        while (off < ctx->rom_size && ctx->rom[off] != 0x50) off++;
+        if (off >= ctx->rom_size) return false;
+        if (id == move_id) {
+            size_t i = 0;
+            for (size_t p = start; p < off && i + 1 < out_size; p++) {
+                out[i++] = decode_charmap_byte(ctx->rom[p]);
+            }
+            out[i] = '\0';
+            return true;
+        }
+        off++;
+    }
+    return false;
 }
 
 int gb_mock_gen2_dex_for_name(const GBContext* ctx, const char* name) {

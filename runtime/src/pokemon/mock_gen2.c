@@ -292,8 +292,11 @@ static char decode_charmap_byte(uint8_t c) {
     if (c >= 0xA0 && c <= 0xB9) return (char)('a' + (c - 0xA0));
     if (c == 0x7F)              return ' ';
     if (c == 0xE0)              return '\'';
+    if (c == 0xE3)              return '-';
     if (c == 0xE8)              return '.';
+    if (c == 0xEA)              return 'e';  /* e-acute -- fallback */
     if (c == 0xF1)              return '.';
+    if (c == 0xF3)              return '/';
     if (c >= 0xF6 && c <= 0xFF) return (char)('0' + (c - 0xF6));
     return '?';
 }

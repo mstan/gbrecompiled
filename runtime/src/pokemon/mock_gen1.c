@@ -39,6 +39,8 @@ typedef struct {
     uint16_t rom_off_moves;         /* MoveNames — variable-length names */
     uint8_t  rom_bank_items;
     uint16_t rom_off_items;         /* ItemNames — variable-length names */
+    uint8_t  rom_bank_keyitem_flags;
+    uint16_t rom_off_keyitem_flags; /* KeyItemFlags bit-array */
     /* WRAM offsets (Gen 1 doesn't use CGB WRAM banking — all in
      * the fixed $D000-$DFFF region, which lives at offset 0x1000
      * in our flat 8-bank buffer). */
@@ -61,6 +63,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x10, 0x5024,
         0x2C, 0x4000,
         0x01, 0x472B,
+        0x03, 0x6799,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
         0xD31D,
     },
@@ -72,6 +75,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x10, 0x5024,
         0x2C, 0x4000,
         0x01, 0x472B,
+        0x03, 0x6799,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
         0xD31D,
     },
@@ -83,6 +87,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x10, 0x50B1,
         0x2F, 0x4000,
         0x01, 0x45B7,
+        0x03, 0x66DD,
         0xD162, 0xD163, 0xD16A, 0xD272, 0xD2B4, 0xD358, 0xD157,
         0xD31C,
     },
@@ -314,8 +319,11 @@ static char decode_charmap_byte(uint8_t b) {
     if (b >= 0x80 && b <= 0x99) return (char)('A' + (b - 0x80));
     if (b >= 0xA0 && b <= 0xB9) return (char)('a' + (b - 0xA0));
     if (b == 0x7F)              return ' ';
+    if (b == 0xBA)              return 'e';  /* e-acute -- fallback */
     if (b == 0xE0)              return '\'';
+    if (b == 0xE3)              return '-';
     if (b == 0xE8)              return '.';
+    if (b == 0xF3)              return '/';
     if (b >= 0xF6 && b <= 0xFF) return (char)('0' + (b - 0xF6));
     return '?';
 }
@@ -443,6 +451,24 @@ bool gb_mock_gen1_item_name(const GBContext* ctx, int item_id,
         off++;
     }
     return false;
+}
+
+bool gb_mock_gen1_item_is_key(const GBContext* ctx, int item_id) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->rom) return false;
+    if (item_id < 1 || item_id > 255) return false;
+    /* KeyItemFlags packs one bit per item_id (1-based). The cart's
+     * `dbit` macro shifts each bit by `length % 8` -- so it's
+     * LSB-first: index 0 -> bit 0, index 7 -> bit 7, index 8 -> bit
+     * 0 of the next byte. */
+    int idx = item_id - 1;
+    size_t byte_off = rom_addr(c->rom_bank_keyitem_flags,
+                               c->rom_off_keyitem_flags) +
+                      (size_t)(idx / 8);
+    if (byte_off >= ctx->rom_size) return false;
+    uint8_t byte = ctx->rom[byte_off];
+    int bit = idx % 8;
+    return (byte & (1 << bit)) != 0;
 }
 
 bool gb_mock_gen1_give_item(GBContext* ctx, int item_id, int qty) {

@@ -82,10 +82,20 @@ int gb_mock_gen1_internal_id_for_dex(const GBContext* ctx, int dex);
 bool gb_mock_gen1_item_name(const GBContext* ctx, int item_id,
                             char* out, size_t out_size);
 
-/* Number of item slots the cart's ItemNames table has. Hardcoded to
- * 95 for Gen 1 -- the table is 96 entries with the last being the
- * "CANCEL" sentinel. Items 1..95 are catchable names. */
-#define GB_MOCK_GEN1_ITEM_COUNT 95
+/* Number of real bag items the cart's ItemNames table holds. pret's
+ * NUM_ITEMS = 83 (MASTER_BALL through MAX_ELIXER). The remaining
+ * `li` entries after the assert_list_length are elevator floor
+ * labels (B2F, B1F, 1F, 2F, ...) that share the table for menu
+ * display but aren't real bag items, so we stop at 83 to keep them
+ * out of the Give Item dropdown. */
+#define GB_MOCK_GEN1_ITEM_COUNT 83
+
+/* True iff `item_id` is flagged as a Key Item in the cart's
+ * KeyItemFlags bit array. Key items can't be tossed in vanilla
+ * gameplay -- the Give Item UI filters these out so the user can't
+ * accidentally clog their bag with something they can never get
+ * rid of. */
+bool gb_mock_gen1_item_is_key(const GBContext* ctx, int item_id);
 
 /* Add `qty` of `item_id` to the cart's single bag pocket. If the
  * item is already present, quantity stacks (capped at 99). If not,

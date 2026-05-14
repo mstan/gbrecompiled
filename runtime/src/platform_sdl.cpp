@@ -18,6 +18,7 @@
 #include "pokemon/mock_inject_file.h"
 #include "pokemon/mock_evolve_patch.h"
 #include "pokemon/mock_wild_5050.h"
+#include "cheats.h"
 #ifdef GBRT_HAVE_GBCAM
 #include "gbcam.h"
 #endif
@@ -3041,53 +3042,6 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::PopTextWrapPos();
         }
 
-        /* Mystery Gift mock — only visible on Pokemon Gen 2 carts. Two
-         * carousels (items, decorations) with their own Send buttons; the
-         * "queued" gift is delivered the next time the cart enters Mystery
-         * Gift IR. If nothing is queued, the mock rolls a random gift. */
-        const GBGen2Game mg_game = gb_mock_gen2_detect(g_registered_ctx);
-        if (mg_game != GB_MOCK_GEN2_NONE) {
-            ImGui::Spacing();
-            ImGui::TextDisabled("Mystery Gift");
-
-            const float button_width = ImGui::CalcTextSize("Send").x +
-                                       ImGui::GetStyle().FramePadding.x * 2.0f;
-
-            if (ImGui::ArrowButton("##mg_item_prev", ImGuiDir_Left)) {
-                g_mg_item_idx = (g_mg_item_idx - 1 + GB_MOCK_IR_NUM_ITEMS) % GB_MOCK_IR_NUM_ITEMS;
-            }
-            ImGui::SameLine();
-            ImGui::Text("Item: %-16s (%d/%d)",
-                        gb_mock_ir_item_name(g_mg_item_idx),
-                        g_mg_item_idx + 1, GB_MOCK_IR_NUM_ITEMS);
-            ImGui::SameLine();
-            if (ImGui::ArrowButton("##mg_item_next", ImGuiDir_Right)) {
-                g_mg_item_idx = (g_mg_item_idx + 1) % GB_MOCK_IR_NUM_ITEMS;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Send##item", ImVec2(button_width * 1.6f, 0.0f))) {
-                gb_mock_ir_queue(GB_MOCK_IR_KIND_ITEM, g_mg_item_idx);
-            }
-
-            if (ImGui::ArrowButton("##mg_deco_prev", ImGuiDir_Left)) {
-                g_mg_deco_idx = (g_mg_deco_idx - 1 + GB_MOCK_IR_NUM_DECOS) % GB_MOCK_IR_NUM_DECOS;
-            }
-            ImGui::SameLine();
-            ImGui::Text("Deco: %-16s (%d/%d)",
-                        gb_mock_ir_deco_name(g_mg_deco_idx),
-                        g_mg_deco_idx + 1, GB_MOCK_IR_NUM_DECOS);
-            ImGui::SameLine();
-            if (ImGui::ArrowButton("##mg_deco_next", ImGuiDir_Right)) {
-                g_mg_deco_idx = (g_mg_deco_idx + 1) % GB_MOCK_IR_NUM_DECOS;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Send##deco", ImVec2(button_width * 1.6f, 0.0f))) {
-                gb_mock_ir_queue(GB_MOCK_IR_KIND_DECO, g_mg_deco_idx);
-            }
-
-            ImGui::TextDisabled("Queued: %s", gb_mock_ir_queue_label());
-        }
-
         /* Mobile Adapter event triggers — Crystal-only. The cart already
          * has the full GS Ball → Kurt → Ilex → Celebi script chain
          * and the Odd Egg distribution data in vanilla; only the
@@ -3096,60 +3050,6 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
          * SRAM/WRAM bytes directly, same end result as
          * sceptios/pokecrystal's HoF-time SRAM write. */
         bool crystal_active = gb_mock_crystal_active(g_registered_ctx);
-        if (crystal_active) {
-            ImGui::Spacing();
-            ImGui::TextDisabled("Mobile Events");
-            /* Wrap all captions in this section to the panel width
-             * — they tend to be one-line explanations longer than
-             * the column. */
-            ImGui::PushTextWrapPos(0.0f);
-            bool celebi_caught = gb_mock_crystal_celebi_caught(g_registered_ctx);
-            const char* button_label = celebi_caught
-                ? "Re-arm GS Ball event##gsball"
-                : "Trigger GS Ball event##gsball";
-            if (ImGui::Button(button_label)) {
-                gb_mock_crystal_apply_gs_ball(g_registered_ctx);
-            }
-            /* Status line — re-read every frame, so a successful click
-             * flips this immediately to "Armed" without having to
-             * walk to Goldenrod to verify. */
-            uint8_t gs_flag = gb_mock_crystal_gs_ball_flag(g_registered_ctx);
-            ImGui::TextDisabled("Status: %s (sGSBallFlag = 0x%02X)",
-                                gb_mock_crystal_gs_ball_state_label(g_registered_ctx),
-                                gs_flag);
-            if (celebi_caught) {
-                ImGui::TextDisabled("Celebi was already caught - pressing this re-arms the event so you can encounter it again.");
-            }
-
-            /* Odd Egg — the second Mobile-only event the US ROM has
-             * payload for. The OddEggs species table is in vanilla
-             * ROM but no NPC ever calls into it. This button reads
-             * the table, rolls one of 7 baby Pokemon using the cart's
-             * own probability weights, and drops it into the next
-             * empty party slot as a hatchable egg.
-             *
-             * Caption tracks the last click result rather than the
-             * live party-full state: after a successful add the
-             * caption reads "Sent" instead of immediately flipping
-             * to "Party full" (which is technically true post-add
-             * but reads as if the button failed). A follow-up click
-             * with a full party flips it to "Party full" then. */
-            uint8_t party_count = gb_mock_gen2_party_count(g_registered_ctx);
-            if (ImGui::Button("Receive Odd Egg##odd_egg")) {
-                if (gb_mock_crystal_apply_odd_egg(g_registered_ctx)) {
-                    g_odd_egg_last_msg = "Sent - check your party.";
-                } else {
-                    g_odd_egg_last_msg = "Party full (6/6) - release or store a Pokemon first.";
-                }
-            }
-            if (g_odd_egg_last_msg) {
-                ImGui::TextDisabled("%s", g_odd_egg_last_msg);
-            } else {
-                ImGui::TextDisabled("Party: %d/6. Rolls one of 7 baby Pokemon (Pichu/Cleffa/Igglybuff/Smoochum/Magby/Tyrogue/Elekid) with the original 14%% shiny rate.",
-                                    party_count);
-            }
-            ImGui::PopTextWrapPos();
-        }
 
         /* Savestates -- placed above the Pokemon-specific options so
          * common cart actions stay reachable without scrolling past
@@ -3199,6 +3099,85 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::Spacing();
             if (ImGui::CollapsingHeader("Pokemon Options")) {
             ImGui::PushTextWrapPos(0.0f);
+
+            /* Mystery Gift IR mock -- any Gen 2 cart. Two carousels
+             * (items + decorations) with Send buttons; the queued
+             * gift is delivered the next time the cart enters
+             * Mystery Gift IR. */
+            if (builder_gen2) {
+                ImGui::TextDisabled("Mystery Gift");
+                const float mg_button_width = ImGui::CalcTextSize("Send").x +
+                    ImGui::GetStyle().FramePadding.x * 2.0f;
+                if (ImGui::ArrowButton("##mg_item_prev", ImGuiDir_Left)) {
+                    g_mg_item_idx = (g_mg_item_idx - 1 + GB_MOCK_IR_NUM_ITEMS) % GB_MOCK_IR_NUM_ITEMS;
+                }
+                ImGui::SameLine();
+                ImGui::Text("Item: %-16s (%d/%d)",
+                            gb_mock_ir_item_name(g_mg_item_idx),
+                            g_mg_item_idx + 1, GB_MOCK_IR_NUM_ITEMS);
+                ImGui::SameLine();
+                if (ImGui::ArrowButton("##mg_item_next", ImGuiDir_Right)) {
+                    g_mg_item_idx = (g_mg_item_idx + 1) % GB_MOCK_IR_NUM_ITEMS;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Send##item", ImVec2(mg_button_width * 1.6f, 0.0f))) {
+                    gb_mock_ir_queue(GB_MOCK_IR_KIND_ITEM, g_mg_item_idx);
+                }
+                if (ImGui::ArrowButton("##mg_deco_prev", ImGuiDir_Left)) {
+                    g_mg_deco_idx = (g_mg_deco_idx - 1 + GB_MOCK_IR_NUM_DECOS) % GB_MOCK_IR_NUM_DECOS;
+                }
+                ImGui::SameLine();
+                ImGui::Text("Deco: %-16s (%d/%d)",
+                            gb_mock_ir_deco_name(g_mg_deco_idx),
+                            g_mg_deco_idx + 1, GB_MOCK_IR_NUM_DECOS);
+                ImGui::SameLine();
+                if (ImGui::ArrowButton("##mg_deco_next", ImGuiDir_Right)) {
+                    g_mg_deco_idx = (g_mg_deco_idx + 1) % GB_MOCK_IR_NUM_DECOS;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Send##deco", ImVec2(mg_button_width * 1.6f, 0.0f))) {
+                    gb_mock_ir_queue(GB_MOCK_IR_KIND_DECO, g_mg_deco_idx);
+                }
+                ImGui::TextDisabled("Queued: %s", gb_mock_ir_queue_label());
+                ImGui::Spacing();
+            }
+
+            /* Mobile Events (Crystal only) -- GS Ball trigger and
+             * Odd Egg roller. */
+            if (crystal_active) {
+                ImGui::TextDisabled("Mobile Events");
+                bool celebi_caught = gb_mock_crystal_celebi_caught(g_registered_ctx);
+                const char* button_label = celebi_caught
+                    ? "Re-arm GS Ball event##gsball"
+                    : "Trigger GS Ball event##gsball";
+                if (ImGui::Button(button_label)) {
+                    gb_mock_crystal_apply_gs_ball(g_registered_ctx);
+                }
+                uint8_t gs_flag = gb_mock_crystal_gs_ball_flag(g_registered_ctx);
+                ImGui::TextDisabled("Status: %s (sGSBallFlag = 0x%02X)",
+                                    gb_mock_crystal_gs_ball_state_label(g_registered_ctx),
+                                    gs_flag);
+                if (celebi_caught) {
+                    ImGui::TextDisabled("Celebi was already caught - pressing this re-arms the event so you can encounter it again.");
+                }
+
+                uint8_t party_count = gb_mock_gen2_party_count(g_registered_ctx);
+                if (ImGui::Button("Receive Odd Egg##odd_egg")) {
+                    if (gb_mock_crystal_apply_odd_egg(g_registered_ctx)) {
+                        g_odd_egg_last_msg = "Sent - check your party.";
+                    } else {
+                        g_odd_egg_last_msg = "Party full (6/6) - release or store a Pokemon first.";
+                    }
+                }
+                if (g_odd_egg_last_msg) {
+                    ImGui::TextDisabled("%s", g_odd_egg_last_msg);
+                } else {
+                    ImGui::TextDisabled("Party: %d/6. Rolls one of 7 baby Pokemon (Pichu/Cleffa/Igglybuff/Smoochum/Magby/Tyrogue/Elekid) with the original 14%% shiny rate.",
+                                        party_count);
+                }
+                ImGui::Spacing();
+            }
+
             ImGui::TextDisabled("Pokemon Builder");
 
                 /* Species name cache — rebuilt the first time the
@@ -3421,6 +3400,23 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                 : gb_mock_gen1_item_name(g_registered_ctx, id,
                                                          nm, sizeof(nm));
                             if (!ok) continue;
+                            /* Hide items the user can't get rid of:
+                             *   Gen 1 -- anything flagged in
+                             *            KeyItemFlags is un-tossable.
+                             *   Gen 2 -- Key Items and TMs/HMs go
+                             *            into their own pockets which
+                             *            gb_mock_gen2_give_item doesn't
+                             *            handle (and which we wouldn't
+                             *            want to clog either). */
+                            if (gen == 1 &&
+                                gb_mock_gen1_item_is_key(g_registered_ctx, id))
+                                continue;
+                            if (gen == 2) {
+                                GBGen2ItemPocket p =
+                                    gb_mock_gen2_item_pocket(g_registered_ctx, id);
+                                if (p != GB_GEN2_POCKET_ITEM &&
+                                    p != GB_GEN2_POCKET_BALL) continue;
+                            }
                             g_item_ids[g_item_label_count] = id;
                             snprintf(g_item_labels[g_item_label_count],
                                      sizeof(g_item_labels[0]),
@@ -3535,6 +3531,169 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
 #endif
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        /* ============================================================
+         * Cheats: libretro .cht files dropped into cheats/<game_id>/
+         * are loaded on cart launch. GameShark codes apply per-frame
+         * via gb_cheats_tick(); Game Genie codes patch ROM at
+         * toggle-on and restore at toggle-off. Cart-agnostic -- any
+         * Game Boy game in the libretro database works.
+         * ========================================================== */
+        /* Always render the Cheats header so the surrounding
+         * separators have something to bracket and the menu's
+         * vertical rhythm stays consistent across all carts. When
+         * expanded, the header either shows the full cheat list
+         * (a .cht file was loaded) or a brief hint pointing the
+         * user at the cheats/ folder. */
+        if (ImGui::CollapsingHeader("Cheats")) {
+            if (gb_cheats_count() == 0) {
+                ImGui::TextDisabled(
+                    "No .cht files found in cheats/%s/.\n"
+                    "Drop a libretro-database .cht file there and relaunch.",
+                    g_active_game_id.c_str());
+            } else {
+            static char cheat_filter[64] = "";
+            static int  cheat_page = 0;
+            const int   cheats_per_page = 10;
+
+            int total  = gb_cheats_count();
+            int active = 0;
+            for (int i = 0; i < total; i++) {
+                if (gb_cheats_get(i)->enabled) active++;
+            }
+            ImGui::TextDisabled("Loaded %d cheats from cheats/%s/  (active: %d)",
+                                total, g_active_game_id.c_str(), active);
+            if (ImGui::InputText("Search##cheats",
+                                 cheat_filter, sizeof(cheat_filter))) {
+                /* Reset to page 1 on filter change so the user isn't
+                 * stranded on a page that no longer has matches. */
+                cheat_page = 0;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Disable All##cheats")) {
+                gb_cheats_disable_all(g_registered_ctx);
+            }
+
+            /* Lower-case the filter once per frame for case-insensitive
+             * substring matching against descriptions. */
+            char filter_lower[64];
+            int fi = 0;
+            for (; cheat_filter[fi] && fi < (int)sizeof(filter_lower) - 1; fi++) {
+                char c = cheat_filter[fi];
+                filter_lower[fi] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+            }
+            filter_lower[fi] = '\0';
+
+            /* Two-pass render. First pass: collect filtered indices
+             * into a stack buffer (one int per cheat -- cheap even
+             * at the 2048 cap). Second pass: render the page slice.
+             *
+             * Pagination beats a tall scrollable child here because
+             * focus flows naturally through 12 widgets and exits
+             * onto the next menu row -- no trap. */
+            int filtered_indices[GB_CHEAT_MAX_ENTRIES];
+            int filtered_count = 0;
+            for (int i = 0; i < total; i++) {
+                const GBCheat* c = gb_cheats_get(i);
+                if (!c || c->op_count == 0 || c->description[0] == '\0') continue;
+                if (filter_lower[0]) {
+                    char desc_lower[GB_CHEAT_DESC_MAX];
+                    int di = 0;
+                    for (; c->description[di] &&
+                           di < (int)sizeof(desc_lower) - 1; di++) {
+                        char ch = c->description[di];
+                        desc_lower[di] =
+                            (ch >= 'A' && ch <= 'Z') ? (char)(ch + 32) : ch;
+                    }
+                    desc_lower[di] = '\0';
+                    if (!strstr(desc_lower, filter_lower)) continue;
+                }
+                filtered_indices[filtered_count++] = i;
+            }
+
+            int page_count =
+                (filtered_count + cheats_per_page - 1) / cheats_per_page;
+            if (page_count < 1) page_count = 1;
+            if (cheat_page >= page_count) cheat_page = page_count - 1;
+            if (cheat_page < 0) cheat_page = 0;
+
+            int start = cheat_page * cheats_per_page;
+            int end   = start + cheats_per_page;
+            if (end > filtered_count) end = filtered_count;
+            for (int j = start; j < end; j++) {
+                int i = filtered_indices[j];
+                const GBCheat* c = gb_cheats_get(i);
+                bool on = c->enabled;
+                ImGui::PushID(i);
+                if (ImGui::Checkbox(c->description, &on)) {
+                    gb_cheats_set_enabled(g_registered_ctx, i, on);
+                }
+                /* Edit button opens a popup with per-op value
+                 * editors. Useful for "modifier" cheats whose .cht
+                 * value byte is a placeholder (e.g. "Rival Name
+                 * Mod Slot N" ships value $50 -- the name-terminator
+                 * -- so the user can plug in the actual char byte). */
+                ImGui::SameLine();
+                if (ImGui::Button("...##cheat_edit")) {
+                    ImGui::OpenPopup("cheat_editor");
+                }
+                if (ImGui::BeginPopup("cheat_editor")) {
+                    ImGui::TextDisabled("%s", c->description);
+                    ImGui::Separator();
+                    for (int k = 0; k < c->op_count; k++) {
+                        char val_buf[8];
+                        snprintf(val_buf, sizeof(val_buf), "%02X",
+                                 c->ops[k].value);
+                        ImGui::PushID(k);
+                        ImGui::SetNextItemWidth(60.0f);
+                        if (ImGui::InputText("Value##op",
+                                             val_buf, sizeof(val_buf),
+                                             ImGuiInputTextFlags_CharsHexadecimal |
+                                             ImGuiInputTextFlags_CharsUppercase)) {
+                            long v = strtol(val_buf, NULL, 16);
+                            if (v >= 0 && v <= 255) {
+                                gb_cheats_set_op_value(g_registered_ctx,
+                                                       i, k, (uint8_t)v);
+                            }
+                        }
+                        ImGui::SameLine();
+                        const char* kind = (c->ops[k].type ==
+                                            GB_CHEAT_OP_GAMESHARK)
+                                           ? "RAM" : "ROM";
+                        ImGui::TextDisabled("at $%04X (%s)",
+                                            c->ops[k].address, kind);
+                        ImGui::PopID();
+                    }
+                    ImGui::Separator();
+                    if (ImGui::Button("Close##cheat_editor")) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+            }
+            if (filtered_count == 0) {
+                ImGui::TextDisabled("(no matches)");
+            }
+
+            ImGui::Spacing();
+            if (ImGui::Button("< Prev##cheat_page") && cheat_page > 0) {
+                cheat_page--;
+            }
+            ImGui::SameLine();
+            ImGui::Text("Page %d / %d   (%d match%s)",
+                        cheat_page + 1, page_count,
+                        filtered_count, filtered_count == 1 ? "" : "es");
+            ImGui::SameLine();
+            if (ImGui::Button("Next >##cheat_page") &&
+                cheat_page < page_count - 1) {
+                cheat_page++;
+            }
+            }
+        }
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -4979,6 +5138,10 @@ bool gb_platform_poll_events(GBContext* ctx) {
      * map. No-op when the toggle is disabled. */
     gb_wild_5050_tick(ctx);
 
+    /* Cheats (libretro .cht): iterate enabled GameShark codes and
+     * write each value into RAM. No-op when nothing is enabled. */
+    gb_cheats_tick(ctx);
+
     SDL_Event event;
 
     if (!g_benchmark_mode) {
@@ -5556,6 +5719,11 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
      * (CGB/DMG modes), so the SGB Cart Border toggle still works on
      * later launches. */
     try_load_sgb_cart_border_cache();
+
+    /* Scan cheats/<game_id>/*.cht. Cart-agnostic -- works on any
+     * Game Boy game that has libretro cheat files dropped into
+     * the cheats/ folder. */
+    gb_cheats_load(g_active_game_id.c_str());
 }
 
 /* Helpers for menu handlers to scope a Look setting to the active

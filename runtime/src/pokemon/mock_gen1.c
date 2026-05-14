@@ -37,6 +37,8 @@ typedef struct {
     uint16_t rom_off_dex_order;     /* PokedexOrder — internal_id → dex# */
     uint8_t  rom_bank_moves;
     uint16_t rom_off_moves;         /* MoveNames — variable-length names */
+    uint8_t  rom_bank_items;
+    uint16_t rom_off_items;         /* ItemNames — variable-length names */
     /* WRAM offsets (Gen 1 doesn't use CGB WRAM banking — all in
      * the fixed $D000-$DFFF region, which lives at offset 0x1000
      * in our flat 8-bank buffer). */
@@ -47,6 +49,7 @@ typedef struct {
     uint16_t wram_party_nicks;
     uint16_t wram_player_id;
     uint16_t wram_player_name;
+    uint16_t wram_bag_count;        /* wNumBagItems; bag items follow at +1 */
 } GBGen1Info;
 
 static const GBGen1Info GEN1_CARTS[] = {
@@ -57,7 +60,9 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x0E, 0x705C,
         0x10, 0x5024,
         0x2C, 0x4000,
+        0x01, 0x472B,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
+        0xD31D,
     },
     {
         GB_MOCK_GEN1_BLUE,   "POKEMON BLUE",  12,
@@ -66,7 +71,9 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x0E, 0x705C,
         0x10, 0x5024,
         0x2C, 0x4000,
+        0x01, 0x472B,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
+        0xD31D,
     },
     {
         GB_MOCK_GEN1_YELLOW, "POKEMON YELLO", 13,
@@ -75,7 +82,9 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x0E, 0x71E5,
         0x10, 0x50B1,
         0x2F, 0x4000,
+        0x01, 0x45B7,
         0xD162, 0xD163, 0xD16A, 0xD272, 0xD2B4, 0xD358, 0xD157,
+        0xD31C,
     },
 };
 #define GEN1_CART_COUNT ((int)(sizeof(GEN1_CARTS) / sizeof(GEN1_CARTS[0])))
@@ -407,6 +416,103 @@ int gb_mock_gen1_dex_for_name(const GBContext* ctx, const char* name) {
         if (buf[i] == '\0' && name[i] == '\0') return dex;
     }
     return -1;
+}
+
+bool gb_mock_gen1_item_name(const GBContext* ctx, int item_id,
+                            char* out, size_t out_size) {
+    if (!out || out_size < 2) return false;
+    out[0] = '\0';
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->rom) return false;
+    if (item_id < 1 || item_id > 255) return false;
+    /* Walk the variable-length table to the Nth entry. */
+    size_t off = rom_addr(c->rom_bank_items, c->rom_off_items);
+    for (int id = 1; id <= item_id; id++) {
+        size_t start = off;
+        while (off < ctx->rom_size && ctx->rom[off] != 0x50) off++;
+        if (off >= ctx->rom_size) return false;
+        if (id == item_id) {
+            size_t i = 0;
+            for (size_t p = start; p < off && i + 1 < out_size; p++) {
+                out[i++] = decode_charmap_byte(ctx->rom[p]);
+            }
+            out[i] = '\0';
+            /* Skip "?????" sentinel and empty entries. */
+            return out[0] != '\0' && strcmp(out, "?????") != 0;
+        }
+        off++;
+    }
+    return false;
+}
+
+bool gb_mock_gen1_give_item(GBContext* ctx, int item_id, int qty) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram) {
+        fprintf(stderr, "[give_item/gen1] no cart info or wram\n");
+        return false;
+    }
+    if (item_id < 1 || item_id > 255) {
+        fprintf(stderr, "[give_item/gen1] bad item_id %d\n", item_id);
+        return false;
+    }
+    if (qty < 1) return false;
+    if (qty > 99) qty = 99;
+
+    /* wNumBagItems is a single byte; wBagItems starts at +1 with
+     * pairs of (item_id, quantity) and a 0xFF terminator. Max 20
+     * slots. */
+    uint8_t* count_p = wram_ptr(ctx, c->wram_bag_count);
+    uint8_t* items_p = count_p + 1;
+    int slots = *count_p;
+    if (slots > 20) {
+        /* Uninitialized WRAM (cart not started yet, or save not
+         * loaded): refuse rather than corrupting. */
+        fprintf(stderr, "[give_item/gen1] count=$%02X looks uninitialized "
+                "-- start the game / load a save first\n", slots);
+        return false;
+    }
+
+    /* If the item is already there, stack. */
+    for (int i = 0; i < slots; i++) {
+        if (items_p[i * 2] == (uint8_t)item_id) {
+            int cur = items_p[i * 2 + 1];
+            int next = cur + qty;
+            if (next > 99) next = 99;
+            items_p[i * 2 + 1] = (uint8_t)next;
+            return true;
+        }
+    }
+    /* Bag full and not stacking -- match cart behavior, refuse. */
+    if (slots >= 20) {
+        fprintf(stderr, "[give_item/gen1] bag full (20 items); toss one "
+                "in-game to make room\n");
+        return false;
+    }
+    items_p[slots * 2]     = (uint8_t)item_id;
+    items_p[slots * 2 + 1] = (uint8_t)qty;
+    items_p[slots * 2 + 2] = 0xFF;   /* terminator after new slot */
+    *count_p = (uint8_t)(slots + 1);
+    return true;
+}
+
+size_t gb_mock_gen1_evos_record_offset(const GBContext* ctx, int internal_id) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || internal_id < 1 || internal_id > 200) return 0;
+    /* EvosMovesPointerTable: 2 bytes per entry, internal-indexed. */
+    size_t ptr_off = rom_addr(c->rom_bank_evos, c->rom_off_evos) +
+                     (size_t)(internal_id - 1) * 2;
+    if (ptr_off + 2 > ctx->rom_size) return 0;
+    uint16_t data_addr = (uint16_t)(ctx->rom[ptr_off] |
+                                    (ctx->rom[ptr_off + 1] << 8));
+    size_t off = rom_addr(c->rom_bank_evos, data_addr);
+    if (off >= ctx->rom_size) return 0;
+    return off;
+}
+
+int gb_mock_gen1_internal_id_for_dex(const GBContext* ctx, int dex) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c) return -1;
+    return dex_to_internal(ctx, c, dex);
 }
 
 bool gb_mock_gen1_species_name(const GBContext* ctx, int species,

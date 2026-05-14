@@ -72,6 +72,35 @@ int gb_mock_gen1_move_id_for_name(const GBContext* ctx, const char* name);
 bool gb_mock_gen1_move_name(const GBContext* ctx, int move_id,
                             char* out, size_t out_size);
 
+/* Convert a dex# (1..151) to the cart's internal MON_SPECIES byte,
+ * which is what party_struct[0] and wPartySpecies[] actually store.
+ * Returns -1 on out-of-range or non-Gen-1 cart. */
+int gb_mock_gen1_internal_id_for_dex(const GBContext* ctx, int dex);
+
+/* Look up the ASCII item name by 1-based item ID. out >= 14 bytes.
+ * Returns false on out-of-range, empty slot, or non-Gen-1 cart. */
+bool gb_mock_gen1_item_name(const GBContext* ctx, int item_id,
+                            char* out, size_t out_size);
+
+/* Number of item slots the cart's ItemNames table has. Hardcoded to
+ * 95 for Gen 1 -- the table is 96 entries with the last being the
+ * "CANCEL" sentinel. Items 1..95 are catchable names. */
+#define GB_MOCK_GEN1_ITEM_COUNT 95
+
+/* Add `qty` of `item_id` to the cart's single bag pocket. If the
+ * item is already present, quantity stacks (capped at 99). If not,
+ * a new slot is appended provided the bag isn't full (20 slots
+ * max). Returns false on out-of-range item, full bag (with new
+ * item), or non-Gen-1 cart. */
+bool gb_mock_gen1_give_item(GBContext* ctx, int item_id, int qty);
+
+/* Resolve the flat ROM byte offset of the species's evos+moves
+ * record. EvosMovesPointerTable is internal-id-indexed, so the input
+ * is the cart's MON_SPECIES byte (1..190). The returned offset points
+ * at the first evolution opcode byte. Returns 0 on out-of-range or
+ * lookup failure. */
+size_t gb_mock_gen1_evos_record_offset(const GBContext* ctx, int internal_id);
+
 /* Build + inject a Pokemon into the next party slot.
  *   species : 1..151
  *   level   : 2..100

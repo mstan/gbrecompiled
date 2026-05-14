@@ -42,6 +42,10 @@ typedef struct {
     uint16_t rom_off_evos;          /* EvosAttacksPointers */
     uint8_t  rom_bank_moves;
     uint16_t rom_off_moves;         /* MoveNames — variable-length names */
+    uint8_t  rom_bank_items;
+    uint16_t rom_off_items;         /* ItemNames — variable-length names */
+    uint8_t  rom_bank_item_attrs;
+    uint16_t rom_off_item_attrs;    /* ItemAttributes — 7 bytes per item */
     /* WRAM bank 1 offsets ($D000-$DFFF range) */
     uint16_t wram_party_count;
     uint16_t wram_party_species;
@@ -50,6 +54,8 @@ typedef struct {
     uint16_t wram_party_nicks;
     uint16_t wram_player_id;
     uint16_t wram_player_name;
+    uint16_t wram_items_count;      /* wNumItems; items follow at +1 */
+    uint16_t wram_balls_count;      /* wNumBalls; balls follow at +1 */
 } GBGen2Info;
 
 static const GBGen2Info GEN2_CARTS[] = {
@@ -59,7 +65,10 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x6C, 0x4B74,
         0x10, 0x67BD,
         0x6C, 0x5574,
+        0x6C, 0x4000,
+        0x01, 0x68A0,
         0xDA22, 0xDA23, 0xDA2A, 0xDB4A, 0xDB8C, 0xD1A1, 0xD1A3,
+        0xD5B7, 0xD5FC,
     },
     {
         GB_MOCK_GEN2_SILVER,  "POKEMON_SLV", 11,
@@ -67,7 +76,10 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x6C, 0x4B74,
         0x10, 0x67BD,
         0x6C, 0x5574,
+        0x6C, 0x4000,
+        0x01, 0x6866,
         0xDA22, 0xDA23, 0xDA2A, 0xDB4A, 0xDB8C, 0xD1A1, 0xD1A3,
+        0xD5B7, 0xD5FC,
     },
     {
         GB_MOCK_GEN2_CRYSTAL, "PM_CRYSTAL",  10,
@@ -75,7 +87,10 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x14, 0x7384,
         0x10, 0x65B1,
         0x72, 0x5F29,
+        0x72, 0x4000,
+        0x01, 0x67C1,
         0xDCD7, 0xDCD8, 0xDCDF, 0xDDFF, 0xDE41, 0xD47B, 0xD47D,
+        0xD892, 0xD8D7,
     },
 };
 #define GEN2_CART_COUNT ((int)(sizeof(GEN2_CARTS) / sizeof(GEN2_CARTS[0])))
@@ -358,6 +373,124 @@ int gb_mock_gen2_dex_for_name(const GBContext* ctx, const char* name) {
         if (buf[i] == '\0' && name[i] == '\0') return dex;
     }
     return -1;
+}
+
+bool gb_mock_gen2_item_name(const GBContext* ctx, int item_id,
+                            char* out, size_t out_size) {
+    if (!out || out_size < 2) return false;
+    out[0] = '\0';
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->rom) return false;
+    if (item_id < 1 || item_id > 255) return false;
+    size_t off = rom_addr(c->rom_bank_items, c->rom_off_items);
+    for (int id = 1; id <= item_id; id++) {
+        size_t start = off;
+        while (off < ctx->rom_size && ctx->rom[off] != 0x50) off++;
+        if (off >= ctx->rom_size) return false;
+        if (id == item_id) {
+            size_t i = 0;
+            for (size_t p = start; p < off && i + 1 < out_size; p++) {
+                out[i++] = decode_charmap_byte(ctx->rom[p]);
+            }
+            out[i] = '\0';
+            /* Replace cart's PK ligature ('#') with the conventional
+             * "POKE" spelling so the dropdown shows "POKE BALL" /
+             * "POKE DOLL" rather than the unrenderable glyph. */
+            if (i >= 2 && out[0] == '#' && out[1] == ' ') {
+                char tmp[24];
+                snprintf(tmp, sizeof(tmp), "POKE%s", out + 1);
+                snprintf(out, out_size, "%s", tmp);
+            }
+            /* Skip placeholders. */
+            if (strcmp(out, "TERU-SAMA") == 0 || strcmp(out, "?") == 0)
+                return false;
+            return out[0] != '\0';
+        }
+        off++;
+    }
+    return false;
+}
+
+GBGen2ItemPocket gb_mock_gen2_item_pocket(const GBContext* ctx, int item_id) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->rom) return GB_GEN2_POCKET_NONE;
+    if (item_id < 1 || item_id > 255) return GB_GEN2_POCKET_NONE;
+    /* Each ItemAttributes entry is 7 bytes: 2 price, 4 (held,
+     * param, property, pocket), 1 menus. Pocket byte is at +5. */
+    size_t off = rom_addr(c->rom_bank_item_attrs, c->rom_off_item_attrs) +
+                 (size_t)(item_id - 1) * 7 + 5;
+    if (off >= ctx->rom_size) return GB_GEN2_POCKET_NONE;
+    uint8_t p = ctx->rom[off];
+    if (p > 4) return GB_GEN2_POCKET_NONE;
+    return (GBGen2ItemPocket)p;
+}
+
+bool gb_mock_gen2_give_item(GBContext* ctx, int item_id, int qty) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram) return false;
+    if (item_id < 1 || item_id > 255) return false;
+    if (qty < 1) return false;
+    if (qty > 99) qty = 99;
+
+    GBGen2ItemPocket pocket = gb_mock_gen2_item_pocket(ctx, item_id);
+    uint16_t count_addr;
+    int max_slots;
+    switch (pocket) {
+    case GB_GEN2_POCKET_ITEM:
+        count_addr = c->wram_items_count;
+        max_slots = 20;
+        break;
+    case GB_GEN2_POCKET_BALL:
+        count_addr = c->wram_balls_count;
+        max_slots = 12;
+        break;
+    default:
+        /* KEY_ITEM and TM_HM intentionally unsupported for now. */
+        return false;
+    }
+
+    uint8_t* count_p = wram_b1_ptr(ctx, count_addr);
+    uint8_t* items_p = count_p + 1;
+    int slots = *count_p;
+    if (slots > max_slots) {
+        fprintf(stderr, "[give_item/gen2] count=$%02X (max %d) looks "
+                "uninitialized -- start the game / load a save first\n",
+                slots, max_slots);
+        return false;
+    }
+
+    for (int i = 0; i < slots; i++) {
+        if (items_p[i * 2] == (uint8_t)item_id) {
+            int cur = items_p[i * 2 + 1];
+            int next = cur + qty;
+            if (next > 99) next = 99;
+            items_p[i * 2 + 1] = (uint8_t)next;
+            return true;
+        }
+    }
+    if (slots >= max_slots) {
+        fprintf(stderr, "[give_item/gen2] pocket full (%d items); toss "
+                "one in-game to make room\n", max_slots);
+        return false;
+    }
+    items_p[slots * 2]     = (uint8_t)item_id;
+    items_p[slots * 2 + 1] = (uint8_t)qty;
+    items_p[slots * 2 + 2] = 0xFF;
+    *count_p = (uint8_t)(slots + 1);
+    return true;
+}
+
+size_t gb_mock_gen2_evos_record_offset(const GBContext* ctx, int dex) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || dex < 1 || dex > GB_MOCK_GEN2_SPECIES_COUNT) return 0;
+    size_t ptr_off = rom_addr(c->rom_bank_evos, c->rom_off_evos) +
+                     (size_t)(dex - 1) * 2;
+    if (ptr_off + 2 > ctx->rom_size) return 0;
+    uint16_t data_addr = (uint16_t)(ctx->rom[ptr_off] |
+                                    (ctx->rom[ptr_off + 1] << 8));
+    size_t off = rom_addr(c->rom_bank_evos, data_addr);
+    if (off >= ctx->rom_size) return 0;
+    return off;
 }
 
 bool gb_mock_gen2_species_name(const GBContext* ctx, int species,

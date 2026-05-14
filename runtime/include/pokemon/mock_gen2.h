@@ -104,6 +104,39 @@ bool gb_mock_gen2_move_name(const GBContext* ctx, int move_id,
 bool gb_mock_gen2_species_name(const GBContext* ctx, int species,
                                char* out, size_t out_size);
 
+/* Resolve the flat ROM byte offset of the species's evos+attacks
+ * record. EvosAttacksPointers is dex-indexed. Returns 0 on
+ * out-of-range or lookup failure. */
+size_t gb_mock_gen2_evos_record_offset(const GBContext* ctx, int dex);
+
+/* Look up the ASCII item name by 1-based item ID. out >= 14 bytes.
+ * Skips TERU-SAMA placeholder slots and the "?" sentinel. Returns
+ * false on out-of-range, placeholder, or non-Gen-2 cart. */
+bool gb_mock_gen2_item_name(const GBContext* ctx, int item_id,
+                            char* out, size_t out_size);
+
+/* Number of meaningful item slots in the cart's ItemNames table. */
+#define GB_MOCK_GEN2_ITEM_COUNT 255
+
+/* Item pocket constants -- match constants/item_data_constants.asm. */
+typedef enum {
+    GB_GEN2_POCKET_NONE     = 0,
+    GB_GEN2_POCKET_ITEM     = 1,
+    GB_GEN2_POCKET_KEY_ITEM = 2,
+    GB_GEN2_POCKET_BALL     = 3,
+    GB_GEN2_POCKET_TM_HM    = 4,
+} GBGen2ItemPocket;
+
+/* Read the ItemAttributes pocket byte for `item_id`. Returns 0 on
+ * out-of-range or non-Gen-2 cart. */
+GBGen2ItemPocket gb_mock_gen2_item_pocket(const GBContext* ctx, int item_id);
+
+/* Add `qty` of `item_id` to the appropriate pocket (Items or Balls
+ * pocket only - Key Items and TMs/HMs are not supported yet). If
+ * already present, quantity stacks (capped at 99). Returns false on
+ * unsupported pocket, full pocket with new item, or non-Gen-2. */
+bool gb_mock_gen2_give_item(GBContext* ctx, int item_id, int qty);
+
 /* Build and inject a Pokemon into the next party slot.
  *   species : 1..251 (1-based dex number)
  *   level   : 2..100

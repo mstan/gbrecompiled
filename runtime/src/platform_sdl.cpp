@@ -16,6 +16,8 @@
 #include "pokemon/mock_gen1.h"
 #include "pokemon/mock_gen2.h"
 #include "pokemon/mock_inject_file.h"
+#include "pokemon/mock_evolve_patch.h"
+#include "pokemon/mock_wild_5050.h"
 #ifdef GBRT_HAVE_GBCAM
 #include "gbcam.h"
 #endif
@@ -165,6 +167,19 @@ static GBHardwareModePref g_active_hardware_mode_pref = GB_HARDWARE_MODE_AUTO;
 static bool g_sgb_colors_pref = true;
 
 static bool g_show_fps = false;
+/* ImGui theme: 0 = Dark (default), 1 = Light, 2 = Classic. */
+static int  g_imgui_theme = 0;
+static void apply_imgui_theme(int idx) {
+    switch (idx) {
+        case 1:  ImGui::StyleColorsLight();   break;
+        case 2:  ImGui::StyleColorsClassic(); break;
+        default: ImGui::StyleColorsDark();    break;
+    }
+    /* Override the nav highlight to a softer blue across all themes
+     * so keyboard/gamepad focus reads consistently. */
+    ImGui::GetStyle().Colors[ImGuiCol_NavHighlight] =
+        ImVec4(0.45f, 0.65f, 0.95f, 0.65f);
+}
 
 /* SGB cart-supplied border (CHR_TRN+PCT_TRN). Rebuilt from sgb engine
  * data whenever the revision counter advances. Default enabled — most
@@ -1168,6 +1183,13 @@ static void load_runtime_preferences(void) {
                     g_audio_target_device_name = value;
                     continue;
                 }
+                if (strcmp(key, "ui.theme") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0 && parsed <= 2) {
+                        g_imgui_theme = (int)parsed;
+                    }
+                    continue;
+                }
                 if (strcmp(key, "savestate.slot") == 0) {
                     long parsed = strtol(value, NULL, 10);
                     if (parsed >= 0 && parsed < GB_SAVESTATE_SLOT_COUNT) {
@@ -1355,6 +1377,7 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.latency_ms=%u\n", g_audio_latency_ms);
     fprintf(file, "audio.volume_percent=%u\n", g_audio_volume_percent);
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
+    fprintf(file, "ui.theme=%d\n", g_imgui_theme);
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
     fprintf(file, "sgb.colors=%d\n", g_sgb_colors_pref ? 1 : 0);
@@ -2786,6 +2809,19 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (ImGui::Checkbox("Show FPS", &g_show_fps)) {
             save_runtime_preferences();
         }
+        static const char* const THEME_NAMES[] = { "Classic", "Light", "Dark" };
+        if (ImGui::BeginCombo("Menu Theme", THEME_NAMES[g_imgui_theme])) {
+            for (int i = 0; i < 3; i++) {
+                bool selected = (i == g_imgui_theme);
+                if (ImGui::Selectable(THEME_NAMES[i], selected)) {
+                    g_imgui_theme = i;
+                    apply_imgui_theme(g_imgui_theme);
+                    save_runtime_preferences();
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
 
         ImGui::Spacing();
         ImGui::TextDisabled("Audio");
@@ -3115,12 +3151,45 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::PopTextWrapPos();
         }
 
-        /* Generic Pokemon builder — works on any Gen 2 cart
+        /* Savestates -- placed above the Pokemon-specific options so
+         * common cart actions stay reachable without scrolling past
+         * the long pokemon menu. */
+        ImGui::Spacing();
+        ImGui::TextDisabled("Savestates");
+        int savestate_slot = g_savestate_slot + 1;
+        if (ImGui::SliderInt("Active Slot", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT, "%d", ImGuiSliderFlags_NoInput)) {
+            g_savestate_slot = savestate_slot - 1;
+            save_runtime_preferences();
+        }
+        if (ImGui::Button("Save State (F5)")) {
+            save_savestate_slot(g_registered_ctx, g_savestate_slot);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load State (F8)")) {
+            load_savestate_slot(g_registered_ctx, g_savestate_slot);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete Slot")) {
+            delete_savestate_slot(g_registered_ctx, g_savestate_slot);
+        }
+        {
+            std::string savestate_path;
+            const bool slot_exists = savestate_slot_exists(g_registered_ctx, g_savestate_slot, &savestate_path);
+            ImGui::TextDisabled("Slot %d: %s", g_savestate_slot + 1, slot_exists ? "Present" : "Empty");
+        }
+        if (!g_savestate_status.empty()) {
+            ImGui::TextWrapped("%s", g_savestate_status.c_str());
+        }
+
+        /* Generic Pokemon builder -- works on any Gen 2 cart
          * Gen 1 (Red/Blue/Yellow) or Gen 2 (Gold/Silver/Crystal).
          * Per-cart WRAM offsets and ROM data-table addresses come
          * from the dispatch table in mock_gen1.c / mock_gen2.c. The
          * cart's own BaseStats, EvosMoves, and PokemonNames drive
-         * everything except the user-picked species/level/shiny. */
+         * everything except the user-picked species/level/shiny.
+         * All Pokemon sections live under a single "Pokemon Options"
+         * collapsing header so they can be tucked away on carts where
+         * the user isn't using them. */
         bool builder_gen2 = gb_mock_gen2_detect(g_registered_ctx) != GB_MOCK_GEN2_NONE;
         bool builder_gen1 = !builder_gen2 &&
                             gb_mock_gen1_detect(g_registered_ctx) != GB_MOCK_GEN1_NONE;
@@ -3128,8 +3197,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             int builder_species_count = builder_gen2
                 ? GB_MOCK_GEN2_SPECIES_COUNT : GB_MOCK_GEN1_SPECIES_COUNT;
             ImGui::Spacing();
-            if (ImGui::CollapsingHeader("Custom Pokemon & Distributions")) {
-                ImGui::PushTextWrapPos(0.0f);
+            if (ImGui::CollapsingHeader("Pokemon Options")) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("Pokemon Builder");
 
                 /* Species name cache — rebuilt the first time the
                  * generation it represents differs from the active
@@ -3267,7 +3337,154 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                         ImGui::TextDisabled("%s", g_event_last_msg);
                     }
                 }
-                ImGui::PopTextWrapPos();
+
+                /* Trade Evolutions -> Level Evolutions: a single
+                 * toggle that patches the cart's evos_moves rows
+                 * byte-for-byte so the trade evolvers fire on level
+                 * up instead. The cart's vanilla evolution flow then
+                 * handles everything (stats with stat-exp, learnset
+                 * re-check, Pokedex flags, animation) the next time
+                 * the slot gains a level. */
+                ImGui::Spacing();
+                ImGui::TextDisabled("Trade Evolutions");
+                if (gb_evolve_patch_is_supported(g_registered_ctx)) {
+                    bool on = gb_evolve_patch_is_enabled();
+                    if (ImGui::Checkbox("Enable level-up evolutions for trade-only Pokemon", &on)) {
+                        gb_evolve_patch_set_enabled(g_registered_ctx, on);
+                    }
+                    ImGui::TextDisabled(
+                        "Replaces EV_TRADE rows in cart ROM with EV_LEVEL at "
+                        "sensible thresholds. A Pokemon already past its new "
+                        "threshold evolves on the next level-up event (battle "
+                        "XP or Rare Candy), not retroactively.");
+                    const GBEvolvePatchEntry* entries = NULL;
+                    int n = gb_evolve_patch_list(g_registered_ctx, &entries);
+                    for (int i = 0; i < n; i++) {
+                        ImGui::BulletText("%s", entries[i].label);
+                    }
+                } else {
+                    ImGui::TextDisabled("(not a Pokemon cart)");
+                }
+
+                /* Wild Exclusives 50/50 -- on Red/Blue carts, each
+                 * version-exclusive encounter slot rolls a coin to
+                 * pick either Red's species or Blue's. Fresh mix on
+                 * every toggle-on. */
+                ImGui::Spacing();
+                ImGui::TextDisabled("Wild Exclusives");
+                if (gb_wild_5050_is_supported(g_registered_ctx)) {
+                    bool on = gb_wild_5050_is_enabled();
+                    if (ImGui::Checkbox("Mix in other versions' wild exclusives", &on)) {
+                        gb_wild_5050_set_enabled(g_registered_ctx, on);
+                    }
+                    ImGui::TextDisabled(
+                        "Per-slot random pick across the union of all three "
+                        "versions' species at that route position (%d slots "
+                        "for this cart). The mix re-rolls every time you "
+                        "walk into a new map.",
+                        gb_wild_5050_slot_count(g_registered_ctx));
+                } else {
+                    ImGui::TextDisabled("(Pokemon cart only)");
+                }
+
+                /* Give Item -- writes the chosen item directly into
+                 * the player's bag. Useful for testing (Rare Candy
+                 * to nudge a trade-evolver) and for skipping item-
+                 * hunting grind on a fresh save. Dropdown reads
+                 * names straight from the cart's ItemNames table so
+                 * the list matches the cart's spelling exactly. */
+                static int  g_give_item_id = 0;     /* 1-based; 0 = unset */
+                static int  g_give_item_qty = 99;
+                static char g_give_item_msg[120] = "";
+                ImGui::Spacing();
+                ImGui::TextDisabled("Give Item");
+                {
+                    /* Cache the per-cart item list one-shot; the
+                     * ItemNames table is in ROM and never changes
+                     * during a session. */
+                    static int g_item_list_built_for_gen = 0;
+                    static int g_item_ids[256];
+                    static char g_item_labels[256][24];
+                    static int g_item_label_count = 0;
+                    int gen = (builder_gen2 ? 2 : 1);
+                    if (g_item_list_built_for_gen != gen) {
+                        g_item_label_count = 0;
+                        char nm[20];
+                        int total = gen == 2
+                            ? GB_MOCK_GEN2_ITEM_COUNT
+                            : GB_MOCK_GEN1_ITEM_COUNT;
+                        for (int id = 1; id <= total &&
+                             g_item_label_count < 256; id++) {
+                            bool ok = (gen == 2)
+                                ? gb_mock_gen2_item_name(g_registered_ctx, id,
+                                                         nm, sizeof(nm))
+                                : gb_mock_gen1_item_name(g_registered_ctx, id,
+                                                         nm, sizeof(nm));
+                            if (!ok) continue;
+                            g_item_ids[g_item_label_count] = id;
+                            snprintf(g_item_labels[g_item_label_count],
+                                     sizeof(g_item_labels[0]),
+                                     "%03d - %s", id, nm);
+                            g_item_label_count++;
+                        }
+                        g_item_list_built_for_gen = gen;
+                        if (g_give_item_id == 0 && g_item_label_count > 0)
+                            g_give_item_id = g_item_ids[0];
+                    }
+
+                    /* Resolve current selection to dropdown index. */
+                    int sel = 0;
+                    for (int i = 0; i < g_item_label_count; i++) {
+                        if (g_item_ids[i] == g_give_item_id) { sel = i; break; }
+                    }
+                    const char* current_label = (g_item_label_count > 0)
+                        ? g_item_labels[sel] : "(no items)";
+                    if (ImGui::BeginCombo("Item##give_item", current_label)) {
+                        for (int i = 0; i < g_item_label_count; i++) {
+                            bool selected = (i == sel);
+                            ImGui::PushID(i);
+                            if (ImGui::Selectable(g_item_labels[i], selected)) {
+                                g_give_item_id = g_item_ids[i];
+                            }
+                            if (selected) ImGui::SetItemDefaultFocus();
+                            ImGui::PopID();
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::SliderInt("Quantity##give_item", &g_give_item_qty, 1, 99);
+                    if (ImGui::Button("Give##give_item")) {
+                        bool ok;
+                        if (builder_gen2) {
+                            ok = gb_mock_gen2_give_item(g_registered_ctx,
+                                       g_give_item_id, g_give_item_qty);
+                        } else {
+                            ok = gb_mock_gen1_give_item(g_registered_ctx,
+                                       g_give_item_id, g_give_item_qty);
+                        }
+                        if (ok) {
+                            snprintf(g_give_item_msg, sizeof(g_give_item_msg),
+                                     "Gave %d x item #%d - check your bag.",
+                                     g_give_item_qty, g_give_item_id);
+                        } else {
+                            snprintf(g_give_item_msg, sizeof(g_give_item_msg),
+                                     "Failed: bag/pocket full (cart caps at "
+                                     "20 items / 12 balls). Toss one in-game "
+                                     "to make room, or pick an item you "
+                                     "already carry to stack quantity.");
+                        }
+                    }
+                    if (g_give_item_msg[0]) {
+                        ImGui::TextDisabled("%s", g_give_item_msg);
+                    }
+                    if (builder_gen2) {
+                        ImGui::TextDisabled(
+                            "Items routed to Items / Balls pocket based on "
+                            "the cart's ItemAttributes. Key Items and TMs/HMs "
+                            "not yet supported.");
+                    }
+                }
+
+            ImGui::PopTextWrapPos();
             }
         }
 
@@ -3318,33 +3535,6 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
 #endif
-
-        ImGui::Spacing();
-        ImGui::TextDisabled("Savestates");
-        int savestate_slot = g_savestate_slot + 1;
-        if (ImGui::SliderInt("Active Slot", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT, "%d", ImGuiSliderFlags_NoInput)) {
-            g_savestate_slot = savestate_slot - 1;
-            save_runtime_preferences();
-        }
-        if (ImGui::Button("Save State (F5)")) {
-            save_savestate_slot(g_registered_ctx, g_savestate_slot);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Load State (F8)")) {
-            load_savestate_slot(g_registered_ctx, g_savestate_slot);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Delete Slot")) {
-            delete_savestate_slot(g_registered_ctx, g_savestate_slot);
-        }
-        {
-            std::string savestate_path;
-            const bool slot_exists = savestate_slot_exists(g_registered_ctx, g_savestate_slot, &savestate_path);
-            ImGui::TextDisabled("Slot %d: %s", g_savestate_slot + 1, slot_exists ? "Present" : "Empty");
-        }
-        if (!g_savestate_status.empty()) {
-            ImGui::TextWrapped("%s", g_savestate_status.c_str());
-        }
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -4487,8 +4677,7 @@ bool gb_platform_init(int scale) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
-    ImGui::StyleColorsDark();
-    ImGui::GetStyle().Colors[ImGuiCol_NavHighlight] = ImVec4(0.45f, 0.65f, 0.95f, 0.65f);
+    apply_imgui_theme(g_imgui_theme);
 
     /* GLES 2 backend — `#version 100` GLSL, no VAOs, runs anywhere. */
     ImGui_ImplSDL2_InitForOpenGL(g_window, g_gl_context);
@@ -4784,6 +4973,11 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
 bool gb_platform_poll_events(GBContext* ctx) {
     /* Drain inbound BGB packets and apply them to the live serial state. */
     gb_serial_link_tick(ctx);
+
+    /* Wild-encounter 50/50 watches the cart's current map ID and
+     * re-rolls every diff slot when the player walks into a new
+     * map. No-op when the toggle is disabled. */
+    gb_wild_5050_tick(ctx);
 
     SDL_Event event;
 

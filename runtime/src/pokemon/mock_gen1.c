@@ -83,6 +83,23 @@ static const GBGen1Info GEN1_CARTS[] = {
         0xD347,
     },
     {
+        /* The Green Patch v3.0 takes Pokemon Blue's ROM and overlays
+         * JP Green sprites, title screen, and name presets. Code +
+         * data layout match Blue exactly -- only the patched bytes
+         * differ -- so every WRAM/ROM offset is identical to Blue. */
+        GB_MOCK_GEN1_GREEN,  "POKEMON GREEN", 13,
+        0x0E, 0x43DE,
+        0x07, 0x421E,
+        0x0E, 0x705C,
+        0x10, 0x5024,
+        0x2C, 0x4000,
+        0x01, 0x472B,
+        0x03, 0x6799,
+        0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
+        0xD31D,
+        0xD347,
+    },
+    {
         GB_MOCK_GEN1_YELLOW, "POKEMON YELLO", 13,
         0x0E, 0x43DE,
         0x3A, 0x4000,

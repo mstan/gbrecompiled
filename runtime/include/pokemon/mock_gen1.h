@@ -33,6 +33,7 @@ typedef enum {
     GB_MOCK_GEN1_RED,
     GB_MOCK_GEN1_BLUE,
     GB_MOCK_GEN1_YELLOW,
+    GB_MOCK_GEN1_GREEN,   /* English-patched JP Green; shares Blue's code */
 } GBGen1Game;
 
 /* Which Gen 1 cart is loaded, or NONE for everything else. */

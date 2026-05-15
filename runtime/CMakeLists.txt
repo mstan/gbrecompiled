@@ -25,6 +25,7 @@ add_library(gbrt STATIC
     src/gb_printer.c
     src/gb_asset_loader.c
     src/gb_sha1.c
+    src/gb_sha256.c
 )
 
 # pthread for the BGB link recv thread

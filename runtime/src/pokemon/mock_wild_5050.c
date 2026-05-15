@@ -67,7 +67,8 @@ static int read_map_key(const GBContext* ctx) {
     if (g1 == GB_MOCK_GEN1_YELLOW) {
         return ctx->wram[0x1000 + (0xD35D - 0xD000)];
     }
-    if (g1 == GB_MOCK_GEN1_RED || g1 == GB_MOCK_GEN1_BLUE) {
+    if (g1 == GB_MOCK_GEN1_RED || g1 == GB_MOCK_GEN1_BLUE ||
+        g1 == GB_MOCK_GEN1_GREEN) {
         return ctx->wram[0x1000 + (0xD35E - 0xD000)];
     }
     if (g2 == GB_MOCK_GEN2_GOLD || g2 == GB_MOCK_GEN2_SILVER) {
@@ -108,7 +109,8 @@ static void resolve_table(const GBContext* ctx,
     *out_table = NULL;
     *out_count = 0;
 
-    if (g1 == GB_MOCK_GEN1_RED || g1 == GB_MOCK_GEN1_BLUE) {
+    if (g1 == GB_MOCK_GEN1_RED || g1 == GB_MOCK_GEN1_BLUE ||
+        g1 == GB_MOCK_GEN1_GREEN) {
         *out_table = (const WildDiffEntry*)GEN1_WILD_DIFFS_RB;
         *out_count = GEN1_WILD_DIFFS_RB_COUNT;
     } else if (g1 == GB_MOCK_GEN1_YELLOW) {

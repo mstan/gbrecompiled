@@ -132,14 +132,17 @@ static bool parse_gamegenie(const char* code, GBCheatOp* out) {
     if (n == 6) {
         out->compare = -1;
     } else {
-        /* Compare-byte scramble: combine the last three digits via
-         * the canonical XOR+rotate pattern. Reference:
-         *   raw = (d6 << 4) | d8
-         *   t   = ((d7 ^ d6) ^ 0xF) << 4  -- approximate; close
-         *         enough to surface obvious mis-decodes. */
-        int raw = (d[6] << 4) | d[8];
-        int t   = ((d[7] ^ 0xF) & 0xF);
-        out->compare = (raw ^ ((t << 4) | (t >> 0))) & 0xFF;
+        /* 9-char Game Boy Game Genie compare-byte decode. Only
+         * digits G and I are used (digit H is a parity bit /
+         * unused). Build (G<<4)|I, rotate right 2 bits in 8-bit
+         * space, XOR with 0xBA. Verified against pokered cheat
+         * 305 (RATTATA $A5, SPEAROW $05, EKANS $6C at Route 4
+         * slots 0/1/5) which all decode correctly with this form.
+         * The "rotate-left-2 over 12 bits then XOR upper byte" form
+         * I had previously was wrong. */
+        uint8_t v = (uint8_t)((d[6] << 4) | d[8]);
+        v = (uint8_t)((v >> 2) | ((v << 6) & 0xFF));
+        out->compare = (int)(v ^ 0xBA);
     }
     return true;
 }
@@ -311,24 +314,87 @@ static uint8_t* wram_byte_for(GBContext* ctx, uint16_t addr) {
     return NULL;
 }
 
-static size_t rom_offset_for(uint16_t addr) {
-    /* Game Genie patches into the bank-0 mirror only; banked
-     * patches need a bank context we don't have at parse time. */
-    if (addr < 0x4000) return (size_t)addr;
-    return SIZE_MAX;
+/* True iff `bank` is consistent with every GameGenie op in `c`:
+ * for each banked op, the existing ROM byte at (bank, addr) must
+ * match the op's compare byte. Bank-0 ops and ops without a compare
+ * pass automatically. Used to find the bank that satisfies all of
+ * a multi-code cheat's verifiers at once -- a much stronger signal
+ * than each code's compare in isolation. */
+static bool bank_satisfies_genie_cheat(const GBContext* ctx,
+                                       const GBCheat* c,
+                                       int bank) {
+    for (int i = 0; i < c->op_count; i++) {
+        const GBCheatOp* op = &c->ops[i];
+        if (op->type != GB_CHEAT_OP_GAMEGENIE) continue;
+        if (op->address < 0x4000) continue;
+        if (op->compare < 0) continue;
+        size_t off = (size_t)bank * 0x4000 +
+                     (size_t)(op->address - 0x4000);
+        if (off >= ctx->rom_size) return false;
+        if (ctx->rom[off] != (uint8_t)op->compare) return false;
+    }
+    return true;
+}
+
+/* Pick the ROM bank for a multi-code GameGenie cheat. Banks are
+ * scanned high-to-low so a real data bank (typically 2+) wins over
+ * bank 1 if both happen to contain the same compare byte at the
+ * target offset. Returns -1 if no bank satisfies the constraint
+ * set (caller falls back to bank 1). */
+static int choose_genie_bank(const GBContext* ctx, const GBCheat* c) {
+    int n_banks = (int)(ctx->rom_size / 0x4000);
+    if (n_banks <= 1) return -1;
+    /* Need at least one banked op with a compare for this to be a
+     * meaningful constraint. */
+    bool any_constraint = false;
+    for (int i = 0; i < c->op_count; i++) {
+        const GBCheatOp* op = &c->ops[i];
+        if (op->type == GB_CHEAT_OP_GAMEGENIE &&
+            op->address >= 0x4000 && op->compare >= 0) {
+            any_constraint = true;
+            break;
+        }
+    }
+    if (!any_constraint) return -1;
+    for (int bank = n_banks - 1; bank >= 1; bank--) {
+        if (bank_satisfies_genie_cheat(ctx, c, bank)) return bank;
+    }
+    return -1;
 }
 
 static void apply_genie(GBContext* ctx, GBCheat* c) {
+    int chosen_bank = choose_genie_bank(ctx, c);
+    bool fell_back = (chosen_bank < 0);
+    if (fell_back) chosen_bank = 1;
+
     for (int i = 0; i < c->op_count; i++) {
+        c->saved_valid[i] = false;
         if (c->ops[i].type != GB_CHEAT_OP_GAMEGENIE) continue;
-        size_t off = rom_offset_for(c->ops[i].address);
-        if (off == SIZE_MAX || !ctx->rom || off >= ctx->rom_size) {
-            c->saved_valid[i] = false;
+        size_t off;
+        if (c->ops[i].address < 0x4000) {
+            off = (size_t)c->ops[i].address;
+        } else {
+            off = (size_t)chosen_bank * 0x4000 +
+                  (size_t)(c->ops[i].address - 0x4000);
+        }
+        if (!ctx->rom || off >= ctx->rom_size) {
+            fprintf(stderr, "[cheats] GG addr $%04X out of ROM range\n",
+                    c->ops[i].address);
             continue;
         }
-        c->saved_byte[i]  = ctx->rom[off];
-        c->saved_valid[i] = true;
-        ctx->rom[off]     = c->ops[i].value;
+        c->applied_offset[i] = off;
+        c->saved_byte[i]     = ctx->rom[off];
+        c->saved_valid[i]    = true;
+        ctx->rom[off]        = c->ops[i].value;
+    }
+
+    if (fell_back) {
+        fprintf(stderr, "[cheats] GG \"%s\": no bank satisfies all compares; "
+                "patching bank 1 as fallback (may corrupt code/data)\n",
+                c->description);
+    } else {
+        fprintf(stderr, "[cheats] GG \"%s\": resolved to bank %d\n",
+                c->description, chosen_bank);
     }
 }
 
@@ -336,8 +402,8 @@ static void unapply_genie(GBContext* ctx, GBCheat* c) {
     for (int i = 0; i < c->op_count; i++) {
         if (c->ops[i].type != GB_CHEAT_OP_GAMEGENIE) continue;
         if (!c->saved_valid[i]) continue;
-        size_t off = rom_offset_for(c->ops[i].address);
-        if (off != SIZE_MAX && ctx->rom && off < ctx->rom_size) {
+        size_t off = c->applied_offset[i];
+        if (ctx->rom && off < ctx->rom_size) {
             ctx->rom[off] = c->saved_byte[i];
         }
         c->saved_valid[i] = false;
@@ -365,9 +431,12 @@ void gb_cheats_set_op_value(GBContext* ctx, int cheat_idx,
      * into ROM directly; the saved_byte for restore stays as the
      * pre-cheat original. */
     if (c->enabled && ctx &&
-        c->ops[op_idx].type == GB_CHEAT_OP_GAMEGENIE) {
-        size_t off = rom_offset_for(c->ops[op_idx].address);
-        if (off != SIZE_MAX && ctx->rom && off < ctx->rom_size) {
+        c->ops[op_idx].type == GB_CHEAT_OP_GAMEGENIE &&
+        c->saved_valid[op_idx]) {
+        /* Reuse the bank already chosen by apply_genie; we don't
+         * re-scan because the saved byte refers to that location. */
+        size_t off = c->applied_offset[op_idx];
+        if (ctx->rom && off < ctx->rom_size) {
             ctx->rom[off] = value;
         }
     }

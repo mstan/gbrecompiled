@@ -54,9 +54,13 @@ typedef struct {
     int        op_count;
     GBCheatOp  ops[GB_CHEAT_OPS_PER_CHEAT];
     bool       enabled;
-    /* For toggle-off restore of GameGenie ROM patches. */
+    /* For toggle-off restore of GameGenie ROM patches. The patched
+     * ROM offset is resolved at toggle-on (it may live in any bank
+     * if the address is $4000-$7FFF and a compare byte matched);
+     * we remember it here so unapply restores the right byte. */
     uint8_t    saved_byte[GB_CHEAT_OPS_PER_CHEAT];
     bool       saved_valid[GB_CHEAT_OPS_PER_CHEAT];
+    size_t     applied_offset[GB_CHEAT_OPS_PER_CHEAT];
 } GBCheat;
 
 /* Scan `cheats/<game_id>/*.cht` and parse every cheat into the

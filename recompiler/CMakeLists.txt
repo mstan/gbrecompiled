@@ -11,9 +11,12 @@ add_executable(gbrecomp
     src/ir/ir_builder.cpp
     src/ir/ir_optimizer.cpp
     src/codegen/c_emitter.cpp
-    # Reuse the runtime's SHA-1 so c_emitter can hash the ROM at
-    # generation time and bake the digest into the asset-loader hooks.
+    # Reuse the runtime's SHA-1 + SHA-256 so c_emitter can hash the
+    # ROM at generation time and bake the digests into the generated
+    # code (asset-loader integration uses SHA-1; the launcher-side
+    # ROM verification uses SHA-256).
     ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/gb_sha1.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/gb_sha256.c
 )
 
 target_include_directories(gbrecomp

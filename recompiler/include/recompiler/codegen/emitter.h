@@ -53,7 +53,16 @@ struct GeneratorOptions {
     // path at build time — that file is generated separately by the
     // project's asset-extraction tooling.
     bool emit_asset_loader = false;
-    
+
+    // When true, the giant rom_data[] array in <prefix>_rom.c is emitted
+    // as a BSS-only declaration (`uint8_t rom_data[N];`) instead of a
+    // const-initialised literal. Pair with --emit-asset-loader: the
+    // runtime loader fills the buffer at startup from a small assets/
+    // tree, keeping the shipped binary small. The extern decl in
+    // <prefix>.c also drops `const`. Replaces the standalone
+    // bss_rom_data.py post-script.
+    bool bss_rom_data = false;
+
     // Cycle counting
     bool emit_cycle_counting = true;
     

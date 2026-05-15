@@ -5,6 +5,7 @@
 
 #include "recompiler/codegen/c_emitter.h"
 #include "gb_sha1.h"
+#include "gb_sha256.h"
 #include <iomanip>
 #include <iostream>
 #include <fstream>
@@ -673,6 +674,10 @@ static std::string rom_data_symbol_name(const GeneratorOptions& options) {
 
 static std::string rom_size_symbol_name(const GeneratorOptions& options) {
     return module_link_name(options, "rom_size");
+}
+
+static std::string rom_sha256_symbol_name(const GeneratorOptions& options) {
+    return module_link_name(options, "expected_sha256");
 }
 
 static std::string module_main_name(const GeneratorOptions& options) {
@@ -2209,6 +2214,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     header_ss << "void " << options.output_prefix << "_run(GBContext* ctx);\n";
     header_ss << "void " << options.output_prefix << "_init(GBContext* ctx);\n";
     header_ss << "int " << module_main_name(options) << "(int argc, char* argv[]);\n\n";
+    /* Lowercase 64-char SHA-256 (NUL-terminated) of the input ROM,
+     * computed at generation time. Launchers extern this and pass
+     * it to gb_sha256_verify_file() to detect ROM-dump mismatches. */
+    header_ss << "extern const char " << rom_sha256_symbol_name(options) << "[65];\n\n";
     header_ss << "#endif\n";
     output.header_content = header_ss.str();
     output.header_file = options.output_prefix + ".h";
@@ -3274,9 +3283,11 @@ GeneratedOutput generate_output(const ir::Program& program,
     }
     flush_chunk();
     
-    // Extern reference to ROM data
+    // Extern reference to ROM data. BSS-mode drops `const` because the
+    // asset loader fills the buffer at runtime.
     source_ss << "/* Extern reference to ROM data */\n";
-    source_ss << "extern const uint8_t " << rom_data_symbol_name(options) << "[];\n";
+    source_ss << "extern " << (options.bss_rom_data ? "" : "const ")
+              << "uint8_t " << rom_data_symbol_name(options) << "[];\n";
     source_ss << "extern const size_t " << rom_size_symbol_name(options) << ";\n\n";
     
     source_ss << "const GBConfig* " << options.output_prefix << "_default_config(void) {\n";
@@ -3311,22 +3322,42 @@ GeneratedOutput generate_output(const ir::Program& program,
     output.source_content = source_ss.str();
     output.source_file = options.output_prefix + ".c";
     
-    // Generate ROM data
+    // Generate ROM data. In BSS mode, emit just a sized declaration --
+    // the asset loader fills it at runtime from extracted assets, so the
+    // shipped binary stays small (no megabyte literal).
     std::ostringstream rom_ss;
     rom_ss << "/* ROM data */\n";
     rom_ss << "#include <stdint.h>\n";
     rom_ss << "#include <stddef.h>\n\n";
-    rom_ss << "const uint8_t " << rom_data_symbol_name(options) << "[" << rom_size << "] = {\n";
-    for (size_t i = 0; i < rom_size; i++) {
-        if (i % 16 == 0) rom_ss << "    ";
-        rom_ss << "0x" << std::hex << std::setfill('0') << std::setw(2) 
-               << (int)rom_data[i];
-        if (i < rom_size - 1) rom_ss << ",";
-        if (i % 16 == 15 || i == rom_size - 1) rom_ss << "\n";
-        else rom_ss << " ";
+    if (options.bss_rom_data) {
+        rom_ss << "uint8_t " << rom_data_symbol_name(options)
+               << "[" << rom_size << "];\n";
+    } else {
+        rom_ss << "const uint8_t " << rom_data_symbol_name(options)
+               << "[" << rom_size << "] = {\n";
+        for (size_t i = 0; i < rom_size; i++) {
+            if (i % 16 == 0) rom_ss << "    ";
+            rom_ss << "0x" << std::hex << std::setfill('0') << std::setw(2)
+                   << (int)rom_data[i];
+            if (i < rom_size - 1) rom_ss << ",";
+            if (i % 16 == 15 || i == rom_size - 1) rom_ss << "\n";
+            else rom_ss << " ";
+        }
+        rom_ss << std::dec << "};\n";
     }
-    rom_ss << std::dec << "};\n";
     rom_ss << "const size_t " << rom_size_symbol_name(options) << " = " << rom_size << ";\n";
+
+    /* SHA-256 of the input ROM, computed at generation time and baked
+     * in as a lowercase 64-char hex string (NUL-terminated, length 65).
+     * Launchers extern this symbol and pass it to
+     * gb_sha256_verify_file() so the user is warned if they swap in
+     * an unrelated ROM dump. */
+    {
+        char sha_hex[65];
+        gb_sha256_hex(rom_data, rom_size, sha_hex);
+        rom_ss << "const char " << rom_sha256_symbol_name(options)
+               << "[65] = \"" << sha_hex << "\";\n";
+    }
     if (!named_rom_data_symbols.empty()) {
         rom_ss << "\n";
         for (const ir::AddressSymbol* symbol : named_rom_data_symbols) {

@@ -62,6 +62,14 @@ void print_usage(const char* program) {
     std::cout << "  --symbols <file>      Load a .sym symbol file and use names for generated functions and labels\n";
     std::cout << "  --annotations <file>  Load analyzer guidance (function/label/data ranges) from a text file\n";
     std::cout << "  --use-trace <file>    Use runtime trace to find entry points\n";
+    std::cout << "  --emit-asset-loader   Bake gb_asset_loader integration into <prefix>_main.c\n";
+    std::cout << "                        (also auto-suppresses the standalone main() wrapper)\n";
+    std::cout << "  --bss-rom-data        Emit rom_data[] as a BSS declaration only.\n";
+    std::cout << "                        Pair with --emit-asset-loader; the loader fills the\n";
+    std::cout << "                        buffer at startup from extracted assets.\n";
+    std::cout << "  --prefix-symbols      Force the multi-ROM prefixed-symbol scheme even for\n";
+    std::cout << "                        single-ROM output (e.g. when prepping a cart for the\n";
+    std::cout << "                        multi-game launcher build).\n";
     std::cout << "  -h, --help            Show this help\n";
 }
 
@@ -201,6 +209,7 @@ struct GenerationOptions {
     std::string android_package;
     std::string android_app_name;
     bool emit_asset_loader = false;
+    bool bss_rom_data = false;
 };
 
 struct MultiRomModule {
@@ -1479,6 +1488,7 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     gen_opts.emit_cmake = false;
     gen_opts.parallel_codegen_jobs = options.codegen_jobs;
     gen_opts.emit_asset_loader = options.emit_asset_loader;
+    gen_opts.bss_rom_data = options.bss_rom_data;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
     auto output = gbrecomp::codegen::generate_output(
@@ -1524,6 +1534,7 @@ int main(int argc, char* argv[]) {
     std::string android_package;
     std::string android_app_name;
     bool emit_asset_loader = false;
+    bool bss_rom_data = false;
     bool prefix_symbols = false;
 
     for (int i = 1; i < argc; i++) {
@@ -1603,6 +1614,12 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--emit-asset-loader") {
             emit_asset_loader = true;
+        } else if (arg == "--bss-rom-data") {
+            /* Emit the giant rom_data[] as BSS instead of a const
+             * literal. Pair with --emit-asset-loader; the asset
+             * loader fills the buffer at startup from extracted
+             * assets so the shipped binary stays small. */
+            bss_rom_data = true;
         } else if (arg == "--prefix-symbols") {
             /* Force the same prefixed-symbol scheme multi-rom mode
              * always uses, so the resulting output can drop into a
@@ -1648,6 +1665,7 @@ int main(int argc, char* argv[]) {
     generation_opts.android_package = android_package;
     generation_opts.android_app_name = android_app_name;
     generation_opts.emit_asset_loader = emit_asset_loader;
+    generation_opts.bss_rom_data = bss_rom_data;
 
     print_banner();
 
@@ -1926,6 +1944,13 @@ int main(int argc, char* argv[]) {
     gen_opts.single_function_mode = single_function;
     gen_opts.parallel_codegen_jobs = requested_jobs;
     gen_opts.emit_asset_loader = emit_asset_loader;
+    gen_opts.bss_rom_data = bss_rom_data;
+    if (emit_asset_loader) {
+        /* Asset-loader builds are always driven by an external launcher
+         * (the launcher calls <prefix>_main()), so the standalone main()
+         * wrapper would be a duplicate-symbol error. Auto-suppress. */
+        gen_opts.emit_main_entry_point = false;
+    }
     if (prefix_symbols) {
         /* Match the multi-rom mode's settings so the resulting files
          * link cleanly alongside other prefixed-symbol modules. The

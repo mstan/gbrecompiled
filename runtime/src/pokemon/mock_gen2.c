@@ -56,6 +56,7 @@ typedef struct {
     uint16_t wram_player_name;
     uint16_t wram_items_count;      /* wNumItems; items follow at +1 */
     uint16_t wram_balls_count;      /* wNumBalls; balls follow at +1 */
+    uint16_t wram_money;            /* 3-byte BCD; max $99 $99 $99 */
 } GBGen2Info;
 
 static const GBGen2Info GEN2_CARTS[] = {
@@ -69,6 +70,7 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x01, 0x68A0,
         0xDA22, 0xDA23, 0xDA2A, 0xDB4A, 0xDB8C, 0xD1A1, 0xD1A3,
         0xD5B7, 0xD5FC,
+        0xD573,
     },
     {
         GB_MOCK_GEN2_SILVER,  "POKEMON_SLV", 11,
@@ -80,6 +82,7 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x01, 0x6866,
         0xDA22, 0xDA23, 0xDA2A, 0xDB4A, 0xDB8C, 0xD1A1, 0xD1A3,
         0xD5B7, 0xD5FC,
+        0xD573,
     },
     {
         GB_MOCK_GEN2_CRYSTAL, "PM_CRYSTAL",  10,
@@ -91,6 +94,7 @@ static const GBGen2Info GEN2_CARTS[] = {
         0x01, 0x67C1,
         0xDCD7, 0xDCD8, 0xDCDF, 0xDDFF, 0xDE41, 0xD47B, 0xD47D,
         0xD892, 0xD8D7,
+        0xD84E,
     },
 };
 #define GEN2_CART_COUNT ((int)(sizeof(GEN2_CARTS) / sizeof(GEN2_CARTS[0])))
@@ -426,6 +430,32 @@ GBGen2ItemPocket gb_mock_gen2_item_pocket(const GBContext* ctx, int item_id) {
     uint8_t p = ctx->rom[off];
     if (p > 4) return GB_GEN2_POCKET_NONE;
     return (GBGen2ItemPocket)p;
+}
+
+/* Gen 2 stores money as a 3-byte BIG-ENDIAN integer (not BCD like
+ * Gen 1). Range 0..999999 -- max value packs to bytes $0F $42 $3F.
+ * Verified against pokecrystal's GetMoney / AddMoney routines, which
+ * read/write three sequential bytes treating them as a 24-bit MSB-
+ * first integer. The Gen 1 BCD assumption made the reader produce
+ * weird values like 154245 for the actual max because $0F's high
+ * nibble decodes to BCD-invalid digit 15. */
+int gb_mock_gen2_get_money(const GBContext* ctx) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram) return -1;
+    const uint8_t* p = &ctx->wram[0x1000 + (c->wram_money - 0xD000)];
+    return ((int)p[0] << 16) | ((int)p[1] << 8) | (int)p[2];
+}
+
+bool gb_mock_gen2_set_money(GBContext* ctx, int amount) {
+    const GBGen2Info* c = gen2_info(ctx);
+    if (!c || !ctx->wram) return false;
+    if (amount < 0) amount = 0;
+    if (amount > 999999) amount = 999999;
+    uint8_t* p = wram_b1_ptr(ctx, c->wram_money);
+    p[0] = (uint8_t)((amount >> 16) & 0xFF);
+    p[1] = (uint8_t)((amount >> 8)  & 0xFF);
+    p[2] = (uint8_t)( amount        & 0xFF);
+    return true;
 }
 
 bool gb_mock_gen2_give_item(GBContext* ctx, int item_id, int qty) {

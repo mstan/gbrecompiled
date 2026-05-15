@@ -52,6 +52,7 @@ typedef struct {
     uint16_t wram_player_id;
     uint16_t wram_player_name;
     uint16_t wram_bag_count;        /* wNumBagItems; bag items follow at +1 */
+    uint16_t wram_player_money;     /* 3-byte BCD; capped at $99 $99 $99 */
 } GBGen1Info;
 
 static const GBGen1Info GEN1_CARTS[] = {
@@ -66,6 +67,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x03, 0x6799,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
         0xD31D,
+        0xD347,
     },
     {
         GB_MOCK_GEN1_BLUE,   "POKEMON BLUE",  12,
@@ -78,6 +80,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x03, 0x6799,
         0xD163, 0xD164, 0xD16B, 0xD273, 0xD2B5, 0xD359, 0xD158,
         0xD31D,
+        0xD347,
     },
     {
         GB_MOCK_GEN1_YELLOW, "POKEMON YELLO", 13,
@@ -90,6 +93,7 @@ static const GBGen1Info GEN1_CARTS[] = {
         0x03, 0x66DD,
         0xD162, 0xD163, 0xD16A, 0xD272, 0xD2B4, 0xD358, 0xD157,
         0xD31C,
+        0xD346,
     },
 };
 #define GEN1_CART_COUNT ((int)(sizeof(GEN1_CARTS) / sizeof(GEN1_CARTS[0])))
@@ -469,6 +473,46 @@ bool gb_mock_gen1_item_is_key(const GBContext* ctx, int item_id) {
     uint8_t byte = ctx->rom[byte_off];
     int bit = idx % 8;
     return (byte & (1 << bit)) != 0;
+}
+
+/* BCD helpers -- both gens store money as 3 BCD bytes big-endian:
+ * byte 0 = hundred-thousands+ten-thousands, byte 1 = thousands+hundreds,
+ * byte 2 = tens+ones. Max value $99 $99 $99 = 999,999. */
+static int bcd_to_int_3(const uint8_t* p) {
+    int d6 = (p[0] >> 4) & 0xF, d5 = p[0] & 0xF;
+    int d4 = (p[1] >> 4) & 0xF, d3 = p[1] & 0xF;
+    int d2 = (p[2] >> 4) & 0xF, d1 = p[2] & 0xF;
+    return d6 * 100000 + d5 * 10000 + d4 * 1000 +
+           d3 * 100   + d2 * 10    + d1;
+}
+
+static void int_to_bcd_3(int v, uint8_t out[3]) {
+    if (v < 0) v = 0;
+    if (v > 999999) v = 999999;
+    int d6 = v / 100000;
+    int d5 = (v / 10000)  % 10;
+    int d4 = (v / 1000)   % 10;
+    int d3 = (v / 100)    % 10;
+    int d2 = (v / 10)     % 10;
+    int d1 =  v           % 10;
+    out[0] = (uint8_t)((d6 << 4) | d5);
+    out[1] = (uint8_t)((d4 << 4) | d3);
+    out[2] = (uint8_t)((d2 << 4) | d1);
+}
+
+int gb_mock_gen1_get_money(const GBContext* ctx) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram) return -1;
+    const uint8_t* p = wram_cptr(ctx, c->wram_player_money);
+    return bcd_to_int_3(p);
+}
+
+bool gb_mock_gen1_set_money(GBContext* ctx, int amount) {
+    const GBGen1Info* c = gen1_info(ctx);
+    if (!c || !ctx->wram) return false;
+    uint8_t* p = wram_ptr(ctx, c->wram_player_money);
+    int_to_bcd_3(amount, p);
+    return true;
 }
 
 bool gb_mock_gen1_give_item(GBContext* ctx, int item_id, int qty) {

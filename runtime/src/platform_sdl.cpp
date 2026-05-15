@@ -3256,16 +3256,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 }
                 if (g_event_files_count == 0) {
                     ImGui::TextDisabled(
-                        "(no distribution files found)\n"
-                        "Drop .pkm / .pk1 / .pk2 files into injects/%s/ to inject distributions.\n"
-                        "\n"
-                        ".pkm keys (all optional except species + level):\n"
-                        "  species, level, shiny, nickname\n"
-                        "  ot_name, ot_id\n"
-                        "  moves       (names or IDs, comma-separated, up to 4)\n"
-                        "  dvs         (atk,def,spd,spc 0..15)\n"
-                        "  held_item, happiness, pokerus   (gen 2 only)\n"
-                        "  catch_rate                       (gen 1 only)",
+                        "No distribution files in injects/%s/.\n"
+                        "Drop .pkm / .pk1 / .pk2 files there and relaunch.",
                         g_active_game_id.c_str());
                 } else {
                     if (g_event_sel_idx < 0) g_event_sel_idx = 0;
@@ -3372,6 +3364,35 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                  * hunting grind on a fresh save. Dropdown reads
                  * names straight from the cart's ItemNames table so
                  * the list matches the cart's spelling exactly. */
+                /* Money. Both gens store it as 3-byte BCD ($00-$99 per
+                 * byte), maxing at 999,999. Input field defaults to the
+                 * cap; user can drop to any positive value. */
+                static int g_money_input = 999999;
+                ImGui::Spacing();
+                ImGui::TextDisabled("Money");
+                int current_money = builder_gen2
+                    ? gb_mock_gen2_get_money(g_registered_ctx)
+                    : gb_mock_gen1_get_money(g_registered_ctx);
+                ImGui::Text("Current: %d", current_money >= 0 ? current_money : 0);
+                ImGui::InputInt("Amount##money", &g_money_input);
+                if (g_money_input < 0)      g_money_input = 0;
+                if (g_money_input > 999999) g_money_input = 999999;
+                ImGui::SameLine();
+                if (ImGui::Button("Set##money")) {
+                    if (builder_gen2)
+                        gb_mock_gen2_set_money(g_registered_ctx, g_money_input);
+                    else
+                        gb_mock_gen1_set_money(g_registered_ctx, g_money_input);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Max##money")) {
+                    g_money_input = 999999;
+                    if (builder_gen2)
+                        gb_mock_gen2_set_money(g_registered_ctx, 999999);
+                    else
+                        gb_mock_gen1_set_money(g_registered_ctx, 999999);
+                }
+
                 static int  g_give_item_id = 0;     /* 1-based; 0 = unset */
                 static int  g_give_item_qty = 99;
                 static char g_give_item_msg[120] = "";

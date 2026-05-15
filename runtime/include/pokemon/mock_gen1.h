@@ -97,6 +97,18 @@ bool gb_mock_gen1_item_name(const GBContext* ctx, int item_id,
  * rid of. */
 bool gb_mock_gen1_item_is_key(const GBContext* ctx, int item_id);
 
+/* Read the player's current money. Returns the 3-byte BCD value
+ * unpacked to a base-10 integer (0..999999). -1 on non-Gen-1. */
+int gb_mock_gen1_get_money(const GBContext* ctx);
+
+/* Set the player's money to `amount` (clamped to 0..999999). The
+ * cart stores it as 3 BCD bytes -- 999999 packs to $99 $99 $99 (the
+ * max). Returns false on non-Gen-1 or uninitialized WRAM. */
+bool gb_mock_gen1_set_money(GBContext* ctx, int amount);
+
+/* Max money the cart's BCD storage can hold. */
+#define GB_MOCK_GEN1_MAX_MONEY 999999
+
 /* Add `qty` of `item_id` to the cart's single bag pocket. If the
  * item is already present, quantity stacks (capped at 99). If not,
  * a new slot is appended provided the bag isn't full (20 slots

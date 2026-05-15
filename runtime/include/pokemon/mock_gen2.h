@@ -137,6 +137,15 @@ GBGen2ItemPocket gb_mock_gen2_item_pocket(const GBContext* ctx, int item_id);
  * unsupported pocket, full pocket with new item, or non-Gen-2. */
 bool gb_mock_gen2_give_item(GBContext* ctx, int item_id, int qty);
 
+/* Read current money (3-byte BCD -> int). -1 on non-Gen-2. */
+int gb_mock_gen2_get_money(const GBContext* ctx);
+
+/* Set money (clamped to 0..999999, encoded back to BCD). Returns
+ * false on non-Gen-2 or uninitialized WRAM. */
+bool gb_mock_gen2_set_money(GBContext* ctx, int amount);
+
+#define GB_MOCK_GEN2_MAX_MONEY 999999
+
 /* Build and inject a Pokemon into the next party slot.
  *   species : 1..251 (1-based dex number)
  *   level   : 2..100

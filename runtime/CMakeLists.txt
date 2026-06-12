@@ -9,6 +9,9 @@ add_library(gbrt STATIC
     src/ppu.c
     src/audio.c
     src/audio_stats.c
+    src/audio_shadow.c
+    src/psg_shadow.c
+    src/color_lut.c
     src/debug_server.c
     # Default game hooks — one strong symbol per TU so a partial extras.c
     # overrides cleanly (no multiple-definition, no weak-symbol reliance).

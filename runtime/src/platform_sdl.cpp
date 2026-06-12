@@ -18,6 +18,7 @@
 #endif
 #include "gb_printer.h"
 #include "debug_server.h"
+#include "color_lut.h"  /* present-time screen-color LUT (opt-in, default raw) */
 extern "C" {
 #include "keybinds.h"
 }
@@ -70,6 +71,14 @@ static SDL_GLContext g_gl_context = NULL;
 static GLuint g_game_tex = 0;
 static GBShaderPipeline* g_shader_pipeline = NULL;
 static std::string g_active_shader_pref = "sharp";
+
+/* Present-time screen-color LUT (opt-in via GBCRECOMP_SCREEN; default raw =>
+ * passthrough, frame byte-identical). Built lazily on first present; NULL when
+ * disabled/raw/unrecognized so the upload path is untouched. Applied to a
+ * scratch ARGB copy before the RGBA GL upload — never the PPU framebuffer or
+ * the verify path. */
+static ColorLut* g_color_lut = NULL;
+static bool g_color_lut_resolved = false;
 static int g_scale = 5;
 static int g_windowed_width = GB_SCREEN_WIDTH * 5;
 static int g_windowed_height = GB_SCREEN_HEIGHT * 5;
@@ -2732,6 +2741,20 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     static uint32_t s_upload_buf[GB_FRAMEBUFFER_SIZE];
     {
         const uint32_t* src = framebuffer;
+        /* Present-time screen-color LUT (opt-in via GBCRECOMP_SCREEN; default
+         * raw => NULL => passthrough, byte-identical). Map the ARGB framebuffer
+         * into a scratch copy that feeds the RGBA repack below; never mutates
+         * the PPU framebuffer or the verify path. */
+        if (!g_color_lut_resolved) {
+            g_color_lut = color_lut_create_from_env();
+            g_color_lut_resolved = true;
+        }
+        if (g_color_lut && !color_lut_is_passthrough(g_color_lut)) {
+            static uint32_t s_lut_buf[GB_FRAMEBUFFER_SIZE];
+            color_lut_map_argb8888(g_color_lut, framebuffer, s_lut_buf,
+                                   GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
+            src = s_lut_buf;
+        }
         /* Match the actual post-conversion DMG-green values produced by
          * ppu.c's rgb555_to_rgba (which uses *255/31 with integer
          * truncation), not the dmg_palette_rgba constants — those are

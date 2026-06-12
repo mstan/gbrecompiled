@@ -6,6 +6,7 @@
 #include "audio.h"
 #include "gbrt_debug.h"
 #include "audio_stats.h"
+#include "psg_shadow.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -472,6 +473,7 @@ void gb_audio_reset(void* apu_ptr) {
     memset(apu, 0, sizeof(GBAudio));
     audio_reset_timing_state(apu);
     apu->sample_period = 95;
+    psg_shadow_reset();
     
     /* Initial Register Values (Standard DMG) */
     apu->ch1.nr10 = 0x80;
@@ -1022,6 +1024,26 @@ void gb_audio_step(GBContext* ctx, uint32_t cycles) {
         int32_t mixed_right = right_sum * (vol_r + 1) * 64;
         left = audio_apply_highpass(mixed_left, &apu->hp_prev_in_l, &apu->hp_prev_out_l);
         right = audio_apply_highpass(mixed_right, &apu->hp_prev_in_r, &apu->hp_prev_out_r);
+
+        /* Verified-enhancement shadow (opt-in, default OFF; see psg_shadow.h).
+         * The canon (left,right) above stays authoritative and is the verify
+         * oracle. When the shadow is disabled this returns (left,right)
+         * byte-identical. The per-channel contributions are handed in so the
+         * shadow can rebuild the mix in float without re-deriving APU state. */
+        {
+            PsgShadowSample ss;
+            ss.ch1_mix = (float)ch1_mix; ss.ch2_mix = (float)ch2_mix;
+            ss.ch3_mix = (float)ch3_mix; ss.ch4_mix = (float)ch4_mix;
+            ss.ch1_r = (apu->nr51 & 0x01) != 0; ss.ch1_l = (apu->nr51 & 0x10) != 0;
+            ss.ch2_r = (apu->nr51 & 0x02) != 0; ss.ch2_l = (apu->nr51 & 0x20) != 0;
+            ss.ch3_r = (apu->nr51 & 0x04) != 0; ss.ch3_l = (apu->nr51 & 0x40) != 0;
+            ss.ch4_r = (apu->nr51 & 0x08) != 0; ss.ch4_l = (apu->nr51 & 0x80) != 0;
+            ss.vol_l = vol_l; ss.vol_r = vol_r;
+            int16_t emit_l = left, emit_r = right;
+            psg_shadow_process(&ss, left, right, &emit_l, &emit_r);
+            left = emit_l; right = emit_r;
+        }
+
         apu->last_output_left = left;
         apu->last_output_right = right;
 

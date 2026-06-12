@@ -9,6 +9,7 @@
 #include "audio_stats.h"
 #include "gbrt_debug.h"
 #include "debug_server.h"
+#include "color_lut.h"  /* present-time screen-color LUT (opt-in, default raw) */
 extern "C" {
 #include "keybinds.h"
 }
@@ -36,6 +37,13 @@ namespace fs = std::filesystem;
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
 static SDL_Texture* g_texture = NULL;
+
+/* Present-time screen-color LUT (opt-in via GBCRECOMP_SCREEN; default raw =>
+ * passthrough, frame byte-identical). Built lazily on first present; NULL when
+ * disabled/raw/unrecognized so the upload path is untouched. Operates on the
+ * SDL texture COPY only — never the PPU framebuffer or the verify path. */
+static ColorLut* g_color_lut = NULL;
+static bool g_color_lut_resolved = false;
 static int g_scale = 5;
 static int g_windowed_width = GB_SCREEN_WIDTH * 5;
 static int g_windowed_height = GB_SCREEN_HEIGHT * 5;
@@ -2102,6 +2110,17 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 dst[i] = c;
             }
         }
+    }
+
+    /* Present-time screen-color simulation (opt-in). Applied to the texture
+     * COPY only; default OFF (raw) leaves `dst` byte-identical. */
+    if (!g_color_lut_resolved) {
+        g_color_lut = color_lut_create_from_env();
+        g_color_lut_resolved = true;
+    }
+    if (g_color_lut && !color_lut_is_passthrough(g_color_lut)) {
+        color_lut_map_argb8888(g_color_lut, dst, dst,
+                               GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
     }
 
     SDL_UnlockTexture(g_texture);

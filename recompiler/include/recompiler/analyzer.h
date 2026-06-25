@@ -213,6 +213,12 @@ struct AnalyzerOptions {
     
     // Feature flags
     bool aggressive_scan = true;        // Scan for unreferenced code (ON by default)
+    bool auto_detect_data = true;       // Auto-detect text/data regions and exclude them
+    // Speculative 16-bit pointer-table scan. OFF by default: measured on pokered to
+    // cost ~258k bytes of data-decoded-as-code for only +1.4% function recall — a
+    // failed heuristic under the zero-false-positive rule. A sound, corroborated
+    // pointer-TABLE detector can be reintroduced later.
+    bool enable_pointer_scan = false;
     std::string trace_file_path;        // Path to entry points trace file
     std::vector<AnalysisAnnotation> annotations;
     bool add_builtin_rom_annotations = true;

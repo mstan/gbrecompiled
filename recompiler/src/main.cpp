@@ -7,6 +7,7 @@
 #include "recompiler/decoder.h"
 #include "recompiler/analyzer.h"
 #include "recompiler/symbol_table.h"
+#include "recompiler/heuristic_eval.h"
 #include "recompiler/config.h"
 #include "recompiler/ir/ir.h"
 #include "recompiler/ir/ir_builder.h"
@@ -64,6 +65,11 @@ void print_usage(const char* program) {
     std::cout << "  --symbols <file>      Load a .sym symbol file and use names for generated functions and labels\n";
     std::cout << "  --annotations <file>  Load analyzer guidance (function/label/data ranges) from a text file\n";
     std::cout << "  --use-trace <file>    Use runtime trace to find entry points\n";
+    std::cout << "  --eval-heuristic [sym] Evaluate the cold heuristic finder against a known-good\n";
+    std::cout << "                        disassembly .sym (recall + zero-FP gate), then exit\n";
+    std::cout << "  --ground-truth <sym>  Ground-truth .sym for --eval-heuristic\n";
+    std::cout << "  --eval-verbose        Dump full FP / missing lists in eval mode\n";
+    std::cout << "  --eval-remainder <f>  Write the back-out remainder (missed funcs) to file\n";
     std::cout << "  -h, --help            Show this help\n";
     std::cout << "\nCLI flags override TOML config values.\n";
 }
@@ -1538,6 +1544,13 @@ int main(int argc, char* argv[]) {
     std::string android_package;
     std::string android_app_name;
 
+    // Heuristic-finder evaluation mode (see heuristic_eval.h)
+    bool eval_heuristic = false;
+    bool eval_verbose = false;
+    bool eval_pointer_scan = false;  // opt-in: measure with speculative pointer scan on
+    std::string eval_ground_truth_path;
+    std::string eval_remainder_path;
+
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -1618,6 +1631,24 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 annotation_file_path = argv[++i];
             }
+        } else if (arg == "--eval-heuristic") {
+            eval_heuristic = true;
+            // Optional inline value: --eval-heuristic <sym>
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                eval_ground_truth_path = argv[++i];
+            }
+        } else if (arg == "--ground-truth") {
+            if (i + 1 < argc) {
+                eval_ground_truth_path = argv[++i];
+            }
+        } else if (arg == "--eval-verbose") {
+            eval_verbose = true;
+        } else if (arg == "--eval-pointer-scan") {
+            eval_pointer_scan = true;
+        } else if (arg == "--eval-remainder") {
+            if (i + 1 < argc) {
+                eval_remainder_path = argv[++i];
+            }
         } else if (arg[0] != '-') {
             rom_path = arg;
         } else {
@@ -1670,6 +1701,26 @@ int main(int argc, char* argv[]) {
         print_usage(argv[0]);
         return 1;
     }
+
+    // Heuristic-finder evaluation mode: measure unaided discovery against a
+    // known-good disassembly's .sym, then exit. Reusable for any ROM + .sym.
+    if (eval_heuristic) {
+        if (eval_ground_truth_path.empty()) eval_ground_truth_path = symbol_file_path;
+        if (eval_ground_truth_path.empty()) {
+            std::cerr << "Error: --eval-heuristic requires a ground-truth .sym "
+                         "(use --ground-truth <file> or --eval-heuristic <file>)\n";
+            return 1;
+        }
+        gbrecomp::HeuristicEvalOptions eval_opts;
+        eval_opts.rom_path = rom_path;
+        eval_opts.ground_truth_sym_path = eval_ground_truth_path;
+        eval_opts.aggressive_scan = aggressive_scan;
+        eval_opts.enable_pointer_scan = eval_pointer_scan;
+        eval_opts.verbose = eval_verbose;
+        eval_opts.emit_remainder_path = eval_remainder_path;
+        return gbrecomp::run_heuristic_eval(eval_opts);
+    }
+
     if (!emit_android_project && (!android_package.empty() || !android_app_name.empty())) {
         std::cerr << "Error: --android-package and --android-app-name require --android\n";
         return 1;

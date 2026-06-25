@@ -76,6 +76,50 @@ static void add_annotation_data_range(AnnotationIndex& annotations,
     });
 }
 
+/**
+ * @brief Auto-detect text/data regions to exclude from code analysis.
+ *
+ * Game-agnostic signal: GB text encodings place letters in 0x80-0xBF, which are
+ * the single-byte ALU-register opcodes (AND/XOR/OR/CP/ADD/SUB A,r); 0x40-0x7F are
+ * the LD r,r' opcodes. A long run of consecutive bytes in 0x40-0xBF therefore
+ * decodes as a stream of operand-less register ops — characteristic of text and
+ * similar dense data, never of real code (real code constantly interleaves
+ * opcodes outside this range: immediates, control flow, 16-bit loads). Marking
+ * those runs as data stops the analyzer from decoding (and flowing through) them.
+ *
+ * Conservative by design: only long runs are flagged, so real ALU sequences in
+ * code are not mistaken for data.
+ */
+static std::vector<AnnotationDataRange> detect_text_data_regions(const ROM& rom) {
+    std::vector<AnnotationDataRange> ranges;
+    const int RUN_THRESHOLD = 16;  // consecutive 0x40-0xBF bytes => text/data
+
+    auto is_regop_byte = [](uint8_t op) {
+        return op >= 0x40 && op <= 0xBF && op != 0x76;  // LD r,r' / ALU A,r, not HALT
+    };
+
+    for (uint16_t bank = 0; bank < rom.bank_count(); ++bank) {
+        const uint16_t start_off = (bank == 0) ? 0x0000 : 0x4000;
+        const uint16_t end_off   = (bank == 0) ? 0x4000 : 0x8000;
+
+        uint16_t off = start_off;
+        while (off < end_off) {
+            uint16_t run_end = off;
+            while (run_end < end_off && is_regop_byte(rom.read_banked(static_cast<uint8_t>(bank), run_end))) {
+                ++run_end;
+            }
+            const uint16_t run_len = run_end - off;
+            if (run_len >= RUN_THRESHOLD) {
+                ranges.push_back({static_cast<uint8_t>(bank), off, run_end});
+                off = run_end;
+            } else {
+                off = (run_len > 0) ? run_end + 1 : off + 1;
+            }
+        }
+    }
+    return ranges;
+}
+
 static AnnotationIndex build_annotation_index(const ROM& rom, const AnalyzerOptions& options) {
     AnnotationIndex annotations;
 
@@ -436,11 +480,24 @@ static int is_likely_valid_code(const ROM& rom, uint8_t bank, uint16_t addr) {
     int ld_count = 0;
     int control_flow_count = 0;
     int math_count = 0;
+    int reg_only_run = 0;       // consecutive operand-less register ops
+    const int REG_ONLY_RUN_LIMIT = 8;
 
     while (instructions_checked < MAX_CHECK) {
         Instruction instr = decoder.decode(curr, bank);
-        
+
         if (instr.type == InstructionType::UNDEFINED || instr.type == InstructionType::INVALID) return 0;
+
+        // Text/data discriminator: GB games (pokered included) store text with
+        // letters at 0x80-0xBF, which decode as single-byte ALU-register ops
+        // (AND/XOR/OR/CP/ADD/SUB A,r). A long run of operand-less register ops
+        // (LD r,r' / ALU A,r — opcodes 0x40-0xBF except HALT 0x76) with no
+        // immediates, addressed memory, or control flow is text/data, not code.
+        if (instr.opcode >= 0x40 && instr.opcode <= 0xBF && instr.opcode != 0x76) {
+            if (++reg_only_run >= REG_ONLY_RUN_LIMIT) return 0;
+        } else {
+            reg_only_run = 0;
+        }
         
         if (instr.type == InstructionType::NOP) {
             nop_count++;
@@ -714,7 +771,21 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     AnalysisResult result;
     result.rom = &rom;
     result.entry_point = 0x100;
-    const AnnotationIndex annotations = build_annotation_index(rom, options);
+    AnnotationIndex annotations = build_annotation_index(rom, options);
+
+    // Auto-detect text/data regions and fold them into the data ranges so every
+    // pass (aggressive scan AND the main decode loop) halts at them.
+    if (options.auto_detect_data) {
+        std::vector<AnnotationDataRange> detected = detect_text_data_regions(rom);
+        annotations.data_ranges.insert(annotations.data_ranges.end(),
+                                       detected.begin(), detected.end());
+        if (options.verbose) {
+            size_t bytes = 0;
+            for (const auto& r : detected) bytes += (r.end - r.start);
+            std::cout << "[ANALYSIS] Auto-detected " << detected.size()
+                      << " text/data regions (" << bytes << " bytes)\n";
+        }
+    }
     
     // Add standard GameBoy entry points
     result.interrupt_vectors = {0x40, 0x48, 0x50, 0x58, 0x60};  // Interrupt vectors
@@ -727,7 +798,9 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     std::queue<AnalysisState> work_queue;
     std::set<uint32_t> visited;
     // Pointer scanning pass
-    find_pointer_entry_points(rom, result, work_queue, annotations);
+    if (options.enable_pointer_scan) {
+        find_pointer_entry_points(rom, result, work_queue, annotations);
+    }
     
     // Entry point is always a function (bank 0)
     result.call_targets.insert(make_address(0, 0x100));

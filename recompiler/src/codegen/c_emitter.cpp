@@ -3914,8 +3914,10 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
         cmake_ss << "# Find SDL2\n";
         cmake_ss << "find_package(SDL2 REQUIRED)\n\n";
-        cmake_ss << "# Create runtime library with PPU and platform support\n";
-        cmake_ss << "add_library(gbrt STATIC\n";
+        cmake_ss << "# Create runtime library with PPU and platform support.\n";
+        cmake_ss << "# game_extras_crc_default.c is included only when the project doesn't ship\n";
+        cmake_ss << "# its own extras.c (mingw-w64 static archives don't honor weak symbols).\n";
+        cmake_ss << "set(GBRT_SOURCES\n";
         cmake_ss << "    ${GBRT_DIR}/src/gbrt.c\n";
         cmake_ss << "    ${GBRT_DIR}/src/differential.c\n";
         cmake_ss << "    ${GBRT_DIR}/src/ppu.c\n";
@@ -3927,7 +3929,11 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    ${GBRT_DIR}/src/keybinds.c\n";
         cmake_ss << "    ${GBRT_DIR}/src/launcher.c\n";
         cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
-        cmake_ss << ")\n\n";
+        cmake_ss << ")\n";
+        cmake_ss << "if(NOT EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/../extras.c\")\n";
+        cmake_ss << "    list(APPEND GBRT_SOURCES ${GBRT_DIR}/src/game_extras_crc_default.c)\n";
+        cmake_ss << "endif()\n";
+        cmake_ss << "add_library(gbrt STATIC ${GBRT_SOURCES})\n\n";
 
         cmake_ss << "# Vendored Dear ImGui subset\n";
         cmake_ss << "target_sources(gbrt PRIVATE\n";

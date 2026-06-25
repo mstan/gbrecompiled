@@ -3341,6 +3341,9 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "    /* exact ROM this binary was recompiled from is enforced. */\n";
     source_ss << "    launcher_init();\n";
     source_ss << "    launcher_set_expected_sha256(" << rom_sha256_symbol_name(options) << ");\n";
+    source_ss << "    /* If a stock ROM is supplied, auto-apply this enhancement patch */\n";
+    source_ss << "    /* (shipped next to the exe, if present) to derive the expected ROM. */\n";
+    source_ss << "    launcher_set_patch_file(\"" << options.output_prefix << ".bps\");\n";
     source_ss << "    const char* rom_path = launcher_get_rom_path();\n";
     source_ss << "    if (!rom_path) {\n";
     source_ss << "        fprintf(stderr, \"[" << options.output_prefix << "] No ROM selected — exiting.\\n\");\n";

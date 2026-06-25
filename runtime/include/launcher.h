@@ -29,6 +29,17 @@ void launcher_init(void);
 void launcher_set_expected_sha256(const char *hex);
 
 /**
+ * Register a BPS patch filename (looked up next to the executable) that
+ * transforms a STOCK ROM into the exact ROM this binary expects. When the user
+ * picks a ROM that doesn't match the expected SHA-256, the launcher tries to
+ * apply this patch; if the result matches, it writes "<romstem>.extended.gbc"
+ * next to the executable and uses that — so users supply only a stock ROM and
+ * the enhanced ROM is produced automatically. No-op if the patch file is
+ * absent. Call after launcher_init() and before launcher_get_rom_path().
+ */
+void launcher_set_patch_file(const char *filename);
+
+/**
  * Get ROM file path. Checks in order:
  *   1. Cached path from rom.cfg (if file still exists and CRC matches)
  *   2. Windows file picker dialog (re-prompts on CRC mismatch)

@@ -36,6 +36,7 @@ add_library(gbrt STATIC
     src/gb_asset_loader.c
     src/gb_sha1.c
     src/gb_sha256.c
+    src/bps_patch.c
 )
 
 # pthread for the BGB link recv thread

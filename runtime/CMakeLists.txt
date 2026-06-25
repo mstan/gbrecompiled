@@ -10,17 +10,13 @@ add_library(gbrt STATIC
     src/audio_stats.c
     src/debug_server.c
     src/game_extras_default.c
+    src/keybinds.c
+    src/launcher.c
     src/platform_sdl.cpp
     src/serial_link.c
     src/network_discovery.c
     src/sgb.c
     src/ir.c
-    src/pokemon/mock_ir.c
-    src/pokemon/mock_gen1.c
-    src/pokemon/mock_gen2.c
-    src/pokemon/mock_inject_file.c
-    src/pokemon/mock_evolve_patch.c
-    src/pokemon/mock_wild_5050.c
     src/cheats.c
     src/relay_client.c
     src/shader_pipeline.cpp
@@ -141,7 +137,11 @@ if(SDL2_FOUND)
     if(APPLE)
         target_link_libraries(gbrt PUBLIC "-framework OpenGL")
     elseif(WIN32)
-        target_link_libraries(gbrt PUBLIC opengl32)
+        # GLES 2.0 entrypoints (glUseProgram, glBufferData, ...) are provided
+        # by ANGLE (libGLESv2/libEGL), not opengl32 which only exposes GL 1.1.
+        # The GLES2 headers mark these dllimport, so the ANGLE import libs are
+        # required at link time; the matching DLLs ship next to the binary.
+        target_link_libraries(gbrt PUBLIC GLESv2 EGL)
     else()
         find_package(OpenGL QUIET)
         if(TARGET OpenGL::GL)
@@ -154,7 +154,7 @@ if(SDL2_FOUND)
     endif()
 endif()
 
-# Winsock for debug server TCP
+# Winsock for debug server TCP; comdlg32 for the launcher's file picker (GetOpenFileName)
 if(WIN32)
-    target_link_libraries(gbrt PUBLIC ws2_32)
+    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32)
 endif()

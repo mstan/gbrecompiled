@@ -3178,10 +3178,8 @@ void gbrt_log_interrupt_service(GBContext* ctx,
             ie_reg);
 }
 
-/* gb_dispatch is provided by mock_ir.c — the runtime's main dispatch path
- * needs to be able to intercept specific (bank, pc) pairs for the Mystery
- * Gift mock on Pokemon Gen 2 carts, and falls through to gb_interpret for
- * everything else. */
+/* gb_dispatch is provided by the generated project's code (the recompiler
+ * emits the definition; e.g. main.c). The runtime only calls it here. */
 
 #ifndef _MSC_VER
 __attribute__((weak)) void gb_dispatch_call(GBContext* ctx, uint16_t addr) {

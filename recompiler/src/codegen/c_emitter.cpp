@@ -3987,40 +3987,10 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
         cmake_ss << "# Find SDL2\n";
         cmake_ss << "find_package(SDL2 REQUIRED)\n\n";
-        cmake_ss << "# Create runtime library with PPU and platform support\n";
-        cmake_ss << "add_library(gbrt STATIC\n";
-        cmake_ss << "    ${GBRT_DIR}/src/gbrt.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/differential.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/ppu.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/audio.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/interpreter.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/debug_server.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/game_extras_default.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/keybinds.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/launcher.c\n";
-        cmake_ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
-        cmake_ss << ")\n\n";
-
-        cmake_ss << "# Vendored Dear ImGui subset\n";
-        cmake_ss << "target_sources(gbrt PRIVATE\n";
-        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui_draw.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui_tables.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/imgui_widgets.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdl2.cpp\n";
-        cmake_ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
-        cmake_ss << ")\n";
-
-        cmake_ss << "target_include_directories(gbrt PUBLIC \n";
-        cmake_ss << "    ${GBRT_DIR}/include\n";
-        cmake_ss << "    ${GBRT_DIR}/vendor/imgui\n";
-        cmake_ss << ")\n";
-        cmake_ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
-        cmake_ss << "if(WIN32)\n";
-        cmake_ss << "    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32)\n";
-        cmake_ss << "endif()\n";
-        cmake_ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
+        cmake_ss << "# Build the runtime library via its own CMakeLists -- the single\n";
+        cmake_ss << "# source of truth for runtime sources, include dirs, and link libs.\n";
+        cmake_ss << "# Never duplicate the source list here (it drifts from the runtime).\n";
+        cmake_ss << "add_subdirectory(${GBRT_DIR} ${CMAKE_CURRENT_BINARY_DIR}/gbrt_build)\n\n";
         cmake_ss << "# Main executable\n";
         std::vector<std::string> generated_source_files = {options.output_prefix + ".c"};
         for (const auto& extra_file : output.extra_files) {

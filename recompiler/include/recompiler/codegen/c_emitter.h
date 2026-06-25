@@ -10,6 +10,7 @@
 #include <sstream>
 #include <ostream>
 #include <vector>
+#include <map>
 
 namespace gbrecomp {
 namespace codegen {
@@ -183,17 +184,23 @@ struct GeneratedOutput {
     };
 
     std::string header_content;
-    std::string source_content;
+    std::string source_content;       // dispatch table + bank 0 fixed-ROM functions
     std::string rom_data_content;
     std::string main_content;
     std::string cmake_content;
     std::vector<ExtraFile> extra_files;
-    
+
+
     std::string header_file;
     std::string source_file;
     std::string rom_data_file;
     std::string main_file;
     std::string cmake_file;
+
+    // Per-bank source files (bank number -> content)
+    std::map<int, std::string> bank_sources;
+    // Bank filenames (bank number -> filename)
+    std::map<int, std::string> bank_files;
 };
 
 /**

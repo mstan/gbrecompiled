@@ -63,6 +63,9 @@ struct GeneratorOptions {
     // bss_rom_data.py post-script.
     bool bss_rom_data = false;
 
+    std::string runtime_dir;             // Path to runtime/ (relative to output_dir)
+
+
     // Cycle counting
     bool emit_cycle_counting = true;
     
@@ -72,6 +75,9 @@ struct GeneratorOptions {
     // Known writable-memory overlays copied from ROM and safe to dispatch
     // when the live bytes still match the generated image.
     std::vector<RamOverlay> ram_overlays;
+
+    // Valid CRC32s for multi-version ROM support
+    std::vector<uint32_t> valid_crcs;
 };
 
 /**

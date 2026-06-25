@@ -362,16 +362,27 @@ static std::set<uint8_t> detect_bank_values(const ROM& rom) {
 }
 
 /**
+ * @brief Check if an address falls within a declared data region
+ */
+static bool is_data_region(const AnalyzerOptions& options, int bank, uint16_t addr) {
+    for (const auto& dr : options.data_regions) {
+        if ((dr.bank == -1 || dr.bank == bank) && addr >= dr.start && addr < dr.end)
+            return true;
+    }
+    return false;
+}
+
+/**
  * @brief Calculate Shannon entropy of a memory region
  */
 static double calculate_entropy(const ROM& rom, uint8_t bank, uint16_t addr, size_t len) {
     if (addr + len > 0x8000) return 0.0;
-    
+
     uint32_t counts[256] = {0};
     for (size_t i = 0; i < len; i++) {
         counts[rom.read_banked(bank, addr + i)]++;
     }
-    
+
     double entropy = 0;
     for (int i = 0; i < 256; i++) {
         if (counts[i] > 0) {
@@ -384,7 +395,7 @@ static double calculate_entropy(const ROM& rom, uint8_t bank, uint16_t addr, siz
 
 /**
  * @brief Heuristic check if an address looks like valid code start
- * 
+ *
  * Checks for:
  * 1. Shannon Entropy (filtering tile data / PCM)
  * 2. Repetitive byte patterns
@@ -1329,9 +1340,9 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     // Aggressive Code Scanning
     if (options.aggressive_scan && !scanning_pass) {
         scanning_pass = true; // prevent infinite loops if we find nothing new
-        
+
         if (options.verbose) std::cout << "[ANALYSIS] Starting aggressive scan for missing code..." << std::endl;
-        
+
         size_t found_count = 0;
 
         // Iterate through all known banks (and bank 0)
@@ -1341,21 +1352,27 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
 
         // Track regions found by aggressive scanning to avoid overlapping detection in future passes
         // (Since operands are not marked as 'visited' by the main analysis)
-        static std::set<uint32_t> aggressive_regions; 
+        static std::set<uint32_t> aggressive_regions;
 
         for (uint8_t bank : banks_to_scan) {
             uint16_t start_addr = (bank == 0) ? 0x0000 : 0x4000;
             uint16_t end_addr = (bank == 0) ? 0x3FFF : 0x7FFF;
-            
+
             for (uint32_t addr = start_addr; addr <= end_addr; ) {
                 uint32_t full_addr = make_address(bank, addr);
-                
+
                 // If already visited by ANY means, skip
                 if (visited.count(full_addr) || aggressive_regions.count(full_addr)) {
-                    addr++; 
+                    addr++;
                     continue;
                 }
-                
+
+                // Respect declared data regions from TOML config
+                if (is_data_region(options, bank, static_cast<uint16_t>(addr))) {
+                    addr++;
+                    continue;
+                }
+
                 // Alignment heuristic: most functions start on some boundary? No.
                 // But we can skip obvious padding (0xFF or 0x00)
                 if (annotations.contains_data(bank, static_cast<uint16_t>(addr)) &&
@@ -1374,25 +1391,25 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 int code_len = is_likely_valid_code(rom, bank, addr);
                 if (code_len > 0) {
                     if (options.verbose) {
-                        std::cout << "[ANALYSIS] Detected potential function at " 
+                        std::cout << "[ANALYSIS] Detected potential function at "
                                   << std::hex << (int)bank << ":" << addr << std::dec << "\n";
                     }
-                    
+
                     // Add as a new entry point
                     uint32_t entry = make_address(bank, addr);
                     result.call_targets.insert(entry);
                     result.strong_call_targets.insert(entry);
-                    
+
                     // Add to queue
                     uint8_t context = (bank > 0) ? bank : 1;
                     work_queue.push({entry, -1, -1, -1, -1, -1, -1, -1, -1, context});
                     found_count++;
-                    
+
                     // Mark region as scanned
                     for (int i = 0; i < code_len; i++) {
                         aggressive_regions.insert(make_address(bank, addr + i));
                     }
-                    
+
                     // Skip the block we just found to avoid overlapping detection
                     addr += code_len;
                     continue;
@@ -1402,7 +1419,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 }
             }
         }
-        
+
         if (found_count > 0) {
             if (options.verbose) std::cout << "[ANALYSIS] Found " << found_count << " new entry points. Restarting analysis." << std::endl;
             scanning_pass = false; // Reset pass flag to allow further scanning after this batch is analyzed
@@ -1617,9 +1634,13 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             (func.entry_address >= 0x00 && func.entry_address <= 0x38) || // RST vectors
             (func.entry_address >= 0x40 && func.entry_address <= 0x60) // interrupt vectors
         ));
-        
+        // Manual/config entry points are always kept — the user explicitly asked for them
+        bool is_manual_entry = options.entry_points.end() != std::find(
+            options.entry_points.begin(), options.entry_points.end(), func_addr);
+
         if (total_instrs < MIN_FUNCTION_SIZE &&
             !is_special_entry &&
+            !is_manual_entry &&
             !result.strong_call_targets.count(func_addr) &&
             !result.synthetic_entry_targets.count(func_addr) &&
             !result.branch_entry_targets.count(func_addr)) {

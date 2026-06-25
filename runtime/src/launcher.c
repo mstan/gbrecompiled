@@ -6,6 +6,7 @@
  */
 #include "launcher.h"
 #include "game_extras.h"
+#include "gb_sha256.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,16 @@
 
 static char s_cfg_path[512] = {0};
 static char s_rom_path[512] = {0};
+static char s_expected_sha256[65] = {0};  /* gen-time ROM digest, "" = disabled */
+
+void launcher_set_expected_sha256(const char *hex) {
+    if (hex && hex[0]) {
+        strncpy(s_expected_sha256, hex, sizeof(s_expected_sha256) - 1);
+        s_expected_sha256[sizeof(s_expected_sha256) - 1] = '\0';
+    } else {
+        s_expected_sha256[0] = '\0';
+    }
+}
 
 /* ── CRC32 ────────────────────────────────────────────────────────────────── */
 
@@ -105,14 +116,29 @@ static int file_exists(const char *path) {
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
-static int verify_rom_crc(const char *path) {
+static int verify_rom(const char *path) {
     /* Pull expected CRC(s) from the game's extras.c hooks. */
     int valid_count = 0;
     const uint32_t *valid_list = game_get_valid_crcs(&valid_count);
     uint32_t expected_single = (valid_count == 0) ? game_get_expected_crc32() : 0;
+    int have_crc = (valid_count > 0 && valid_list) || expected_single != 0;
 
-    /* No CRC declared → skip validation entirely. */
-    if (valid_count == 0 && expected_single == 0) return 1;
+    /* No CRC policy declared → fall back to the recompiler-embedded SHA-256
+     * exact-match (if any). CRC hooks intentionally win when present, so
+     * multi-revision carts (e.g. Pokémon R/B) keep their valid-list policy. */
+    if (!have_crc) {
+        if (!s_expected_sha256[0]) return 1;  /* nothing to verify */
+        int rc = gb_sha256_verify_file(path, s_expected_sha256, "ROM");
+        if (rc != 2) return 1;  /* 0 = match; 1 = unreadable (load fails later) */
+        /* rc == 2: digest mismatch — gb_sha256_verify_file already logged it. */
+#ifdef _WIN32
+        MessageBoxA(NULL,
+            "ROM SHA-256 mismatch!\n\nThis is not the exact ROM this build was\n"
+            "recompiled from. Please select the matching ROM.",
+            "Wrong ROM", MB_ICONWARNING | MB_OK);
+#endif
+        return 0;
+    }
 
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -153,7 +179,7 @@ const char *launcher_get_rom_path(void) {
 
     /* Try cached path */
     rom_cfg_read(s_rom_path, sizeof(s_rom_path));
-    if (s_rom_path[0] && file_exists(s_rom_path) && verify_rom_crc(s_rom_path)) {
+    if (s_rom_path[0] && file_exists(s_rom_path) && verify_rom(s_rom_path)) {
         printf("[Launcher] ROM: %s (cached)\n", s_rom_path);
         return s_rom_path;
     }
@@ -164,7 +190,7 @@ const char *launcher_get_rom_path(void) {
         if (!pick_rom_file(s_rom_path, sizeof(s_rom_path))) {
             return NULL;
         }
-        if (verify_rom_crc(s_rom_path)) break;
+        if (verify_rom(s_rom_path)) break;
         s_rom_path[0] = '\0';
     }
 

@@ -50,10 +50,39 @@ struct GameConfig {
 
     // Valid CRC32s (for multi-version ROM support, e.g. Red + Blue)
     std::vector<uint32_t> valid_crcs;
+
+    // Tier-0 dispatch-miss manifest path actually ingested (if any), for logging.
+    std::string dispatch_misses_file;
 };
 
 // Load config from TOML file. Returns nullopt on parse error.
 std::optional<GameConfig> load_config(const std::string& path);
+
+// ── Tier-0 dispatch-miss manifest ───────────────────────────────────────────
+// A dispatch_misses.toml records ROM addresses that fell through to the
+// interpreter at runtime — provably-real function entries the static finder
+// missed (zero false positives, since they executed as opcodes). load_config()
+// auto-ingests a sibling dispatch_misses.toml (or the [options] dispatch_misses
+// path) as entry-point seeds. harvest_dispatch_misses() folds a runtime
+// interp_fallbacks.log into the manifest, replacing the per-game
+// harvest_seeds.sh with a built-in, agnostic step.
+
+struct DispatchMiss {
+    uint8_t  bank;   // decimal ROM bank (0 for 0x0000-0x3FFF)
+    uint16_t addr;   // ROM address (< 0x8000)
+    uint64_t hits;   // cumulative interpreter entries observed (informational)
+};
+
+// Parse a dispatch_misses.toml. Returns ROM-only entries; empty on a missing
+// manifest (not an error) or parse error (warned).
+std::vector<DispatchMiss> load_dispatch_misses(const std::string& manifest_path);
+
+// Fold a runtime interp_fallbacks.log into manifest_path (ROM-only, dedup,
+// hit-accumulating). Creates or updates the manifest in place. Returns the
+// number of distinct ROM entries after merge, or -1 on error (e.g. log
+// unreadable).
+int harvest_dispatch_misses(const std::string& log_path,
+                            const std::string& manifest_path);
 
 } // namespace gbrecomp
 

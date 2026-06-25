@@ -2,8 +2,14 @@
 
 #include <toml.hpp>
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <map>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -69,6 +75,14 @@ std::optional<GameConfig> load_config(const std::string& path) {
             config.trace_file = v->value_or(std::string{});
             if (!config.trace_file.empty() && fs::path(config.trace_file).is_relative()) {
                 config.trace_file = (config_dir / config.trace_file).string();
+            }
+        }
+        if (auto v = opts->get("dispatch_misses")) {
+            config.dispatch_misses_file = v->value_or(std::string{});
+            if (!config.dispatch_misses_file.empty() &&
+                fs::path(config.dispatch_misses_file).is_relative()) {
+                config.dispatch_misses_file =
+                    (config_dir / config.dispatch_misses_file).string();
             }
         }
     }
@@ -137,7 +151,139 @@ std::optional<GameConfig> load_config(const std::string& path) {
         }
     }
 
+    // Tier-0: ingest the dispatch-miss manifest as entry-point seeds. Explicit
+    // [options] dispatch_misses wins; otherwise auto-discover a sibling
+    // dispatch_misses.toml next to the config. A missing manifest is fine.
+    {
+        std::string manifest = config.dispatch_misses_file;
+        if (manifest.empty()) {
+            fs::path sibling = config_dir / "dispatch_misses.toml";
+            if (fs::exists(sibling)) manifest = sibling.string();
+        }
+        if (!manifest.empty() && fs::exists(manifest)) {
+            std::vector<DispatchMiss> misses = load_dispatch_misses(manifest);
+            size_t added = 0;
+            for (const auto& m : misses) {
+                auto& vec = config.entry_points[m.bank];
+                if (std::find(vec.begin(), vec.end(), m.addr) == vec.end()) {
+                    vec.push_back(m.addr);
+                    ++added;
+                }
+            }
+            config.dispatch_misses_file = manifest;
+            std::cerr << "[tier0] ingested " << misses.size()
+                      << " dispatch-miss seed(s) from " << manifest << " ("
+                      << added << " new entry point(s))\n";
+        }
+    }
+
     return config;
+}
+
+std::vector<DispatchMiss> load_dispatch_misses(const std::string& manifest_path) {
+    std::vector<DispatchMiss> out;
+    if (manifest_path.empty() || !fs::exists(manifest_path)) return out;
+
+    toml::table tbl;
+    try {
+        tbl = toml::parse_file(manifest_path);
+    } catch (const toml::parse_error& err) {
+        std::cerr << "Warning: dispatch_misses parse error in " << manifest_path
+                  << ":\n" << err << "\n";
+        return out;
+    }
+
+    if (auto arr = tbl["miss"].as_array()) {
+        for (auto& elem : *arr) {
+            if (auto t = elem.as_table()) {
+                int64_t bank = (*t)["bank"].value_or(int64_t{0});
+                int64_t addr = (*t)["addr"].value_or(int64_t{-1});
+                int64_t hits = (*t)["hits"].value_or(int64_t{0});
+                if (addr < 0 || addr >= 0x8000) continue;  // ROM-only
+                DispatchMiss m{};
+                m.bank = static_cast<uint8_t>(bank);
+                m.addr = static_cast<uint16_t>(addr);
+                m.hits = static_cast<uint64_t>(hits < 0 ? 0 : hits);
+                out.push_back(m);
+            }
+        }
+    }
+    return out;
+}
+
+int harvest_dispatch_misses(const std::string& log_path,
+                            const std::string& manifest_path) {
+    std::ifstream log(log_path);
+    if (!log) {
+        std::cerr << "error: cannot open interpreter fallback log: " << log_path
+                  << "\n";
+        return -1;
+    }
+
+    // Seed from any existing manifest so hits accumulate across runs.
+    std::map<uint32_t, DispatchMiss> merged;
+    for (const auto& m : load_dispatch_misses(manifest_path)) {
+        merged[(static_cast<uint32_t>(m.bank) << 16) | m.addr] = m;
+    }
+
+    // Log lines: "<decimal_bank> 0x<ADDR> <global_count>"; '#' = comment.
+    // Each line is one interpreter fallback event — count occurrences per
+    // (bank, addr) as this run's hits. ROM-only (addr < 0x8000); RAM/HRAM
+    // code is runtime-copied and handled by stubs, not static recompilation.
+    std::string line;
+    size_t rom_events = 0;
+    while (std::getline(log, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream ss(line);
+        int bank = 0;
+        std::string addr_str;
+        long count = 0;
+        if (!(ss >> bank >> addr_str >> count)) continue;
+        unsigned long addr = std::strtoul(addr_str.c_str(), nullptr, 0);  // "0x.."
+        if (addr >= 0x8000) continue;  // ROM-only
+        ++rom_events;
+        uint32_t key = (static_cast<uint32_t>(static_cast<uint8_t>(bank)) << 16) |
+                       static_cast<uint16_t>(addr);
+        auto it = merged.find(key);
+        if (it == merged.end()) {
+            merged[key] = DispatchMiss{static_cast<uint8_t>(bank),
+                                       static_cast<uint16_t>(addr), 1};
+        } else {
+            it->second.hits += 1;
+        }
+    }
+
+    std::vector<DispatchMiss> entries;
+    entries.reserve(merged.size());
+    for (auto& kv : merged) entries.push_back(kv.second);
+    std::sort(entries.begin(), entries.end(),
+              [](const DispatchMiss& a, const DispatchMiss& b) {
+                  return a.bank != b.bank ? a.bank < b.bank : a.addr < b.addr;
+              });
+
+    std::ofstream out(manifest_path, std::ios::trunc);
+    if (!out) {
+        std::cerr << "error: cannot write manifest: " << manifest_path << "\n";
+        return -1;
+    }
+    out << "# Tier-0 dispatch-miss manifest — runtime-confirmed interpreter\n"
+        << "# fallbacks fed back to the recompiler as entry-point seeds. Each\n"
+        << "# address provably executed as an opcode (zero false positives).\n"
+        << "# ROM-only (addr < 0x8000); RAM/HRAM code is handled by runtime stubs.\n"
+        << "# Generated by: gbrecomp --harvest <interp_fallbacks.log> [--manifest <file>]\n"
+        << "# Auto-ingested when sitting next to the game config, or via\n"
+        << "# [options] dispatch_misses = \"...\".\n\n";
+    for (const auto& m : entries) {
+        char addrbuf[16];
+        std::snprintf(addrbuf, sizeof(addrbuf), "0x%04X", m.addr);
+        out << "[[miss]]\n"
+            << "bank = " << static_cast<int>(m.bank) << "\n"
+            << "addr = " << addrbuf << "\n"
+            << "hits = " << m.hits << "\n\n";
+    }
+    std::cerr << "[tier0] harvested " << rom_events << " ROM fallback event(s) → "
+              << entries.size() << " distinct seed(s) in " << manifest_path << "\n";
+    return static_cast<int>(entries.size());
 }
 
 } // namespace gbrecomp

@@ -1,12 +1,15 @@
 #pragma once
 
 /**
- * launcher.h — ROM discovery, CRC32 verification, and external-ROM loading.
+ * launcher.h — ROM discovery, identity verification, and external-ROM loading.
  *
- * CRC validation is driven by game_extras hooks (game_get_expected_crc32 /
- * game_get_valid_crcs), mirroring the NES recomp pattern. Game projects
- * provide an extras.c implementing those; the runtime library has weak
- * defaults that return 0 (no validation).
+ * Identity verification has two layers. CRC validation is driven by
+ * game_extras hooks (game_get_expected_crc32 / game_get_valid_crcs),
+ * mirroring the NES recomp pattern; game projects provide an extras.c
+ * implementing those, and they take precedence (multi-revision carts).
+ * When no CRC hooks are declared, the launcher falls back to an exact
+ * SHA-256 match against the digest the recompiler embedded at gen time
+ * (see launcher_set_expected_sha256). Both layers absent → no validation.
  */
 
 /**
@@ -14,6 +17,16 @@
  * Call before launcher_get_rom_path().
  */
 void launcher_init(void);
+
+/**
+ * Register the SHA-256 digest (lowercase 64-char hex) of the exact ROM this
+ * binary was recompiled from. When set, launcher_get_rom_path() enforces an
+ * exact-match identity check on the user-supplied ROM — UNLESS the game also
+ * declares CRC hooks (game_get_valid_crcs / game_get_expected_crc32), which
+ * take precedence to allow multi-revision carts. Pass NULL/"" to disable.
+ * Call after launcher_init() and before launcher_get_rom_path().
+ */
+void launcher_set_expected_sha256(const char *hex);
 
 /**
  * Get ROM file path. Checks in order:

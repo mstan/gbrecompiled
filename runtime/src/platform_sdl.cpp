@@ -41,6 +41,7 @@ extern "C" void gb_debug_server_set_context(GBContext *ctx);
 #include "backends/imgui_impl_opengl3.h"
 
 #include "shader_pipeline.h"
+#include "game_extras.h"  /* game_draw_overlay() hook (no-op default in gbrt) */
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -3884,6 +3885,13 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 #endif
         }
 
+        /* Game-specific overlay controls. The agnostic core renders nothing
+         * here by default (no-op in game_extras_default.c); a game's extras
+         * (e.g. the Pokémon repo) implements game_draw_overlay() to add its
+         * own ImGui sections. This is where the former built-in "Pokemon
+         * Options" CollapsingHeader now lives, moved out of the core. */
+        game_draw_overlay(g_registered_ctx);
+
         ImGui::EndChild();
         ImGui::Separator();
 
@@ -4463,6 +4471,16 @@ bool gb_platform_init(int scale) {
     reopen_audio_output_device(false);
     
     fprintf(stderr, "[SDL] Creating window...\n");
+#if defined(_WIN32)
+    /* On Windows we link against ANGLE's libGLESv2/libEGL. SDL must create
+     * the GL context through that same ES library (via EGL) — otherwise it
+     * defaults to the desktop WGL driver's ES2-compat profile, leaving the
+     * directly-linked ANGLE entry points with no current context (glGetString
+     * == NULL, GL_SHADER_COMPILER == GL_FALSE, every shader compile fails with
+     * an empty info log). "1" forces SDL to load the ES driver by default name
+     * (libGLESv2.dll/libEGL.dll), matching our link-time GL functions. */
+    SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
+#endif
     /* Request a GLES 2.0 context — same code path on desktop Mesa
      * (which advertises a compatible profile) and embedded Mali / Adreno
      * GPUs. SDL_WINDOW_OPENGL must be set BEFORE SDL_CreateWindow. */
@@ -4499,6 +4517,27 @@ bool gb_platform_init(int scale) {
         return false;
     }
     SDL_GL_MakeCurrent(g_window, g_gl_context);
+
+    /* One-time GL identity log. Confirms which driver SDL actually gave us
+     * (real GLES2/ANGLE vs a desktop ES2-compat context) and whether an
+     * online shader compiler is present — an absent compiler is the usual
+     * cause of "compile failed" with an empty info log. */
+    {
+        const char* gl_vendor   = (const char*)glGetString(GL_VENDOR);
+        const char* gl_renderer = (const char*)glGetString(GL_RENDERER);
+        const char* gl_version  = (const char*)glGetString(GL_VERSION);
+        const char* gl_glsl     = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
+        GLboolean has_compiler = GL_FALSE;
+        glGetBooleanv(GL_SHADER_COMPILER, &has_compiler);
+        fprintf(stderr,
+                "[GL] vendor=%s | renderer=%s | version=%s | glsl=%s | shader_compiler=%s\n",
+                gl_vendor   ? gl_vendor   : "(null)",
+                gl_renderer ? gl_renderer : "(null)",
+                gl_version  ? gl_version  : "(null)",
+                gl_glsl     ? gl_glsl     : "(null)",
+                has_compiler ? "yes" : "NO");
+    }
+
     /* No vsync — we drive timing in wall-clock to hit 59.7 FPS exactly,
      * including on non-60Hz monitors. */
     SDL_GL_SetSwapInterval(0);

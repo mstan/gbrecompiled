@@ -204,7 +204,9 @@ A TCP debug server listens on `localhost:4370` for runtime inspection (register 
 
 ## Credits
 
-- **[arcanite24](https://github.com/arcanite24)** — Original author of gb-recompiled. All recompiler architecture, static analysis engine, code generation, and initial runtime implementation.
+- **[arcanite24](https://github.com/arcanite24)** — Original author of gb-recompiled. All recompiler architecture, static analysis engine, code generation, and initial runtime implementation. This project is built on that foundation.
+- **[GB-Recomp / christopher-roelofs](https://github.com/GB-Recomp/gb-recompiled)** — The runtime/hardware fork merged in as the base for this development fork (SGB, GB Camera/Printer, IR, GLES2 shaders, savestates, MBC1/2/3/5, netplay, multi-ROM launcher, Android, PyBoy oracle, interpreter-fallback tier).
+- **[Matthew Stanley (@mstan)](https://github.com/mstan)** — This development fork: the 3-way merge of the above, PPU latching fixes, audio underrun fade, TCP debug server, pointer/launcher ROM delivery + SHA-256 verification, ANGLE GLES path, the agnostic `game_extras` overlay/hook model, the Tier-0 `dispatch_misses.toml` seed manifest, and the per-game ports (Tetris, Megaman Xtreme 2, Pokémon Red/Blue). Developed with Claude Code.
 - **[pret](https://github.com/pret)** — Game Boy reverse engineering community whose disassembly projects provide invaluable reference material.
 
 ## Compatibility

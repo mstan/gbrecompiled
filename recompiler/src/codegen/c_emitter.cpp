@@ -2201,6 +2201,25 @@ GeneratedOutput generate_output(const ir::Program& program,
                                 size_t rom_size,
                                 const GeneratorOptions& options) {
     GeneratedOutput output;
+
+    /* The asset-loader / BSS-array ROM model (inherited from GB-Recomp) was
+     * deliberately replaced by the pointer/launcher model: <prefix>_rom.c
+     * emits `uint8_t* rom_data = 0`, populated at runtime by
+     * launcher_load_rom(). --emit-asset-loader still expects a writable BSS
+     * rom_data[] buffer it fills via gb_load_assets() before <prefix>_init,
+     * which both mis-declares the symbol (array vs pointer) and double-delivers
+     * the ROM. --bss-rom-data is fully inert (the byte array was removed) and
+     * belongs to the same retired model. Reject both rather than emit code that
+     * cannot link/run. */
+    if (options.emit_asset_loader || options.bss_rom_data) {
+        fprintf(stderr,
+            "[gbrecomp] error: --emit-asset-loader / --bss-rom-data select the "
+            "retired BSS-array ROM model, which is incompatible with the active "
+            "pointer/launcher ROM delivery. ROMs are loaded at runtime via "
+            "launcher_load_rom() (rom.cfg + SHA-256/CRC verify). Remove these flags.\n");
+        std::exit(1);
+    }
+
     const bool rom_is_cgb = rom_size > 0x143 && (rom_data[0x143] == 0x80 || rom_data[0x143] == 0xC0);
     const bool rom_is_cgb_only = rom_size > 0x143 && rom_data[0x143] == 0xC0;
     
@@ -2919,12 +2938,22 @@ GeneratedOutput generate_output(const ir::Program& program,
     }
     flush_dispatch_chunk();
 
+    /* Agnostic per-game dispatch override (game_extras hook; default no-op
+     * returns 0). Lets a game intercept specific addresses reached via the
+     * trampoline before normal dispatch (e.g. the Pokémon Gen 2 Mystery Gift
+     * entry). Compiled CALLs are direct and bypass this loop, so it only
+     * affects trampoline-routed addresses. */
+    source_ss << "extern int game_dispatch_override(GBContext* ctx, uint16_t addr);\n";
     source_ss << "void " << dispatch_function_name(options) << "(GBContext* ctx, uint16_t addr) {\n";
     source_ss << "    ctx->pc = addr;\n";
     source_ss << "    while (!ctx->stopped && !ctx->halted) {\n";
     source_ss << "        addr = ctx->pc;\n";
     source_ss << "        uint8_t bank = ctx->rom_bank;\n";
     source_ss << "        if (addr < 0x4000) bank = 0;\n";
+    source_ss << "        if (game_dispatch_override(ctx, addr)) {\n";
+    source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
+    source_ss << "            continue;\n";
+    source_ss << "        }\n";
     source_ss << "        if (gbrt_instruction_limit > 0 && gbrt_instruction_count >= gbrt_instruction_limit) {\n";
     source_ss << "            fprintf(stderr, \"[LIMIT] Reached instruction limit %llu\\n\", (unsigned long long)gbrt_instruction_limit);\n";
     source_ss << "            exit(0);\n";
@@ -3287,7 +3316,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "/* ROM is loaded externally at runtime via launcher (NES-style); */\n";
     source_ss << "/* the following are populated by " << options.output_prefix << "_init. */\n";
     source_ss << "extern uint8_t* " << rom_data_symbol_name(options) << ";\n";
-    source_ss << "extern size_t " << rom_size_symbol_name(options) << ";\n\n";
+    source_ss << "extern size_t " << rom_size_symbol_name(options) << ";\n";
+    source_ss << "extern const char " << rom_sha256_symbol_name(options) << "[];\n\n";
 
     source_ss << "const GBConfig* " << options.output_prefix << "_default_config(void) {\n";
     source_ss << "    static const GBConfig config = {\n";
@@ -3305,9 +3335,12 @@ GeneratedOutput generate_output(const ir::Program& program,
 
     // Emit init and run functions — ROM is loaded externally at runtime.
     source_ss << "void " << options.output_prefix << "_init(GBContext* ctx) {\n";
-    source_ss << "    /* Resolve ROM via the launcher (rom.cfg cache or file picker, */\n";
-    source_ss << "    /* with CRC32 validation against game_extras hooks). */\n";
+    source_ss << "    /* Resolve ROM via the launcher (rom.cfg cache or file picker). */\n";
+    source_ss << "    /* Identity check: game_extras CRC hooks take precedence (multi- */\n";
+    source_ss << "    /* revision allowance); otherwise the embedded SHA-256 of the */\n";
+    source_ss << "    /* exact ROM this binary was recompiled from is enforced. */\n";
     source_ss << "    launcher_init();\n";
+    source_ss << "    launcher_set_expected_sha256(" << rom_sha256_symbol_name(options) << ");\n";
     source_ss << "    const char* rom_path = launcher_get_rom_path();\n";
     source_ss << "    if (!rom_path) {\n";
     source_ss << "        fprintf(stderr, \"[" << options.output_prefix << "] No ROM selected — exiting.\\n\");\n";
@@ -3341,12 +3374,22 @@ GeneratedOutput generate_output(const ir::Program& program,
 
     // ROM is loaded at runtime via launcher — emit just the mutable globals.
     // The byte array used to live here (~ROM size hex-encoded), now empty.
+    /* SHA-256 of the exact ROM this recompilation was built against. The
+     * launcher verifies the user-supplied ROM against this digest (unless
+     * the game declares CRC hooks, which take precedence). Computed here so
+     * the check is automatic and agnostic — no per-game declaration needed. */
+    char rom_sha256_hex[65] = {0};
+    gb_sha256_hex(rom_data, rom_size, rom_sha256_hex);
+
     std::ostringstream rom_ss;
     rom_ss << "/* ROM data — loaded externally at runtime via launcher (NES-style). */\n";
     rom_ss << "#include <stdint.h>\n";
     rom_ss << "#include <stddef.h>\n\n";
     rom_ss << "uint8_t* " << rom_data_symbol_name(options) << " = 0;\n";
     rom_ss << "size_t " << rom_size_symbol_name(options) << " = 0;\n";
+    rom_ss << "/* SHA-256 of the gen-time ROM; verified by the launcher. */\n";
+    rom_ss << "const char " << rom_sha256_symbol_name(options) << "[] = \""
+           << rom_sha256_hex << "\";\n";
     if (!named_rom_data_symbols.empty()) {
         rom_ss << "\n/* Pointers into rom_data; resolved at runtime in "
                << options.output_prefix << "_init_rom_pointers() below. */\n";
@@ -4015,6 +4058,15 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    target_sources(" << options.output_prefix
                  << " PRIVATE \"${CMAKE_CURRENT_SOURCE_DIR}/../extras.c\")\n";
         cmake_ss << "    message(STATUS \"" << options.output_prefix << ": linking extras.c from project root\")\n";
+        cmake_ss << "endif()\n\n";
+        cmake_ss << "# Optional per-game build extension. A game project can drop a\n";
+        cmake_ss << "# 'game_build.cmake' in its root (one level up) to add extra sources\n";
+        cmake_ss << "# (e.g. a C++ overlay TU, mock modules), include dirs, or link libs.\n";
+        cmake_ss << "# GBRECOMP_GAME_TARGET names the executable target to attach them to.\n";
+        cmake_ss << "set(GBRECOMP_GAME_TARGET " << options.output_prefix << ")\n";
+        cmake_ss << "if(EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/../game_build.cmake\")\n";
+        cmake_ss << "    include(\"${CMAKE_CURRENT_SOURCE_DIR}/../game_build.cmake\")\n";
+        cmake_ss << "    message(STATUS \"" << options.output_prefix << ": applied game_build.cmake extension\")\n";
         cmake_ss << "endif()\n\n";
         cmake_ss << "# Generated ROM code defaults to a smaller manual-testing profile.\n";
         cmake_ss << "# Raise the optimization level or enable IPO/LTO explicitly for benchmark/release builds.\n";

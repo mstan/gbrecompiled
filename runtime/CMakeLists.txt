@@ -9,7 +9,19 @@ add_library(gbrt STATIC
     src/audio.c
     src/audio_stats.c
     src/debug_server.c
-    src/game_extras_default.c
+    # Default game hooks — one strong symbol per TU so a partial extras.c
+    # overrides cleanly (no multiple-definition, no weak-symbol reliance).
+    src/game_defaults/game_default_on_init.c
+    src/game_defaults/game_default_on_frame.c
+    src/game_defaults/game_default_post_frame.c
+    src/game_defaults/game_default_draw_overlay.c
+    src/game_defaults/game_default_fill_frame_record.c
+    src/game_defaults/game_default_handle_debug_cmd.c
+    src/game_defaults/game_default_dispatch_override.c
+    src/game_defaults/game_default_get_name.c
+    src/game_defaults/game_default_handle_arg.c
+    src/game_defaults/game_default_get_expected_crc32.c
+    src/game_defaults/game_default_get_valid_crcs.c
     src/keybinds.c
     src/launcher.c
     src/platform_sdl.cpp

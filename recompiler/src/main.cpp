@@ -64,6 +64,11 @@ void print_usage(const char* program) {
     std::cout << "  --symbols <file>      Load a .sym symbol file and use names for generated functions and labels\n";
     std::cout << "  --annotations <file>  Load analyzer guidance (function/label/data ranges) from a text file\n";
     std::cout << "  --use-trace <file>    Use runtime trace to find entry points\n";
+    std::cout << "  --harvest <log>       Tier-0: fold a runtime interp_fallbacks.log into a\n";
+    std::cout << "                        dispatch_misses.toml seed manifest, then exit.\n";
+    std::cout << "  --manifest <file>     Manifest path for --harvest (default dispatch_misses.toml).\n";
+    std::cout << "                        A dispatch_misses.toml beside the --config file (or set via\n";
+    std::cout << "                        [options] dispatch_misses) is auto-ingested as entry seeds.\n";
     std::cout << "  --emit-asset-loader   Bake gb_asset_loader integration into <prefix>_main.c\n";
     std::cout << "                        (also auto-suppresses the standalone main() wrapper)\n";
     std::cout << "  --bss-rom-data        Emit rom_data[] as a BSS declaration only.\n";
@@ -1515,6 +1520,25 @@ int main(int argc, char* argv[]) {
         print_banner();
         print_usage(argv[0]);
         return 1;
+    }
+
+    // Tier-0: `--harvest <interp_fallbacks.log> [--manifest <dispatch_misses.toml>]`
+    // folds a runtime interpreter-fallback log into a dispatch-miss manifest
+    // (ROM-only, dedup, hit-accumulating), then exits. The manifest is then
+    // auto-ingested as entry-point seeds on the next `--config` regen. This is
+    // the built-in, agnostic replacement for the per-game harvest_seeds.sh.
+    {
+        std::string harvest_log, manifest_path;
+        for (int i = 1; i < argc; i++) {
+            std::string a = argv[i];
+            if (a == "--harvest" && i + 1 < argc) harvest_log = argv[++i];
+            else if (a == "--manifest" && i + 1 < argc) manifest_path = argv[++i];
+        }
+        if (!harvest_log.empty()) {
+            if (manifest_path.empty()) manifest_path = "dispatch_misses.toml";
+            int n = gbrecomp::harvest_dispatch_misses(harvest_log, manifest_path);
+            return n < 0 ? 1 : 0;
+        }
     }
 
     std::string rom_path;

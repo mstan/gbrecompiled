@@ -33,6 +33,16 @@ void game_on_frame(struct GBContext *ctx);
  * and gb_debug_server_check_watchpoints(). */
 void game_post_frame(struct GBContext *ctx);
 
+/* ---- UI hook ---- */
+
+/* Called once per frame from inside the runtime's ImGui settings window
+ * (after the built-in sections, inside the scroll area). The game may emit
+ * its own ImGui controls here — e.g. a "Pokemon Options" CollapsingHeader.
+ * Implementations linked into a C++ TU can call ImGui:: directly (the
+ * runtime and game share the one ImGui context). Default: no-op.
+ * Keeps the agnostic core free of any game-specific UI. */
+void game_draw_overlay(struct GBContext *ctx);
+
 /* ---- Debug hooks ---- */
 
 /* Fill game-specific data into the frame record.

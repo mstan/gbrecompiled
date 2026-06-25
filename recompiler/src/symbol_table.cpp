@@ -368,6 +368,13 @@ bool SymbolTable::load_sym_file(const std::string& path,
             continue;
         }
 
+        // rgblink .sym files can also export address-less numeric constants
+        // (e.g. "01 AGATHASROOM_AGATHA" — an EQU value, not a ROM address).
+        // These have no "bank:offset" colon; skip them rather than failing.
+        if (addr_token.find(':') == std::string::npos) {
+            continue;
+        }
+
         uint32_t addr = 0;
         if (!parse_banked_address(addr_token, addr)) {
             if (error) {

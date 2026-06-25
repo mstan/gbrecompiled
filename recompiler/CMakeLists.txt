@@ -8,6 +8,7 @@ add_executable(gbrecomp
     src/analyzer.cpp
     src/bank_tracker.cpp
     src/symbol_table.cpp
+    src/heuristic_eval.cpp
     src/generator.cpp
     src/ir/ir_builder.cpp
     src/ir/ir_optimizer.cpp

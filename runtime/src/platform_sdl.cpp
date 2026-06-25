@@ -1951,8 +1951,6 @@ static void save_ppm(const char* filename, const uint32_t* fb, int width, int he
 }
 
 
-static int g_frame_count = 0;
-
 /* Guest-FPS sampler. We snapshot (g_frame_count, wall_clock_ms) once a
  * second and compute FPS as the delta against the previous snapshot.
  * That gives the rate the recompiled GB CPU is actually producing

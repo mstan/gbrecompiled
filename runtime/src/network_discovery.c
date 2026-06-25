@@ -16,19 +16,17 @@
  * Peer table is fixed-size; on overflow the oldest entry is evicted.
  */
 #include "network_discovery.h"
+#include "gb_platform_compat.h"
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <netinet/in.h>
+#ifdef _WIN32
+#include <process.h>  /* _getpid */
+#endif
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
 
 #define LAN_MAGIC          "PG1!"
 #define LAN_PROTO_VERSION  1
@@ -67,7 +65,7 @@ static struct {
     volatile bool shutdown_requested;
     pthread_t thread;
     bool thread_running;
-    int sock_fd;
+    sock_t sock_fd;
 
     /* Peer table. */
     pthread_mutex_t peers_mu;
@@ -75,7 +73,7 @@ static struct {
     size_t peer_count;
 } g = {
     .advertised_port = 8765,
-    .sock_fd = -1,
+    .sock_fd = SOCK_INVALID,
 };
 
 /* ============================================================================
@@ -95,7 +93,11 @@ static void random_bytes(uint8_t* buf, size_t n) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     uint64_t seed = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#ifdef _WIN32
+    seed ^= (uint64_t)_getpid() << 32;
+#else
     seed ^= (uint64_t)(uintptr_t)getpid() << 32;
+#endif
     for (size_t i = 0; i < n; i++) {
         seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
         buf[i] = (uint8_t)(seed >> 56);
@@ -225,15 +227,15 @@ static bool decode_hello(const uint8_t* buf, size_t len,
  * Discovery thread
  * ============================================================================ */
 
-static int open_socket(void) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        lan_log("socket() failed: %s", strerror(errno));
-        return -1;
+static sock_t open_socket(void) {
+    sock_t fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd == SOCK_INVALID) {
+        lan_log("socket() failed: %d", sock_error());
+        return SOCK_INVALID;
     }
     int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const char*)&yes, sizeof(yes));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -241,18 +243,24 @@ static int open_socket(void) {
     addr.sin_port = htons(LAN_PORT);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        lan_log("bind(:%d) failed: %s", LAN_PORT, strerror(errno));
-        close(fd);
-        return -1;
+        lan_log("bind(:%d) failed: %d", LAN_PORT, sock_error());
+        sock_close(fd);
+        return SOCK_INVALID;
     }
 
-    /* Make recv non-blocking via timeout. */
+    /* Make recv non-blocking via a 250 ms receive timeout. */
+#ifdef _WIN32
+    DWORD timeout_ms = 250;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms,
+               sizeof(timeout_ms));
+#else
     struct timeval tv = { .tv_sec = 0, .tv_usec = 250 * 1000 };  /* 250 ms */
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
     return fd;
 }
 
-static void send_hello(int fd) {
+static void send_hello(sock_t fd) {
     uint8_t buf[LAN_PACKET_SIZE];
     encode_hello(buf);
     struct sockaddr_in addr;
@@ -260,12 +268,13 @@ static void send_hello(int fd) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(LAN_PORT);
     addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    sendto(fd, buf, LAN_PACKET_SIZE, 0, (struct sockaddr*)&addr, sizeof(addr));
+    sendto(fd, (const char*)buf, LAN_PACKET_SIZE, 0,
+           (struct sockaddr*)&addr, sizeof(addr));
 }
 
 static void* discovery_thread(void* arg) {
     (void)arg;
-    int fd = g.sock_fd;
+    sock_t fd = g.sock_fd;
     uint64_t last_send_ms = 0;
     while (!g.shutdown_requested) {
         uint64_t now = now_ms();
@@ -276,7 +285,7 @@ static void* discovery_thread(void* arg) {
         uint8_t buf[LAN_PACKET_SIZE];
         struct sockaddr_in src;
         socklen_t srclen = sizeof(src);
-        ssize_t got = recvfrom(fd, buf, sizeof(buf), 0,
+        ssize_t got = recvfrom(fd, (char*)buf, sizeof(buf), 0,
                                (struct sockaddr*)&src, &srclen);
         if (got > 0) {
             char uuid[GB_LAN_UUID_LEN];
@@ -341,15 +350,16 @@ void gb_lan_init(void) {
 void gb_lan_set_enabled(bool enabled) {
     if (enabled == g.enabled) return;
     if (enabled) {
+        gb_net_global_init();
         g.shutdown_requested = false;
         g.sock_fd = open_socket();
-        if (g.sock_fd < 0) {
+        if (g.sock_fd == SOCK_INVALID) {
             return;
         }
         if (pthread_create(&g.thread, NULL, discovery_thread, NULL) != 0) {
             lan_log("pthread_create failed: %s", strerror(errno));
-            close(g.sock_fd);
-            g.sock_fd = -1;
+            sock_close(g.sock_fd);
+            g.sock_fd = SOCK_INVALID;
             return;
         }
         g.thread_running = true;
@@ -361,9 +371,9 @@ void gb_lan_set_enabled(bool enabled) {
             pthread_join(g.thread, NULL);
             g.thread_running = false;
         }
-        if (g.sock_fd >= 0) {
-            close(g.sock_fd);
-            g.sock_fd = -1;
+        if (g.sock_fd != SOCK_INVALID) {
+            sock_close(g.sock_fd);
+            g.sock_fd = SOCK_INVALID;
         }
         g.enabled = false;
         pthread_mutex_lock(&g.peers_mu);
@@ -398,7 +408,7 @@ void gb_lan_set_self_nickname(const char* name) {
         g.prefs.save_string("lan.nickname", g.nickname);
     }
     /* Force a re-broadcast on the next thread iteration by sending now. */
-    if (g.enabled && g.sock_fd >= 0) {
+    if (g.enabled && g.sock_fd != SOCK_INVALID) {
         send_hello(g.sock_fd);
     }
 }

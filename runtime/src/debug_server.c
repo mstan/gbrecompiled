@@ -14,37 +14,13 @@
 #include "debug_server.h"
 #include "game_extras.h"
 #include "gbrt.h"
+#include "gb_platform_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
-
-/* ---- Platform sockets ---- */
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#  pragma comment(lib, "ws2_32.lib")
-   typedef SOCKET sock_t;
-#  define SOCK_INVALID INVALID_SOCKET
-#  define sock_close closesocket
-#  define SOCK_WOULDBLOCK WSAEWOULDBLOCK
-   static int sock_error(void) { return WSAGetLastError(); }
-#else
-#  include <sys/socket.h>
-#  include <netinet/in.h>
-#  include <arpa/inet.h>
-#  include <unistd.h>
-#  include <fcntl.h>
-#  include <errno.h>
-   typedef int sock_t;
-#  define SOCK_INVALID (-1)
-#  define sock_close close
-#  define SOCK_WOULDBLOCK EWOULDBLOCK
-   static int sock_error(void) { return errno; }
-#endif
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -757,10 +733,7 @@ void gb_debug_server_init(int port)
 {
     if (port > 0) s_port = port;
 
-#ifdef _WIN32
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
+    gb_net_global_init();
 
     s_listen = socket(AF_INET, SOCK_STREAM, 0);
     if (s_listen == SOCK_INVALID) {

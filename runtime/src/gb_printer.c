@@ -20,6 +20,7 @@
 
 #include "gb_printer.h"
 #include "gbrt.h"
+#include "gb_platform_compat.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -124,7 +125,7 @@ uint32_t gb_printer_print_count(const GBPrinter* p) {
 static void ensure_output_dir(GBPrinter* p) {
     if (!p->output_dir[0]) return;
     /* mkdir is racy but harmless — EEXIST is fine. */
-    mkdir(p->output_dir, 0755);
+    gb_mkdir(p->output_dir);
 }
 
 /* Find the highest existing <prefix>_<NNNN>.png index in output_dir so

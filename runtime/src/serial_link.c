@@ -14,20 +14,26 @@
 
 #include "serial_link.h"
 #include "gbrt.h"
+#include "gb_platform_compat.h"
+
+#ifndef _WIN32
+#include <netinet/tcp.h>  /* IPPROTO_TCP / TCP_NODELAY (in winsock2 on Win32) */
+#endif
 
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <netdb.h>
+
+#include <errno.h>  /* EINTR */
+
+/* Windows spells the shutdown(2) "how" constant differently. */
+#ifdef _WIN32
+#  ifndef SHUT_RDWR
+#    define SHUT_RDWR SD_BOTH
+#  endif
+#endif
 
 #define BGB_CMD_VERSION    1
 #define BGB_CMD_JOYPAD     101
@@ -58,8 +64,8 @@ typedef enum {
 
 static struct {
     LinkMode mode;
-    int      listen_fd;
-    int      peer_fd;
+    sock_t   listen_fd;
+    sock_t   peer_fd;
     char     peer_ip[64];   /* remote IP set on connect/accept; cleared on shutdown */
 
     /* Net thread state. Booleans are read by the main thread without
@@ -82,8 +88,8 @@ static struct {
     bool initial_handshake_done;/* sent version + initial sync3 yet */
 } g = {
     .mode = LINK_OFF,
-    .listen_fd = -1,
-    .peer_fd = -1,
+    .listen_fd = SOCK_INVALID,
+    .peer_fd = SOCK_INVALID,
 };
 
 static void link_log(const char* fmt, ...) {
@@ -117,17 +123,17 @@ static bool inbox_pop(BGBPacket* out) {
     return ok;
 }
 
-static bool send_all(int fd, const void* buf, size_t len) {
-    const uint8_t* p = (const uint8_t*)buf;
+static bool send_all(sock_t fd, const void* buf, size_t len) {
+    const char* p = (const char*)buf;
     size_t sent = 0;
     while (sent < len) {
 #ifdef MSG_NOSIGNAL
-        ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
+        ssize_t n = send(fd, p + sent, (int)(len - sent), MSG_NOSIGNAL);
 #else
-        ssize_t n = send(fd, p + sent, len - sent, 0);
+        ssize_t n = send(fd, p + sent, (int)(len - sent), 0);
 #endif
         if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && sock_error() == EINTR) continue;
             return false;
         }
         sent += (size_t)n;
@@ -135,14 +141,14 @@ static bool send_all(int fd, const void* buf, size_t len) {
     return true;
 }
 
-static bool recv_all(int fd, void* buf, size_t len) {
-    uint8_t* p = (uint8_t*)buf;
+static bool recv_all(sock_t fd, void* buf, size_t len) {
+    char* p = (char*)buf;
     size_t got = 0;
     while (got < len) {
-        ssize_t n = recv(fd, p + got, len - got, 0);
+        ssize_t n = recv(fd, p + got, (int)(len - got), 0);
         if (n == 0) return false; /* peer closed */
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (sock_error() == EINTR) continue;
             return false;
         }
         got += (size_t)n;
@@ -151,7 +157,7 @@ static bool recv_all(int fd, void* buf, size_t len) {
 }
 
 static bool send_packet(BGBPacket pkt) {
-    if (g.peer_fd < 0) return false;
+    if (g.peer_fd == SOCK_INVALID) return false;
     uint8_t buf[8];
     buf[0] = pkt.cmd;
     buf[1] = pkt.b2;
@@ -164,7 +170,7 @@ static bool send_packet(BGBPacket pkt) {
     return send_all(g.peer_fd, buf, 8);
 }
 
-static bool recv_packet(int fd, BGBPacket* out) {
+static bool recv_packet(sock_t fd, BGBPacket* out) {
     uint8_t buf[8];
     if (!recv_all(fd, buf, 8)) return false;
     out->cmd = buf[0];
@@ -185,10 +191,10 @@ static void* net_thread_main(void* arg) {
     if (g.mode == LINK_LISTEN) {
         struct sockaddr_in client;
         socklen_t clen = sizeof(client);
-        int peer = accept(g.listen_fd, (struct sockaddr*)&client, &clen);
-        if (peer < 0) {
+        sock_t peer = accept(g.listen_fd, (struct sockaddr*)&client, &clen);
+        if (peer == SOCK_INVALID) {
             if (!g.shutdown_requested) {
-                link_log("accept() failed: %s", strerror(errno));
+                link_log("accept() failed: %d", sock_error());
             }
             return NULL;
         }
@@ -200,7 +206,7 @@ static void* net_thread_main(void* arg) {
     /* For LINK_CONNECT, peer_fd was set by start_connect(). */
 
     int yes = 1;
-    setsockopt(g.peer_fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    setsockopt(g.peer_fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
 
     g.connected = true;
 
@@ -258,15 +264,16 @@ static void* net_thread_main(void* arg) {
 bool gb_serial_link_start_listen(uint16_t port) {
     if (g.mode != LINK_OFF) return false;
 
+    gb_net_global_init();
     pthread_mutex_init(&g.inbox_mutex, NULL);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        link_log("socket() failed: %s", strerror(errno));
+    sock_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == SOCK_INVALID) {
+        link_log("socket() failed: %d", sock_error());
         return false;
     }
     int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -274,13 +281,13 @@ bool gb_serial_link_start_listen(uint16_t port) {
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        link_log("bind(:%d) failed: %s", (int)port, strerror(errno));
-        close(fd);
+        link_log("bind(:%d) failed: %d", (int)port, sock_error());
+        sock_close(fd);
         return false;
     }
     if (listen(fd, 1) < 0) {
-        link_log("listen() failed: %s", strerror(errno));
-        close(fd);
+        link_log("listen() failed: %d", sock_error());
+        sock_close(fd);
         return false;
     }
 
@@ -290,8 +297,8 @@ bool gb_serial_link_start_listen(uint16_t port) {
 
     if (pthread_create(&g.thread, NULL, net_thread_main, NULL) != 0) {
         link_log("pthread_create failed: %s", strerror(errno));
-        close(fd);
-        g.listen_fd = -1;
+        sock_close(fd);
+        g.listen_fd = SOCK_INVALID;
         g.mode = LINK_OFF;
         return false;
     }
@@ -302,6 +309,7 @@ bool gb_serial_link_start_listen(uint16_t port) {
 bool gb_serial_link_start_connect(const char* host, uint16_t port) {
     if (g.mode != LINK_OFF) return false;
 
+    gb_net_global_init();
     pthread_mutex_init(&g.inbox_mutex, NULL);
 
     char port_str[16];
@@ -319,18 +327,18 @@ bool gb_serial_link_start_connect(const char* host, uint16_t port) {
         return false;
     }
 
-    int fd = -1;
+    sock_t fd = SOCK_INVALID;
     for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
+        if (fd == SOCK_INVALID) continue;
+        if (connect(fd, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
+        sock_close(fd);
+        fd = SOCK_INVALID;
     }
     freeaddrinfo(res);
 
-    if (fd < 0) {
-        link_log("connect(%s:%d) failed: %s", host, (int)port, strerror(errno));
+    if (fd == SOCK_INVALID) {
+        link_log("connect(%s:%d) failed: %d", host, (int)port, sock_error());
         return false;
     }
 
@@ -341,8 +349,8 @@ bool gb_serial_link_start_connect(const char* host, uint16_t port) {
 
     if (pthread_create(&g.thread, NULL, net_thread_main, NULL) != 0) {
         link_log("pthread_create failed: %s", strerror(errno));
-        close(fd);
-        g.peer_fd = -1;
+        sock_close(fd);
+        g.peer_fd = SOCK_INVALID;
         g.mode = LINK_OFF;
         return false;
     }
@@ -354,19 +362,19 @@ void gb_serial_link_shutdown(void) {
     if (g.mode == LINK_OFF) return;
     g.shutdown_requested = true;
 
-    if (g.peer_fd >= 0 && g.connected) {
+    if (g.peer_fd != SOCK_INVALID && g.connected) {
         BGBPacket bye = { .cmd = BGB_CMD_DISCONNECT };
         send_packet(bye);
     }
-    if (g.peer_fd >= 0) {
+    if (g.peer_fd != SOCK_INVALID) {
         shutdown(g.peer_fd, SHUT_RDWR);
-        close(g.peer_fd);
-        g.peer_fd = -1;
+        sock_close(g.peer_fd);
+        g.peer_fd = SOCK_INVALID;
     }
-    if (g.listen_fd >= 0) {
+    if (g.listen_fd != SOCK_INVALID) {
         shutdown(g.listen_fd, SHUT_RDWR);
-        close(g.listen_fd);
-        g.listen_fd = -1;
+        sock_close(g.listen_fd);
+        g.listen_fd = SOCK_INVALID;
     }
     if (g.thread_running) {
         pthread_join(g.thread, NULL);

@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if GBRT_NETPLAY
 #include <curl/curl.h>
 
 /* --- response buffer -------------------------------------------------- */
@@ -474,3 +475,43 @@ GBRelayListResult gb_relay_list_rooms(const char* server_url,
     recvbuf_free(&buf);
     return res;
 }
+
+#else  /* !GBRT_NETPLAY — netplay off: stub the relay API so no libcurl is linked */
+
+GBRelayResult gb_relay_register(const char* server_url, const char* room_code,
+                                const char* role, int port, const char* nickname,
+                                const char* uuid) {
+    (void)server_url; (void)room_code; (void)role; (void)port; (void)nickname; (void)uuid;
+    GBRelayResult res;
+    memset(&res, 0, sizeof(res));
+    res.ok = false;
+    snprintf(res.error, sizeof(res.error), "netplay disabled in this build");
+    return res;
+}
+
+GBRelayResult gb_relay_lookup(const char* server_url, const char* room_code,
+                              const char* role) {
+    (void)server_url; (void)room_code; (void)role;
+    GBRelayResult res;
+    memset(&res, 0, sizeof(res));
+    res.ok = false;
+    snprintf(res.error, sizeof(res.error), "netplay disabled in this build");
+    return res;
+}
+
+void gb_relay_unregister(const char* server_url, const char* room_code,
+                         const char* role) {
+    (void)server_url; (void)room_code; (void)role;
+}
+
+GBRelayListResult gb_relay_list_rooms(const char* server_url,
+                                      GBRelayRoomInfo* out_rooms, int max) {
+    (void)server_url; (void)out_rooms; (void)max;
+    GBRelayListResult res;
+    memset(&res, 0, sizeof(res));
+    res.ok = false;
+    snprintf(res.error, sizeof(res.error), "netplay disabled in this build");
+    return res;
+}
+
+#endif  /* GBRT_NETPLAY */

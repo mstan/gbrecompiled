@@ -43,9 +43,17 @@ add_library(gbrt STATIC
 find_package(Threads REQUIRED)
 target_link_libraries(gbrt PUBLIC Threads::Threads)
 
-# libcurl for the rendezvous-server HTTP client
-find_package(CURL REQUIRED)
-target_link_libraries(gbrt PUBLIC CURL::libcurl)
+# Online netplay relay client (rendezvous-server HTTP, via libcurl). OFF by
+# default: linking libcurl drags in its whole TLS/HTTP2/HTTP3/SSH/brotli DLL
+# tree (~16 DLLs). With this off, relay_client.c compiles to small stubs (see
+# its #if GBRT_NETPLAY guard) and no curl is linked. Turn on with
+# -DGBRT_NETPLAY=ON when netplay is wired up.
+option(GBRT_NETPLAY "Build the online netplay relay client (links libcurl)" OFF)
+if(GBRT_NETPLAY)
+    find_package(CURL REQUIRED)
+    target_link_libraries(gbrt PUBLIC CURL::libcurl)
+    target_compile_definitions(gbrt PUBLIC GBRT_NETPLAY=1)
+endif()
 
 # Game Boy Camera (MBC 0xFC) — webcam capture. Off by default because the
 # only cart that needs it is GB-Recomp/gbcamera. Each consumer that needs

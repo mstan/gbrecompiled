@@ -225,6 +225,48 @@ save/load covers full ctx.
 Diff = `accuracy/tools/audio_drift_diff.py`. Both streams captured deterministically
 from t=0 (capture-from-boot, not arm-at-probe-time).
 
+> **NOTE (2026-06-28):** the headline numbers below were the *first* run with the recomp in
+> AUTO mode (SGB engine on for Red) vs a **DMG** oracle — an oracle-model mismatch (see the
+> SGB reclassification above). The **valid, model-matched baseline** is the forced-DMG run:
+> **spectral cosine 0.945, onset xcorr 0.910, +11.6 ms lag, 96 % onsets matched, pitch |median|
+> 4.7 c / within-50c 65 %** (Pokémon Red, `GBRT_HARDWARE_MODE=dmg`). Read the ledger first.
+
+### Axis 5b status ledger (current state — instrumented & baselined, NOT closed)
+
+**✅ Done — apparatus + one slice.** SameBoy audio oracle (S16 + guest-cycle sidecar), drift
+metric (log-mel cosine + onset histogram + HPS pitch), cycle/state comparator, model-matched
+DMG harness (`GBRT_HARDWARE_MODE=dmg`), negative-control-validated. Baseline: Pokémon Red/Blue,
+DMG, 20 s title music, no input → cosine ~0.95 / onset xcorr ~0.91 / 96 % onsets / pitch ~4.7 c.
+Steady cycle pacing matches SameBoy (70224 T/frame). −824 ms "lag" resolved (was the SGB path).
+
+**⚠️ Known-divergent, NOT fixed (and not yet isolated per-channel):**
+1. Per-instruction APU sync (not sample-accurate) → the ~22 ms onset jitter. `audio.c:757,842`.
+2. No band-limited resample (point-sampled 44.1k) → aliasing; part of why cosine <1.0. `audio.c:842`.
+3. `±1×vol` mixer vs real 4-bit DAC; two inconsistent output models. `audio.c:862` vs `:284-315`.
+4. CH3 wave-RAM-write-while-on quirk (`audio.c:599`); CH1 sweep shift=0 overflow (`audio.c:389`).
+5. "General glitching" (CLAUDE.md) — never isolated.
+
+**❓ Known-UNMEASURED (coverage gaps):**
+- **Per-channel divergence** — we diff the final mix only; cosine 0.95 doesn't localize which of
+  CH1–4 is wrong. → **active next step (per-channel tap).**
+- Only the title theme, no input → gameplay/battle SFX, channel triggers under load, CH4 noise /
+  CH3 wave barely exercised. Pitch p90 ~1460 c (~30 % of frames off) is partly CH4 — uncharacterized.
+- Only DMG → CGB audio path (Yellow/Crystal: PCM12/PCM34, double-speed APU, the 2nd digital model).
+- Only Red/Blue (one engine) → Tetris, Super Mario Land (heavier sweep/noise).
+- Sample-exact GREEN gate — distance to bit-exact never measured (only drift-tolerant).
+- SGB-mode audio (SGB jingle / border audio; Red↔Blue SGB asymmetry) — needs a SameBoy SGB2 oracle.
+- The +11.6 ms / ~22 ms residuals — measured, not root-caused.
+
+**Adjacent (touched, not closed):** Axis 2 cycle timing — frame-level pacing matches, but
+sub-instruction Δcycle accuracy (mooneye `*_timing`) not yet measured (comparator is frame-granular,
+not anchor-based sub-block); state-fork alignment still ±frames.
+
+**Active next step:** per-channel tap — capture CH1–4 pre-mix on both recomp and a SameBoy
+per-channel hook, so 0.95 becomes "CH1 0.99 / CH3 0.97 / CH4 0.6" and the error is localized before
+fixing sync/resample/mixer. *(in progress)*
+
+---
+
 | Metric | Value | Reading |
 |---|---|---|
 | **Spectral similarity** (log-mel cosine, drift-tolerant headline) | **mean 0.921, p50 0.939, p10 0.831** | Same music; ~92% spectrally close through different DAC models. |

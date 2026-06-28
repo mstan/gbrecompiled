@@ -82,3 +82,16 @@ TCP oracle tooling). All four channels modeled with per-channel structs
   (`GBRECOMP_BENCHMARK=1`, dummy SDL drivers) with `--debug-audio` → `debug_audio.raw`
   (the always-on sample chokepoint at `audio.c:918`, dumped from boot).
 - Both are capture-from-boot (doctrine-compliant: never arm-then-time).
+- **Model-match:** SGB-enhanced carts run the recomp's SGB engine under AUTO; the harness forces
+  `GBRT_HARDWARE_MODE=dmg` so the comparison matches the DMG oracle (see burndown SGB section).
+
+## §6 Per-channel comparison (active)
+
+The mixed-stream cosine (~0.95) does not localize error. Per-channel tap:
+- **Recomp:** emit CH1–4 pre-mix digital output (0–15 scaled) alongside the mix, from the chokepoint
+  in `gb_audio_step`/`gb_audio_callback` (`runtime/src/audio.c:852-919`) gated by a debug flag.
+- **Oracle (SameBoy):** read each channel's current output in the APU sample callback
+  (`Core/apu.c` per-channel `current_sample`/DAC), one column per channel.
+- **Diff:** run `audio_drift_diff.py` per channel → a cosine/onset/pitch row per CH1–4, so the
+  aggregate 0.95 decomposes (e.g. CH1 0.99 / CH3 0.97 / CH4 0.6) and the worst channel is fixed
+  first. Drift-tolerant per channel (amplitude-normalized); CH4 (noise) uses energy-envelope, not pitch.

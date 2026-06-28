@@ -313,11 +313,26 @@ structurally correct: trigger resets volume to `nr12>>4` (`audio.c:669-677`); en
 (`:425-429`), length 256 Hz (`:382-398`), frame sequencer 512 Hz / no double-clock
 (`:1020-1042`, DIV advances at T-rate `gbrt.c:3555`). So the bug is **not** in the obvious code.
 
-**Next step:** add an internal per-channel state trace (`enabled` / `volume` / `length_counter`
-per frame) to the recomp + a matching SameBoy hook, align on guest cycles, and find the first
-frame where a channel the oracle keeps enabled gets silenced in the recomp — that pins the
-note-drop (length-counter edge quirk, DAC-disable, or sound-engine write-timing). Needs internal
-instrumentation on both sides (not crackable by inspection).
+**ROOT CAUSE — length-counter divergence (PINNED 2026-06-28).** Internal per-channel state trace
+(recomp `audio.c` `enabled`/`volume`/`length_counter`/`dac`/`length_enabled` via `GBRT_AUDIO_PCH`;
+oracle `gb_audio_oracle.c` `length_enabled`), diffed by `_pch_state.py` / `_pch_state2.py`:
+- Of the square/noise samples silent-while-oracle-sounding, **65–72 % are the channel DISABLED**
+  (not envelope-zero, not duty); of those disables, **95–100 % are `length_counter==0` with
+  `length_enabled` set and DAC on** — i.e. the **length counter expired and cut the note**. Wave
+  is unaffected (its `length_enabled` is 0 % on both).
+- The recomp holds `length_enabled` asserted far more than SameBoy (recomp 94/99/99 % for
+  CH1/2/4 vs SameBoy **27/48/48 %**), and its counter reaches 0 where SameBoy's doesn't — so the
+  recomp silences notes SameBoy sustains.
+- **Verdict:** the recomp's length handling (`audio.c:671/709/759` naive `= value & 0x40`, simple
+  256 Hz countdown, trigger reload `:670`) does not implement GB's **obscure length-counter
+  behavior** (length-enable extra-clock quirk, trigger-with-length-enable, NRx1 reload timing)
+  that SameBoy does. Pokémon's engine (`pokered/audio/engine_1.asm:946` `or $80` "counter mode")
+  leans on that behavior.
+
+**Fix (deferred to a focused task):** reimplement the GB length-counter quirks in `audio.c` to
+match hardware/SameBoy, validated against the mooneye `length`/`length_*` test ROMs (not just
+Pokémon), then re-run `_pch_state.py` — the disabled-while-sounding fraction should collapse.
+This is the lever for the square/noise note-drop (the last big chunk of the mix residual).
 
 ---
 

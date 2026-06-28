@@ -26,6 +26,7 @@
 static FILE     *g_out;
 static FILE     *g_cyc;
 static FILE     *g_pch;                /* per-channel: int16 x4 (CH1,CH2,CH3,CH4) per sample */
+static FILE     *g_lenen;              /* per-channel length_enabled: uint8 x4 per sample */
 static uint64_t  g_guest_cycles = 0;   /* accumulated 8 MHz ticks */
 static uint64_t  g_sample_index = 0;
 static uint64_t  g_last_logged_frame = (uint64_t)-1;
@@ -45,6 +46,15 @@ static void on_sample(GB_gameboy_t *gb, GB_sample_t *sample)
             (int16_t)gb->apu.samples[GB_NOISE],
         };
         fwrite(p, sizeof(int16_t), 4, g_pch);
+    }
+    if (g_lenen) {
+        uint8_t le[4] = {
+            (uint8_t)gb->apu.square_channels[GB_SQUARE_1].length_enabled,
+            (uint8_t)gb->apu.square_channels[GB_SQUARE_2].length_enabled,
+            (uint8_t)gb->apu.wave_channel.length_enabled,
+            (uint8_t)gb->apu.noise_channel.length_enabled,
+        };
+        fwrite(le, 1, 4, g_lenen);
     }
     g_sample_index++;
 }
@@ -99,6 +109,9 @@ int main(int argc, char **argv)
             char pch_path[1024];
             snprintf(pch_path, sizeof(pch_path), "%s.pch", out_path);
             g_pch = fopen(pch_path, "wb");
+            char le_path[1024];
+            snprintf(le_path, sizeof(le_path), "%s.lenen", out_path);
+            g_lenen = fopen(le_path, "wb");
         }
     }
 
@@ -123,6 +136,7 @@ int main(int argc, char **argv)
     fflush(g_out); fclose(g_out);
     if (g_cyc) { fflush(g_cyc); fclose(g_cyc); }
     if (g_pch) { fflush(g_pch); fclose(g_pch); }
+    if (g_lenen) { fflush(g_lenen); fclose(g_lenen); }
     fprintf(stderr,
             "[oracle] model=%s rom=%s\n"
             "[oracle] wrote %llu stereo samples (%.3f s @ %d Hz) to %s\n"

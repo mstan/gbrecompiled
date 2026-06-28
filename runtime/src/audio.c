@@ -36,6 +36,10 @@ static bool g_debug_trace_first_nonzero_logged = false;
  * interleaved int16 x4 per sample (CH1,CH2,CH3,CH4 post-DAC-gate contributions). */
 static bool g_audio_pch_enabled = false;
 static FILE* g_debug_pch_file = NULL;
+/* Per-channel internal state trace (same env flag): debug_audio_pchstate.raw,
+ * int16 x4 per sample = (enabled<<8) | volume. Distinguishes a silenced channel
+ * (enabled=0 -> note dropped by length/sweep/DAC) from envelope-zero (vol=0). */
+static FILE* g_debug_pchstate_file = NULL;
 static int16_t g_debug_pch_buffer[DEBUG_AUDIO_BUFFER_FRAMES * 4];
 static int g_debug_pch_buffer_count = 0;
 
@@ -74,6 +78,7 @@ static void audio_debug_capture_reset(void) {
     }
     audio_debug_pch_flush();
     if (g_debug_pch_file) { fclose(g_debug_pch_file); g_debug_pch_file = NULL; }
+    if (g_debug_pchstate_file) { fclose(g_debug_pchstate_file); g_debug_pchstate_file = NULL; }
     g_debug_sample_count = 0;
     g_debug_audio_buffer_count = 0;
     g_debug_trace_total_samples = 0;
@@ -1001,11 +1006,29 @@ void gb_audio_step(GBContext* ctx, uint32_t cycles) {
                         g_debug_pch_buffer_count++;
                         if (g_debug_pch_buffer_count >= DEBUG_AUDIO_BUFFER_FRAMES) audio_debug_pch_flush();
                     }
+                    if (!g_debug_pchstate_file) g_debug_pchstate_file = fopen("debug_audio_pchstate.raw", "wb");
+                    if (g_debug_pchstate_file) {
+                        /* 8 int16/sample: [4x enabled<<8|vol][4x len|dac<<12|len_en<<13] */
+                        int dac1 = (apu->ch1.nr12 & 0xF8) != 0, dac2 = (apu->ch2.nr22 & 0xF8) != 0;
+                        int dac3 = (apu->ch3.nr30 & 0x80) != 0, dac4 = (apu->ch4.nr42 & 0xF8) != 0;
+                        int16_t st[8] = {
+                            (int16_t)((apu->ch1.enabled ? 0x100 : 0) | (apu->ch1.volume & 0xF)),
+                            (int16_t)((apu->ch2.enabled ? 0x100 : 0) | (apu->ch2.volume & 0xF)),
+                            (int16_t)((apu->ch3.enabled ? 0x100 : 0)),
+                            (int16_t)((apu->ch4.enabled ? 0x100 : 0) | (apu->ch4.volume & 0xF)),
+                            (int16_t)((apu->ch1.length_counter & 0xFF) | (dac1<<12) | (apu->ch1.length_enabled<<13)),
+                            (int16_t)((apu->ch2.length_counter & 0xFF) | (dac2<<12) | (apu->ch2.length_enabled<<13)),
+                            (int16_t)((apu->ch3.length_counter & 0xFF) | (dac3<<12) | (apu->ch3.length_enabled<<13)),
+                            (int16_t)((apu->ch4.length_counter & 0xFF) | (dac4<<12) | (apu->ch4.length_enabled<<13)),
+                        };
+                        fwrite(st, sizeof(int16_t), 8, g_debug_pchstate_file);
+                    }
                 }
                 if (g_debug_sample_count >= g_debug_capture_limit_samples) {
                     audio_debug_capture_flush();
                     audio_debug_pch_flush();
                     if (g_debug_pch_file) { fclose(g_debug_pch_file); g_debug_pch_file = NULL; }
+                    if (g_debug_pchstate_file) { fclose(g_debug_pchstate_file); g_debug_pchstate_file = NULL; }
                     printf("[AUDIO] Debug capture complete. Wrote %d samples to debug_audio.raw\n", g_debug_sample_count);
                     fclose(g_debug_audio_file);
                     g_debug_audio_file = NULL;

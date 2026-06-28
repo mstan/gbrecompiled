@@ -242,7 +242,8 @@ Steady cycle pacing matches SameBoy (70224 T/frame). −824 ms "lag" resolved (w
 **⚠️ Known-divergent, NOT fixed (and not yet isolated per-channel):**
 1. Per-instruction APU sync (not sample-accurate) → the ~22 ms onset jitter. `audio.c:757,842`.
 2. No band-limited resample (point-sampled 44.1k) → aliasing; part of why cosine <1.0. `audio.c:842`.
-3. `±1×vol` mixer vs real 4-bit DAC; two inconsistent output models. `audio.c:862` vs `:284-315`.
+3. ~~`±1×vol` mixer vs real 4-bit DAC~~ — **FIXED**: output stage unified on the 4-bit DAC digital
+   sum (see Mixer fix below). Residual: square/noise per-channel amplitude ~1.9×/3.4× off (next).
 4. CH3 wave-RAM-write-while-on quirk (`audio.c:599`); CH1 sweep shift=0 overflow (`audio.c:389`).
 5. "General glitching" (CLAUDE.md) — never isolated.
 
@@ -282,8 +283,23 @@ CH4 ~2.5×, CH1 ~1.6×). **So the fix order is: (1) sample-accurate register-wri
 lever, targets CH3/CH2 onset jitter; (2) unify mixer on the 4-bit DAC for correct channel balance.
 Channel waveform generation itself needs no work.**
 
-**Next step:** sample-accurate APU register-write timing (Axis-2 per-instruction tick), re-run
-per-channel diff — CH3/CH2 onset xcorr should climb toward CH4's 0.92+.
+**Mixer fix — 4-bit DAC unification (DONE 2026-06-28).** The per-channel data redirected the
+fix: all channels aligned at the *same* +11.6 ms lag with ~1.0 cosine, so the residual was
+**mix balance**, not timing. Replaced the `±1×vol` output model in `audio.c` with each channel's
+true 4-bit DAC digital (0-15, DAC-gated) summed per NR51 side (matches SameBoy
+`update_square_sample`/`update_wave_sample`: square `{0,vol}`, wave `sample>>shift`, DAC
+`(0xF−value*2)·vol` applied uniformly). Result (Pokémon Red, DMG):
+- **Mixed log-mel cosine 0.945 → 0.951** (p50 0.939 → **0.966**); raw-waveform corr **−0.30 → +0.21**.
+- **CH3 wave balance now exact** (per-channel RMS ratio 1.92× → **1.00×**).
+- Exposed (previously masked by the `±1×vol` 2× square swing): **square ~1.9× / noise ~3.4×**
+  per-channel amplitude differ vs the oracle. Cause not yet isolated — **envelope volume** vs
+  **channel-activity/trigger timing** over the window (spectral cosine stays 1.0, so it's an
+  amplitude/activity effect, not waveform shape). Logged in `runtime/src/audio.log`.
+
+**Next step:** isolate the square/noise amplitude gap — compare per-channel envelope volume
+(`apu->chN.volume` vs SameBoy `current_volume`) at matched cycles, and channel active-sample
+counts, to split envelope-volume from trigger/activity timing. (Sample-accurate register-write
+timing remains the lever for the sub-frame onset residual, lower priority than the amplitude gap.)
 
 ---
 

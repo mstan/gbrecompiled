@@ -872,68 +872,59 @@ void gb_audio_step(GBContext* ctx, uint32_t cycles) {
         
         int16_t left = 0;
         int16_t right = 0;
+        /* Per-channel 4-bit DAC digital output (0-15), 0 when the channel's DAC is
+         * off. Real hardware sums these per NR51 side. This replaces the legacy
+         * ±1×vol model, which doubled the square peak-to-peak swing and under-
+         * weighted wave/noise — verified per-channel vs SameBoy gb->apu.samples[]
+         * (CH1 0.99–1.00 cosine but mix-balance ratios off: CH1 1.6× vs CH4 2.5×).
+         * The aggregate DC offset is removed by the high-pass below, as the DAC
+         * output coupling does on hardware. */
         int ch1_mix = 0;
         int ch2_mix = 0;
         int ch3_mix = 0;
         int ch4_mix = 0;
-        
-        /* Channel 1 Output */
-        if (apu->ch1.enabled && (apu->ch1.nr12 & 0xF0)) { // DAC ON
-             int duty = (apu->ch1.nr11 >> 6) & 3;
-             int output = DUTY_CYCLES[duty][apu->ch1.wave_pos] ? 1 : -1;
-             ch1_mix = apu->ch1.volume * output;
-             if (apu->nr51 & 0x01) right += ch1_mix;
-             if (apu->nr51 & 0x10) left += ch1_mix;
+
+        if (apu->ch1.enabled && (apu->ch1.nr12 & 0xF0)) { /* DAC on */
+            int duty = (apu->ch1.nr11 >> 6) & 3;
+            ch1_mix = DUTY_CYCLES[duty][apu->ch1.wave_pos] ? apu->ch1.volume : 0;
         }
-        
-        /* Channel 2 Output */
-        if (apu->ch2.enabled && (apu->ch2.nr22 & 0xF0)) { // DAC ON
-             int duty = (apu->ch2.nr21 >> 6) & 3;
-             int output = DUTY_CYCLES[duty][apu->ch2.wave_pos] ? 1 : -1;
-             ch2_mix = apu->ch2.volume * output;
-             if (apu->nr51 & 0x02) right += ch2_mix;
-             if (apu->nr51 & 0x20) left += ch2_mix;
+        if (apu->ch2.enabled && (apu->ch2.nr22 & 0xF0)) {
+            int duty = (apu->ch2.nr21 >> 6) & 3;
+            ch2_mix = DUTY_CYCLES[duty][apu->ch2.wave_pos] ? apu->ch2.volume : 0;
+        }
+        if (apu->ch3.enabled && (apu->ch3.nr30 & 0x80)) {
+            uint8_t byte = apu->ch3.wave_ram[apu->ch3.wave_pos / 2];
+            uint8_t sample = (apu->ch3.wave_pos & 1) ? (byte & 0x0F) : (byte >> 4);
+            uint8_t vol_code = (apu->ch3.nr32 >> 5) & 3;
+            switch (vol_code) {
+                case 0: sample = 0; break;   /* mute */
+                case 1: break;               /* 100% */
+                case 2: sample >>= 1; break; /* 50% */
+                case 3: sample >>= 2; break; /* 25% */
+            }
+            ch3_mix = sample;
+        }
+        if (apu->ch4.enabled && (apu->ch4.nr42 & 0xF0)) {
+            ch4_mix = (~apu->ch4.lfsr & 1) ? apu->ch4.volume : 0;
         }
 
-        /* Channel 3 Output */
-        if (apu->ch3.enabled && (apu->ch3.nr30 & 0x80)) { // DAC ON
-             /* Get wave sample (4-bit) */
-             uint8_t byte = apu->ch3.wave_ram[apu->ch3.wave_pos / 2];
-             uint8_t sample = (apu->ch3.wave_pos & 1) ? (byte & 0x0F) : (byte >> 4);
-             
-             /* Apply volume shift */
-             uint8_t vol_code = (apu->ch3.nr32 >> 5) & 3;
-             switch (vol_code) {
-                 case 0: sample = 8; break; /* Mute => centered silence */
-                 case 1: break; /* 100% */
-                 case 2: sample >>= 1; break; /* 50% */
-                 case 3: sample >>= 2; break; /* 25% */
-             }
+        int left_sum = 0, right_sum = 0;
+        if (apu->nr51 & 0x01) right_sum += ch1_mix;
+        if (apu->nr51 & 0x10) left_sum  += ch1_mix;
+        if (apu->nr51 & 0x02) right_sum += ch2_mix;
+        if (apu->nr51 & 0x20) left_sum  += ch2_mix;
+        if (apu->nr51 & 0x04) right_sum += ch3_mix;
+        if (apu->nr51 & 0x40) left_sum  += ch3_mix;
+        if (apu->nr51 & 0x08) right_sum += ch4_mix;
+        if (apu->nr51 & 0x80) left_sum  += ch4_mix;
 
-             ch3_mix = (int)sample - 8;
-             if (apu->nr51 & 0x04) right += ch3_mix;
-             if (apu->nr51 & 0x40) left += ch3_mix;
-        }
-
-        /* Channel 4 Output */
-        if (apu->ch4.enabled && (apu->ch4.nr42 & 0xF0)) { // DAC ON
-             int output = !(apu->ch4.lfsr & 1) ? 1 : -1;
-             ch4_mix = apu->ch4.volume * output;
-             if (apu->nr51 & 0x08) right += ch4_mix;
-             if (apu->nr51 & 0x80) left += ch4_mix;
-        }
-        
-        /* Master Volume / Scaling */
-        /* Currently values are 0-15 per channel, mixed. Max approx 60. */
-        /* Scale to int16 range */
-        /* Max possible value: 15 * 4 * 8 = 480. 
-           32767 / 480 = 68. 
-           Using 64 provides good volume without clipping. */
+        /* Master volume (NR50, 0-7 per side, +1) then scale to int16. Worst case
+         * 60 (4ch × 15) × 8 × 64 = 30720 < 32767; the high-pass only attenuates. */
         int vol_l = (apu->nr50 >> 4) & 7;
         int vol_r = (apu->nr50 & 7);
-        
-        int32_t mixed_left = left * (vol_l + 1) * 64;
-        int32_t mixed_right = right * (vol_r + 1) * 64;
+
+        int32_t mixed_left  = left_sum  * (vol_l + 1) * 64;
+        int32_t mixed_right = right_sum * (vol_r + 1) * 64;
         left = audio_apply_highpass(mixed_left, &apu->hp_prev_in_l, &apu->hp_prev_out_l);
         right = audio_apply_highpass(mixed_right, &apu->hp_prev_in_r, &apu->hp_prev_out_r);
         apu->last_output_left = left;

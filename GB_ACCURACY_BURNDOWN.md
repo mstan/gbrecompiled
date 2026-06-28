@@ -155,10 +155,21 @@ RTC, MBC1 0x20/40/60 quirk, MBC2 512×4 echo.
 `ppu_tick()` walks modes 0/1/2/3 (`ppu.c:773-860`); LY/LYC + rising-edge STAT IRQ
 blocking; registers latched at mode-3 start (scanline-granular).
 
-- [ ] **BUG:** variable mode-3/mode-0 durations computed (`ppu.c:791-820`) but never used —
-      `ppu.c:817` still compares the hardcoded `CYCLES_PIXEL_DRAW`. Scanlines don't sum.
-      Cross-ref Mealybug; validate framebuffer diff vs SameBoy.
-- [ ] Sub-scanline / mid-line effects (SCX/SCY/window mid-line) — not modeled.
+- [x] **Framebuffer-diff oracle slice stood up (2026-06-28).** `accuracy/oracle/gb_fb_oracle.c`
+      (SameBoy → P6 PPM at frame N, skip-boot DMG) vs the recomp's `--dump-frames` PPM (works
+      headless in benchmark mode), diffed palette-independently by `accuracy/tools/fb_diff.py`
+      (ranks gray levels by luminance → shade indices). **Result: Pokémon Red is pixel-perfect
+      vs SameBoy** — 0.000 % differing pixels on frames 100/250/500/560; frame 400's 0.33 % was
+      purely the known ~1-frame numbering offset on an animated sprite (`rec[400] == ora[401]`
+      exactly). So the recomp's PPU **rendering** matches SameBoy for Pokémon Red.
+- [ ] **BUG (not surfaced by Pokémon):** variable mode-3/mode-0 durations computed (`ppu.c:791-820`)
+      but never used — `ppu.c:817` compares hardcoded `CYCLES_PIXEL_DRAW`. This is a **mode-timing /
+      STAT-interrupt** bug: it shifts *when* mode transitions/STAT IRQs fire, **not** the scanline
+      pixels — so it is invisible in a framebuffer diff of games without mid-frame raster effects
+      (Pokémon's intro/title don't use them). **To surface it visually, run the Mealybug Tearoom
+      test ROMs** (designed so the framebuffer DIFFERS on PPU-timing errors) through this same
+      `gb_fb_oracle` + `fb_diff` slice; also compare STAT-IRQ/LY-at-cycle directly (Axis 3).
+- [ ] Sub-scanline / mid-line effects (SCX/SCY/window mid-line) — not modeled; Mealybug exposes these.
 
 ### 5b — Audio / APU  ← FIRST ACTIVE SLICE        Status: APPROXIMATE
 

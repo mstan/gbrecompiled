@@ -38,7 +38,7 @@ for src in "${CORE_SRCS[@]}" "${WIN_SRCS[@]}"; do
 done
 
 echo "[build] compiling + linking oracle harnesses..."
-for harness in gb_audio_oracle gb_state_oracle; do
+for harness in gb_audio_oracle gb_state_oracle gb_fb_oracle; do
     gcc "${CFLAGS[@]}" -c "$HERE/$harness.c" -o "$OBJ/$harness.o"
     gcc "${CFLAGS[@]}" "${objs[@]}" "$OBJ/$harness.o" -o "$HERE/$harness.exe" -lm
     echo "[build] OK -> $HERE/$harness.exe"

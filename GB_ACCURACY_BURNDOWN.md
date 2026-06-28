@@ -296,10 +296,28 @@ true 4-bit DAC digital (0-15, DAC-gated) summed per NR51 side (matches SameBoy
   **channel-activity/trigger timing** over the window (spectral cosine stays 1.0, so it's an
   amplitude/activity effect, not waveform shape). Logged in `runtime/src/audio.log`.
 
-**Next step:** isolate the square/noise amplitude gap — compare per-channel envelope volume
-(`apu->chN.volume` vs SameBoy `current_volume`) at matched cycles, and channel active-sample
-counts, to split envelope-volume from trigger/activity timing. (Sample-accurate register-write
-timing remains the lever for the sub-frame onset residual, lower priority than the amplitude gap.)
+**Square/noise gap isolated to NOTE-DROP, not volume (DONE 2026-06-28).**
+`accuracy/tools/_pch_amplitude.py` + `_pch_envelope.py` decompose the per-channel `.pch` streams:
+
+| Channel | peak level when **both** sounding (r/o) | windows oracle plays but recomp **silent** |
+|---|---|---|
+| CH1 square | 9.3 / 9.5 (ratio **1.02**) | **36 %** |
+| CH2 square | 10.2 / 10.2 (ratio **1.00**) | **50 %** |
+| CH4 noise  | 7.5 / 7.7 (ratio **1.03**) | **53 %** |
+
+**Finding:** when the recomp plays a channel its volume is correct (ratio ~1.0) — **not** an
+envelope-volume or mixer bug. The residual is that **square/noise notes go silent ~36–53 % of
+the windows the oracle is sounding** (notes dropped / cut early). Wave is unaffected (no
+envelope/length cutting in this music). Verified by inspection that the obvious paths are
+structurally correct: trigger resets volume to `nr12>>4` (`audio.c:669-677`); envelope 64 Hz
+(`:425-429`), length 256 Hz (`:382-398`), frame sequencer 512 Hz / no double-clock
+(`:1020-1042`, DIV advances at T-rate `gbrt.c:3555`). So the bug is **not** in the obvious code.
+
+**Next step:** add an internal per-channel state trace (`enabled` / `volume` / `length_counter`
+per frame) to the recomp + a matching SameBoy hook, align on guest cycles, and find the first
+frame where a channel the oracle keeps enabled gets silenced in the recomp — that pins the
+note-drop (length-counter edge quirk, DAC-disable, or sound-engine write-timing). Needs internal
+instrumentation on both sides (not crackable by inspection).
 
 ---
 

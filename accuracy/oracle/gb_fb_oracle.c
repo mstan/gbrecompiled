@@ -47,10 +47,12 @@ int main(int argc, char **argv)
     GB_set_vblank_callback(&gb, on_vblank);
     skip_boot_dmg(&gb);
 
-    long frame = 0;
-    while (frame < target) {
-        GB_run(&gb);
-        if (g_vblank) { g_vblank = 0; frame++; }
+    /* Drive exactly `target` frames via GB_run_frame — robust (each call advances
+     * one frame's worth of cycles regardless of the ROM's vblank pattern, so it
+     * can't hang on test ROMs that suppress NORMAL_FRAME vblanks). */
+    (void)on_vblank; (void)g_vblank;
+    for (long frame = 0; frame < target; frame++) {
+        GB_run_frame(&gb);
     }
 
     unsigned w = GB_get_screen_width(&gb), h = GB_get_screen_height(&gb);

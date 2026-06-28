@@ -169,7 +169,20 @@ blocking; registers latched at mode-3 start (scanline-granular).
       (Pokémon's intro/title don't use them). **To surface it visually, run the Mealybug Tearoom
       test ROMs** (designed so the framebuffer DIFFERS on PPU-timing errors) through this same
       `gb_fb_oracle` + `fb_diff` slice; also compare STAT-IRQ/LY-at-cycle directly (Axis 3).
-- [ ] Sub-scanline / mid-line effects (SCX/SCY/window mid-line) — not modeled; Mealybug exposes these.
+- [x] **Test-ROM harness + first Mealybug result (2026-06-28).** The recomp is a *per-ROM* static
+      recompiler, so test ROMs must be recompiled. `accuracy/oracle/run_testrom.sh` automates it:
+      `gbrecomp` the ROM → point `GBRT_DIR` at the worktree runtime → build → **pre-fill `rom.cfg`**
+      (the generated launcher loads the ROM from a file with a SHA-256 check; `rom.cfg` next to the
+      exe supplies the path headless) → run `--dump-frames` → `fb_diff`. Mealybug ROMs at
+      `F:/Projects/mealybug-tearoom-tests` (prebuilt + `expected/DMG-blob/*.png` ground truth).
+      **`m3_bgp_change` (BGP change mid-mode-3): recomp vs DMG ground truth = 26.9 % differing
+      pixels across all 144 rows** — the recomp renders each scanline with a single BGP, so it
+      cannot reproduce the mid-scanline palette change. This **quantifies the sub-scanline gap**.
+      *(Caveat: `gb_fb_oracle` renders blank on some Mealybug ROMs under skip-boot — a harness nit;
+      the bundled `expected/` PNGs are the proper Mealybug ground truth and are used instead.)*
+- [ ] **Sub-scanline / mid-line effects (SCX/SCY/window/BGP mid-line) — NOT modeled** (now measured:
+      m3_bgp_change 26.9 % off). The recomp's scanline renderer needs per-dot/fetcher rendering to
+      pass the Mealybug `m3_*` suite. Run the full `m3_*` set through `run_testrom.sh` to scope it.
 
 ### 5b — Audio / APU  ← FIRST ACTIVE SLICE        Status: APPROXIMATE
 

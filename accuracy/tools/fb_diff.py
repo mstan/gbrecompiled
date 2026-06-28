@@ -9,13 +9,24 @@ import numpy as np
 
 def load_ppm(path):
     with open(path, "rb") as f:
-        assert f.readline().strip() == b"P6", "not P6"
-        line = f.readline()
-        while line.startswith(b"#"):
-            line = f.readline()
-        w, h = map(int, line.split())
-        assert int(f.readline().strip()) == 255
-        data = np.frombuffer(f.read(w * h * 3), dtype=np.uint8).reshape(h, w, 3)
+        raw = f.read()
+    assert raw[:2] == b"P6", "not P6"
+    # tokenize header (magic, w, h, maxval), skipping #-comments and whitespace
+    toks, i, n = [], 2, len(raw)
+    while len(toks) < 3:
+        while i < n and raw[i:i+1].isspace():
+            i += 1
+        if raw[i:i+1] == b"#":
+            while i < n and raw[i:i+1] != b"\n":
+                i += 1
+            continue
+        j = i
+        while j < n and not raw[j:j+1].isspace():
+            j += 1
+        toks.append(raw[i:j]); i = j
+    w, h, maxv = int(toks[0]), int(toks[1]), int(toks[2])
+    i += 1  # single whitespace after maxval
+    data = np.frombuffer(raw[i:i + w*h*3], dtype=np.uint8).reshape(h, w, 3)
     return data
 
 def to_shades(img):

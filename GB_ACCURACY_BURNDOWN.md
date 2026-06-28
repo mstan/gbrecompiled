@@ -261,9 +261,29 @@ Steady cycle pacing matches SameBoy (70224 T/frame). −824 ms "lag" resolved (w
 sub-instruction Δcycle accuracy (mooneye `*_timing`) not yet measured (comparator is frame-granular,
 not anchor-based sub-block); state-fork alignment still ±frames.
 
-**Active next step:** per-channel tap — capture CH1–4 pre-mix on both recomp and a SameBoy
-per-channel hook, so 0.95 becomes "CH1 0.99 / CH3 0.97 / CH4 0.6" and the error is localized before
-fixing sync/resample/mixer. *(in progress)*
+**Per-channel localization (DONE 2026-06-28).** Per-channel pre-mix tap on both sides
+(recomp `debug_audio_pch.raw` via `GBRT_AUDIO_PCH=1` at `audio.c` mix chokepoint; oracle
+`<out>.pch` from SameBoy `gb->apu.samples[ch]`), diffed by `accuracy/tools/perchannel_diff.py`.
+Pokémon Red, DMG, 20 s:
+
+| Channel | spectral cosine | pitch | onset xcorr |
+|---|---|---|---|
+| CH1 square | **1.000** | |med| 0 c, 91 % <50c | 0.854 |
+| CH2 square | **0.991** | |med| 0 c, 97 % <50c | 0.738 |
+| CH3 wave  | **1.000** | |med| 0 c, 99 % <50c | 0.684 |
+| CH4 noise | **1.000** | energy-env corr 0.984 | 0.921 |
+
+**Finding:** every channel's spectral content + pitch is near-perfect (0.99–1.00 cosine, ~0 c) —
+the APU channel *generation* is accurate. The mixed-stream pitch tail (p90 ~1460 c) was a
+**mixing artifact**, not per-channel error. The real residual is **timing** (per-channel onset
+xcorr 0.68–0.92, worst on **CH3 wave** and **CH2**), consistent with the per-instruction APU sync
+(`audio.c:757,842`), plus mix-balance from the `±1×vol` model (per-channel raw-RMS ratios differ:
+CH4 ~2.5×, CH1 ~1.6×). **So the fix order is: (1) sample-accurate register-write timing — biggest
+lever, targets CH3/CH2 onset jitter; (2) unify mixer on the 4-bit DAC for correct channel balance.
+Channel waveform generation itself needs no work.**
+
+**Next step:** sample-accurate APU register-write timing (Axis-2 per-instruction tick), re-run
+per-channel diff — CH3/CH2 onset xcorr should climb toward CH4's 0.92+.
 
 ---
 

@@ -25,15 +25,27 @@
 
 static FILE     *g_out;
 static FILE     *g_cyc;
+static FILE     *g_pch;                /* per-channel: int16 x4 (CH1,CH2,CH3,CH4) per sample */
 static uint64_t  g_guest_cycles = 0;   /* accumulated 8 MHz ticks */
 static uint64_t  g_sample_index = 0;
 static uint64_t  g_last_logged_frame = (uint64_t)-1;
 
 static void on_sample(GB_gameboy_t *gb, GB_sample_t *sample)
 {
-    (void)gb;
     int16_t buf[2] = { sample->left, sample->right };
     fwrite(buf, sizeof(int16_t), 2, g_out);
+    if (g_pch) {
+        /* gb->apu.samples[ch] = each channel's current 4-bit digital output (0-15,
+         * 0 when DAC off). Drift diff is amplitude-normalized so the unipolar
+         * (oracle) vs bipolar (recomp) encoding difference washes out. */
+        int16_t p[4] = {
+            (int16_t)gb->apu.samples[GB_SQUARE_1],
+            (int16_t)gb->apu.samples[GB_SQUARE_2],
+            (int16_t)gb->apu.samples[GB_WAVE],
+            (int16_t)gb->apu.samples[GB_NOISE],
+        };
+        fwrite(p, sizeof(int16_t), 4, g_pch);
+    }
     g_sample_index++;
 }
 
@@ -80,6 +92,15 @@ int main(int argc, char **argv)
     snprintf(cyc_path, sizeof(cyc_path), "%s.cyc", out_path);
     g_cyc = fopen(cyc_path, "wb");
     if (g_cyc) fprintf(g_cyc, "# sample_index guest_cycles_8mhz\n");
+    /* Per-channel stream is opt-in via env GBRT_AUDIO_PCH (matches the recomp flag). */
+    {
+        const char* pch = getenv("GBRT_AUDIO_PCH");
+        if (pch && *pch && strcmp(pch, "0") != 0) {
+            char pch_path[1024];
+            snprintf(pch_path, sizeof(pch_path), "%s.pch", out_path);
+            g_pch = fopen(pch_path, "wb");
+        }
+    }
 
     /* DMG: 4.194304 MHz T-cycles; SameBoy counts in 8 MHz units (2x). */
     const uint64_t units_per_sec = 8388608ULL;
@@ -101,6 +122,7 @@ int main(int argc, char **argv)
 
     fflush(g_out); fclose(g_out);
     if (g_cyc) { fflush(g_cyc); fclose(g_cyc); }
+    if (g_pch) { fflush(g_pch); fclose(g_pch); }
     fprintf(stderr,
             "[oracle] model=%s rom=%s\n"
             "[oracle] wrote %llu stereo samples (%.3f s @ %d Hz) to %s\n"

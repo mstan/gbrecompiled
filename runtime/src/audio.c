@@ -31,6 +31,20 @@ static uint32_t g_debug_trace_window_channel_nonzero[4] = {0};
 static int32_t g_debug_trace_window_peak = 0;
 static bool g_debug_trace_first_nonzero_logged = false;
 
+/* Per-channel pre-mix capture (Axis 5b localization). Opt-in via env GBRT_AUDIO_PCH;
+ * only active while --debug-audio capture runs. Writes debug_audio_pch.raw as
+ * interleaved int16 x4 per sample (CH1,CH2,CH3,CH4 post-DAC-gate contributions). */
+static bool g_audio_pch_enabled = false;
+static FILE* g_debug_pch_file = NULL;
+static int16_t g_debug_pch_buffer[DEBUG_AUDIO_BUFFER_FRAMES * 4];
+static int g_debug_pch_buffer_count = 0;
+
+static void audio_debug_pch_flush(void) {
+    if (!g_debug_pch_file || g_debug_pch_buffer_count == 0) return;
+    fwrite(g_debug_pch_buffer, sizeof(int16_t), (size_t)g_debug_pch_buffer_count * 4, g_debug_pch_file);
+    g_debug_pch_buffer_count = 0;
+}
+
 static void audio_debug_trace_log(const char* fmt, ...) {
     if (!g_audio_debug_trace_enabled) return;
 
@@ -58,6 +72,8 @@ static void audio_debug_capture_reset(void) {
         fclose(g_debug_audio_file);
         g_debug_audio_file = NULL;
     }
+    audio_debug_pch_flush();
+    if (g_debug_pch_file) { fclose(g_debug_pch_file); g_debug_pch_file = NULL; }
     g_debug_sample_count = 0;
     g_debug_audio_buffer_count = 0;
     g_debug_trace_total_samples = 0;
@@ -78,7 +94,12 @@ void gb_audio_set_debug(bool enabled) {
     }
     g_audio_debug_enabled = enabled;
     if (enabled) {
-        printf("[AUDIO] Debug audio capture enabled\n");
+        const char* pch = getenv("GBRT_AUDIO_PCH");
+        g_audio_pch_enabled = (pch && *pch && strcmp(pch, "0") != 0);
+        printf("[AUDIO] Debug audio capture enabled%s\n",
+               g_audio_pch_enabled ? " (+ per-channel debug_audio_pch.raw)" : "");
+    } else {
+        g_audio_pch_enabled = false;
     }
 }
 
@@ -977,8 +998,23 @@ void gb_audio_step(GBContext* ctx, uint32_t cycles) {
                 if (g_debug_audio_buffer_count >= DEBUG_AUDIO_BUFFER_FRAMES) {
                     audio_debug_capture_flush();
                 }
+                /* Per-channel pre-mix capture, in lockstep with the stereo stream. */
+                if (g_audio_pch_enabled) {
+                    if (!g_debug_pch_file) g_debug_pch_file = fopen("debug_audio_pch.raw", "wb");
+                    if (g_debug_pch_file) {
+                        int pidx = g_debug_pch_buffer_count * 4;
+                        g_debug_pch_buffer[pidx + 0] = (int16_t)ch1_mix;
+                        g_debug_pch_buffer[pidx + 1] = (int16_t)ch2_mix;
+                        g_debug_pch_buffer[pidx + 2] = (int16_t)ch3_mix;
+                        g_debug_pch_buffer[pidx + 3] = (int16_t)ch4_mix;
+                        g_debug_pch_buffer_count++;
+                        if (g_debug_pch_buffer_count >= DEBUG_AUDIO_BUFFER_FRAMES) audio_debug_pch_flush();
+                    }
+                }
                 if (g_debug_sample_count >= g_debug_capture_limit_samples) {
                     audio_debug_capture_flush();
+                    audio_debug_pch_flush();
+                    if (g_debug_pch_file) { fclose(g_debug_pch_file); g_debug_pch_file = NULL; }
                     printf("[AUDIO] Debug capture complete. Wrote %d samples to debug_audio.raw\n", g_debug_sample_count);
                     fclose(g_debug_audio_file);
                     g_debug_audio_file = NULL;

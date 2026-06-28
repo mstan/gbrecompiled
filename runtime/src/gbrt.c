@@ -1153,6 +1153,24 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
     bool cart_supports_cgb = ctx->config.cartridge_supports_cgb;
     bool cart_requires_cgb = ctx->config.cartridge_requires_cgb;
 
+    /* Config override: GBRT_HARDWARE_MODE forces the hardware/SGB mode for this
+     * cart regardless of the platform's per-game pref. Works headless (benchmark)
+     * too, since it's read here in the runtime. Values: auto|dmg|sgb|cgb|gba.
+     * Absent/unknown leaves ctx->hardware_mode_pref untouched. Lets the accuracy
+     * harness force a faithful DMG run (GBRT_HARDWARE_MODE=dmg) on SGB-enhanced
+     * carts so the comparison matches a DMG oracle. */
+    {
+        const char* hw = getenv("GBRT_HARDWARE_MODE");
+        if (hw && *hw) {
+            if      (!strcmp(hw, "dmg"))  ctx->hardware_mode_pref = GB_HARDWARE_MODE_DMG;
+            else if (!strcmp(hw, "sgb"))  ctx->hardware_mode_pref = GB_HARDWARE_MODE_SGB;
+            else if (!strcmp(hw, "cgb"))  ctx->hardware_mode_pref = GB_HARDWARE_MODE_CGB;
+            else if (!strcmp(hw, "gba"))  ctx->hardware_mode_pref = GB_HARDWARE_MODE_GBA;
+            else if (!strcmp(hw, "auto")) ctx->hardware_mode_pref = GB_HARDWARE_MODE_AUTO;
+            fprintf(stderr, "[GBRT] hardware mode forced to '%s' via GBRT_HARDWARE_MODE\n", hw);
+        }
+    }
+
     bool want_cgb = false;
     bool want_sgb_engine = false;
     switch (ctx->hardware_mode_pref) {

@@ -71,6 +71,25 @@ two diverge), and a cycle-aligned game-progress lag. Note: the recomp's debug se
 comes up on the **windowed** path (benchmark/headless mode skips it), so this capture runs
 the recomp with a window. The recomp frame ring is always-on (36000 frames) — query it.
 
+## Per-channel diff (localize which channel diverges)
+
+Both sides emit a per-channel pre-mix stream (interleaved int16 x4: CH1,CH2,CH3,CH4)
+when `GBRT_AUDIO_PCH=1` is set:
+
+```bash
+# oracle per-channel -> out/oracle_pokered.s16.pch
+GBRT_AUDIO_PCH=1 oracle/gb_audio_oracle.exe out/pokered.gb out/oracle_pokered.s16 20 dmg
+# recomp per-channel -> debug_audio_pch.raw (with --debug-audio)
+GBRT_HARDWARE_MODE=dmg GBRT_AUDIO_PCH=1 <recomp_exe> --debug-audio --debug-audio-seconds 20
+# diff per channel
+python tools/perchannel_diff.py --recomp debug_audio_pch.raw --oracle out/oracle_pokered.s16.pch
+```
+
+Recomp values are bipolar (±vol), oracle are unipolar digital (0-15) — the metrics are
+amplitude-normalized so that washes out. Reports per-channel spectral cosine, onset xcorr,
+lag, and pitch (CH1-3) / energy-envelope (CH4), plus activity-mismatch ("ORACLE only"/"recomp
+only") which flags a channel one side plays and the other doesn't.
+
 ## Metrics (`tools/audio_drift_diff.py`)
 
 - **log-mel cosine** — drift-tolerant similarity headline (timbre-aware, phase-invariant).

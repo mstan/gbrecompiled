@@ -92,6 +92,21 @@ typedef struct {
 #define OAM_CGB_BANK    0x08  /* Bit 3: VRAM bank (CGB only) */
 #define OAM_CGB_PALETTE 0x07  /* Bits 0-2: Palette number (CGB only) */
 
+/* A sprite selected during the OAM scan for the current scanline. The list is
+ * built once (OAM/mode 2 is fixed), then composited per mode-3 segment using
+ * LIVE obj-enable + OBP0/OBP1 so mid-mode-3 writes (Mealybug m3_obp0/obj_en)
+ * affect only later dots. Tile bytes are fetched at scan time (size = latched). */
+typedef struct {
+    int oam_index;
+    int screen_x;
+    uint8_t x_pos;
+    uint8_t flags;
+    uint8_t palette;
+    bool behind_bg;
+    uint8_t lo;
+    uint8_t hi;
+} ScanlineSprite;
+
 /* ============================================================================
  * PPU State
  * ========================================================================== */
@@ -145,6 +160,13 @@ typedef struct GBPPU {
     bool     win_rendered_line;      /* Window drawn on this scanline (window_line++) */
     uint8_t  bg_raw_line[GB_SCREEN_WIDTH];      /* Persistent across segments */
     uint8_t  bg_priority_line[GB_SCREEN_WIDTH];
+
+    /* Sprite list for the current scanline: built once (OAM scan, latched OBJ
+     * size), then composited per mode-3 segment with LIVE obj-enable + OBP0/OBP1.
+     * Parallels render_x so sprites are drawn in the same dot ranges as the BG. */
+    ScanlineSprite scanline_sprites[10];
+    int      scanline_sprite_list_count;
+    bool     sprite_list_built;      /* List built for this scanline yet? */
     
     /* Framebuffer (2-bit color indices) */
     uint8_t framebuffer[GB_FRAMEBUFFER_SIZE];

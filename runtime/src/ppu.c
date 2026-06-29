@@ -517,17 +517,6 @@ static void render_bg_segment(GBPPU* ppu,
     (void)cgb_compat_mode;
 }
 
-typedef struct {
-    int oam_index;
-    int screen_x;
-    uint8_t x_pos;
-    uint8_t flags;
-    uint8_t palette;
-    bool behind_bg;
-    uint8_t lo;
-    uint8_t hi;
-} ScanlineSprite;
-
 static void sort_scanline_sprites(ScanlineSprite* sprites, int sprite_count) {
     for (int i = 1; i < sprite_count; i++) {
         ScanlineSprite sprite = sprites[i];
@@ -548,20 +537,21 @@ static void sort_scanline_sprites(ScanlineSprite* sprites, int sprite_count) {
     }
 }
 
-static void render_sprites_scanline(GBPPU* ppu,
-                                    GBContext* ctx,
-                                    const uint8_t* bg_raw,
-                                    const uint8_t* bg_priority) {
+/* Build the current scanline's sprite list from OAM. The OAM scan happens in
+ * mode 2 and is fixed before mode 3, so this runs once per scanline (lazily on
+ * the first mode-3 segment). OBJ size (sprite height + tile fetch) uses the
+ * latched LCDC; per-pixel OBJ-enable and palette are sampled LIVE at composite
+ * time. Does NOT gate on OBJ-enable (the scan always happens on hardware). */
+static void build_scanline_sprite_list(GBPPU* ppu, GBContext* ctx) {
     bool cgb_mode = ppu_is_cgb_mode(ctx);
     bool dmg_priority_mode = !cgb_mode || ppu->opri != 0;
     uint8_t scanline = ppu->ly;
     uint8_t sprite_height;
     int sprite_count = 0;
-    ScanlineSprite sprites[10];
+    ScanlineSprite* sprites = ppu->scanline_sprites;
 
-    if (!(ppu->latched_lcdc & LCDC_OBJ_ENABLE)) {
-        return;
-    }
+    ppu->sprite_list_built = true;
+    ppu->scanline_sprite_list_count = 0;
 
     sprite_height = (ppu->latched_lcdc & LCDC_OBJ_SIZE) ? 16 : 8;
 
@@ -608,7 +598,32 @@ static void render_sprites_scanline(GBPPU* ppu,
         sort_scanline_sprites(sprites, sprite_count);
     }
 
-    for (int screen_x = 0; screen_x < GB_SCREEN_WIDTH; screen_x++) {
+    ppu->scanline_sprite_list_count = sprite_count;
+}
+
+/* Composite sprite pixels in [x_start, x_end) over the BG already drawn for that
+ * range, using LIVE OBJ-enable (LCDC bit 1) and LIVE OBP0/OBP1, so a mid-mode-3
+ * write to those registers only affects dots drawn after it (Mealybug
+ * m3_obp0_change, m3_lcdc_obj_en_change). The sprite list (positions, tiles,
+ * size) is fixed at OAM scan; only the per-pixel enable/palette is live here. */
+static void render_sprites_segment(GBPPU* ppu, GBContext* ctx, int x_start, int x_end) {
+    bool cgb_mode = ppu_is_cgb_mode(ctx);
+    uint8_t scanline = ppu->ly;
+    const ScanlineSprite* sprites = ppu->scanline_sprites;
+    int sprite_count = ppu->scanline_sprite_list_count;
+    const uint8_t* bg_raw = ppu->bg_raw_line;
+    const uint8_t* bg_priority = ppu->bg_priority_line;
+
+    if (x_start < 0) x_start = 0;
+    if (x_end > GB_SCREEN_WIDTH) x_end = GB_SCREEN_WIDTH;
+    if (x_start >= x_end) return;
+
+    /* OBJ enable sampled LIVE: dots drawn while OBJ is disabled show no sprite. */
+    if (!(ppu->lcdc & LCDC_OBJ_ENABLE)) {
+        return;
+    }
+
+    for (int screen_x = x_start; screen_x < x_end; screen_x++) {
         const ScanlineSprite* chosen_sprite = NULL;
         uint8_t chosen_color = 0;
 
@@ -638,8 +653,8 @@ static void render_sprites_scanline(GBPPU* ppu,
         }
 
         if (cgb_mode) {
-            uint8_t bg_color = bg_raw ? bg_raw[screen_x] : 0;
-            uint8_t bg_attr_priority = bg_priority ? bg_priority[screen_x] : 0;
+            uint8_t bg_color = bg_raw[screen_x];
+            uint8_t bg_attr_priority = bg_priority[screen_x];
 
             if (bg_color != 0) {
                 if (!(ppu->latched_lcdc & LCDC_BG_ENABLE)) {
@@ -652,10 +667,10 @@ static void render_sprites_scanline(GBPPU* ppu,
             ppu->framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] = chosen_color;
             ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] =
                 resolve_obj_color(ppu, ctx, chosen_sprite->palette, chosen_color,
-                                  chosen_sprite->palette ? ppu->latched_obp1 : ppu->latched_obp0);
+                                  chosen_sprite->palette ? ppu->obp1 : ppu->obp0);
         } else {
-            uint8_t bg_color = bg_raw ? bg_raw[screen_x] : 0;
-            uint8_t dmg_palette_reg = chosen_sprite->palette ? ppu->latched_obp1 : ppu->latched_obp0;
+            uint8_t bg_color = bg_raw[screen_x];
+            uint8_t dmg_palette_reg = chosen_sprite->palette ? ppu->obp1 : ppu->obp0;
             uint8_t shade = apply_palette(chosen_color, dmg_palette_reg);
 
             if (chosen_sprite->behind_bg && bg_color != 0) {
@@ -669,13 +684,27 @@ static void render_sprites_scanline(GBPPU* ppu,
     }
 }
 
-/* Finish the current scanline at mode-3 end: ensure the BG/window is fully drawn
- * (any pixels not yet covered by the incremental segments), then sprites (one pass,
- * after the full BG line exists), then advance the window line counter once. */
+/* Render BG/window AND sprites for the pixel range [render_x, x_end), keeping
+ * sprites composited in the same dot ranges as the BG. The sprite list is built
+ * lazily on first use (OAM scan is fixed before mode 3). */
+static void render_segment(GBPPU* ppu, GBContext* ctx, int x_end) {
+    if (x_end > GB_SCREEN_WIDTH) x_end = GB_SCREEN_WIDTH;
+    if (x_end <= ppu->render_x) return;
+    if (!ppu->sprite_list_built) {
+        build_scanline_sprite_list(ppu, ctx);
+    }
+    int x_start = ppu->render_x;
+    render_bg_segment(ppu, ctx, x_start, x_end);
+    render_sprites_segment(ppu, ctx, x_start, x_end);
+    ppu->render_x = x_end;
+}
+
+/* Finish the current scanline at mode-3 end: draw any BG/window + sprite pixels
+ * not yet covered by the incremental segments, then advance the window line
+ * counter once. */
 void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
     if (ppu->render_x < GB_SCREEN_WIDTH) {
-        render_bg_segment(ppu, ctx, ppu->render_x, GB_SCREEN_WIDTH);
-        ppu->render_x = GB_SCREEN_WIDTH;
+        render_segment(ppu, ctx, GB_SCREEN_WIDTH);
     }
 
     if (ppu->ly == 0) {
@@ -696,8 +725,6 @@ void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
                           ppu->obp1,
                           ppu->window_line,
                           ppu->window_triggered);
-
-    render_sprites_scanline(ppu, ctx, ppu->bg_raw_line, ppu->bg_priority_line);
 
     if (ppu->win_rendered_line) {
         ppu->window_line++;
@@ -823,6 +850,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 ppu->mode = PPU_MODE_DRAW;
                 ppu->render_x = 0;            /* start incremental mid-scanline render */
                 ppu->win_rendered_line = false;
+                ppu->sprite_list_built = false;  /* rebuild sprite list this scanline */
                 latch_scanline_registers(ppu);
                 update_stat(ppu, ctx);
                 check_stat_interrupt(ppu, ctx, "oam->draw");
@@ -841,8 +869,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 int target_x = (int)ppu->mode_cycles - warmup;
                 if (target_x > GB_SCREEN_WIDTH) target_x = GB_SCREEN_WIDTH;
                 if (target_x > ppu->render_x) {
-                    render_bg_segment(ppu, ctx, ppu->render_x, target_x);
-                    ppu->render_x = target_x;
+                    render_segment(ppu, ctx, target_x);  /* BG + sprites, same dot range */
                 }
                 if (ppu->mode_cycles < CYCLES_PIXEL_DRAW) {
                     return;

@@ -6,7 +6,8 @@
 # Usage: run_testrom.sh <rom.gb> <frame> [expected.png]
 set -uo pipefail
 ROM="$1"; FRAME="$2"; EXPECTED="${3:-}"
-export PATH="/c/msys64/mingw64/bin:$PATH"
+# Do NOT prepend mingw globally: it shadows the pyenv python (numpy). The default
+# PATH already has mingw64/bin (for exe DLLs); cmake/ninja use CLEAN_PATH explicitly.
 export CLEAN_PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:/c/Windows/system32:/c/Windows"
 
 REPO=/f/Projects/gbcrecomp/gb-recompiled
@@ -31,9 +32,11 @@ PATH="$CLEAN_PATH" ninja -C "$D/build" >/dev/null 2>&1 || { echo "[testrom] buil
 # Pre-fill rom.cfg so the launcher loads the exact ROM (SHA-checked) headless.
 echo "$romwin" > "$D/build/rom.cfg"
 echo "[testrom] running recomp -> frame $FRAME"
+# --limit-frames makes benchmark mode exit after dumping (it otherwise loops
+# forever); timeout is a hard safety net.
 ( cd "$D/build" && rm -f tr_*.ppm \
-  && GBRECOMP_BENCHMARK=1 GBRT_HARDWARE_MODE=dmg "./$name.exe" \
-       --dump-frames "$FRAME" --screenshot-prefix tr >/dev/null 2>&1 )
+  && timeout 40 bash -c "GBRECOMP_BENCHMARK=1 GBRT_HARDWARE_MODE=dmg ./$name.exe \
+       --dump-frames $FRAME --limit-frames $((FRAME + 5)) --screenshot-prefix tr >/dev/null 2>&1" )
 ( taskkill //F //IM "$name.exe" >/dev/null 2>&1 ) || true
 rec="$OUT/recomp_tr_$name.ppm"
 cp "$D/build/tr_$(printf '%05d' "$FRAME").ppm" "$rec"

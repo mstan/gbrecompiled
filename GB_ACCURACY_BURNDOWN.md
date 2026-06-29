@@ -182,7 +182,19 @@ blocking; registers latched at mode-3 start (scanline-granular).
       the bundled `expected/` PNGs are the proper Mealybug ground truth and are used instead.)*
 - [ ] **Sub-scanline / mid-line effects (SCX/SCY/window/BGP mid-line) — NOT modeled** (now measured:
       m3_bgp_change 26.9 % off). The recomp's scanline renderer needs per-dot/fetcher rendering to
-      pass the Mealybug `m3_*` suite. Run the full `m3_*` set through `run_testrom.sh` to scope it.
+      pass the Mealybug `m3_*` suite.
+
+**Mealybug `m3_*` subset scorecard (2026-06-28)** via `accuracy/oracle/{run_testrom,score_mealybug}.sh`
+(each ROM recompiled → built → run → fb_diff vs `expected/DMG-blob/*.png`):
+- `m3_bgp_change`: **26.9 %** differing vs DMG ground truth (sub-scanline BGP change — confirmed gap).
+- `m3_obp0_change`: **fails to LINK** (`ld returned 1`) — a concrete **recompiler gap** surfaced by
+  the test-ROM stress run (separate from PPU; track under Axis 6).
+- `m3_scx_low_3_bits`, `m3_scy_change`, `m3_lcdc_{bg_en,obj_en,win_en_multiple,tile_sel}_change`:
+  built+ran, but **no framebuffer dumped** — these Mealybug ROMs enable the LCD *late* and/or halt,
+  so the recomp's *rendered-frame*-based `--dump-frames` counter never reaches the target.
+- **Harness refinement to finish the scorecard:** make the dump **guest-cycle-based** (like
+  `gb_state_oracle`) instead of rendered-frame-based, so render-once/late-LCD tests are captured;
+  also auto-pick the dump point after the test stabilizes. Then re-score the full 31-ROM `m3_*` set.
 
 ### 5b — Audio / APU  ← FIRST ACTIVE SLICE        Status: APPROXIMATE
 

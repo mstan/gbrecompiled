@@ -90,7 +90,7 @@ The in-memory query ring (this branch) makes the same stream live-queryable.
 | 4 | Memory / MMIO | **instruction-accurate (mostly)** | `unused_hwio` FAIL (undocumented CGB bit masking); IO trace is doc-recipe, not always-on ring | Mask unused HWIO bits; promote IO trace to always-on ring |
 | 5a | Video / PPU timing | **scanline-accurate (with a live bug)** | Computed variable mode-3/0 durations are **never used** — hardcoded 172/204 instead, so scanlines don't sum (`ppu.c:791-820` vs `:817`); no sub-scanline effects | Wire `scanline_draw_cycles`/`scanline_hblank_cycles` into mode transitions; move toward per-dot rendering |
 | 5b | **Audio / APU** ← ACTIVE | **approximate** (per-instruction sync, no band-limiting, `±1×vol` mixer) | Samples emitted in per-instruction bursts; point-sampled at 44.1 kHz (aliasing); two inconsistent channel-output models; known glitching | Sample-accurate register-write timing; band-limited resample; unify mixer on the 4-bit DAC model |
-| 6 | Static-vs-dynamic fidelity | **approximate** (static compile + universal interp fallback; **no JIT tier**) | RAM/SMC runs at full interpreter cost; analyzer CFG edges drop bank info | Implement planned sljit middle tier; make CFG edges full `(bank,addr)` (audit Phase 5) |
+| 6 | Static-vs-dynamic fidelity | **DECIDED — static compile + interp fallback + Tier-0 harvest** (NO JIT, by design) | None blocking. CFG edges drop bank info (cosmetic); `tcc` is a contingency only if a future game shows persistent *hot* interpreted code | **CLOSE.** NO-GO on sljit/gcc shards settled & validated (Pokémon 99.99% coverage via harvest). Only revisit (with `tcc`, not sljit) if measurement proves a hot dynamic-code game |
 | 7 | Determinism | **deterministic except MBC3 RTC** | RTC reads host `time(NULL)` (`gbrt.c:570,598`); audio/frame pacing host-driven (SDL) | Injectable/seeded RTC clock for reproducible RTC games |
 
 ---
@@ -270,18 +270,34 @@ See `accuracy/axis5_apu.md` for the full deep-dive. Key defects:
 
 ---
 
-## Axis 6 — Static-vs-dynamic fidelity (recompiler-unique)        Status: APPROXIMATE
+## Axis 6 — Static-vs-dynamic fidelity (recompiler-unique)        Status: DECIDED (CLOSE)
 
 Static compile + universal `gb_interpret()` fallback for any uncompiled addr incl.
 RAM/HRAM (`interpreter.c:106,186-195`); per-page dispatcher → interpret; `JP HL`→
 `gbrt_jump_hl`; RST jump tables statically extracted (`analyzer.cpp:171-318`); cross-bank
 CALL returns to dispatcher resolving by `ctx->rom_bank`.
 
-- [ ] **No JIT tier** — only a profile-guided entry-point harvest loop (`config.cpp:174,284`);
-      RAM/SMC runs at full interpreter cost. Implement planned sljit middle tier.
-- [ ] CFG successors drop bank info (`analyzer.h` `vector<uint16_t>`) — make edges
-      `(bank,addr)` (audit Phase 5).
-- [ ] Leg-0 only today: `differential.c` proves gen==interp. Add external SameBoy leg.
+**ARCHITECTURE DECIDED — no JIT tier, by design.** The merge initiative made an evidence-based
+**NO-GO on sljit/gcc shards + dirty-RAM interp** (`project_gbrecomp_merge_initiative`, Item 3):
+every interpreter fallback observed across Tetris/SML/MMX2/Pokémon lands at a ROM-bank or
+known-HRAM address = a *static coverage gap*, NOT dynamic/RAM-resident code. GB ROM is immutable
+(no PSX-style runtime overlays); the only RAM code is tiny HRAM OAM-DMA stubs (already handled by
+`hram_overlay` + `gbrt_try_execute_hram_stub`). Shards solve a problem GB doesn't have.
+
+**The model (this IS the answer, per psxrecomp/NES/Genesis):** static recompile → dispatch miss →
+interpreter fallback → misses logged to `interp_fallbacks.log` (`interpreter.c:155-176`) → fed back
+via `gbrecomp --harvest` (`config.cpp:154-176,214`, "tier0") as entry-point seeds → next regen
+compiles them natively. **Validated:** Pokémon 9419 fallback events / 177 distinct → 1/1 (99.99%)
+with zero JIT shards. The harvest loop closes coverage; the universal interpreter is the long-tail
+catch-all.
+
+- [x] **Tier-0 dispatch-miss harvest** — implemented, ecosystem-standardized on `dispatch_misses.toml`,
+      validated to ~zero residual ROM fallbacks. **This closes Axis 6.**
+- [ ] (contingency only) `tcc` dynamic tier — revisit *only if* a future game shows persistent *hot*
+      interpreted code the harvest can't statically cover. Nothing observed so far does. NOT sljit.
+- [ ] (cosmetic) CFG successors drop bank info (`analyzer.h` `vector<uint16_t>`) — make edges
+      `(bank,addr)`; does not affect correctness, only multi-bank seed precision.
+- [ ] (optional) Leg-0 only today: `differential.c` proves gen==interp. Add external SameBoy leg.
 
 ---
 

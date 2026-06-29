@@ -2130,6 +2130,17 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             ctx->serial_transfer.slave_armed = 0;
 
             if ((sc & 0x80) && ctx->config.enable_serial) {
+                /* Env-gated serial capture (GBRT_SERIAL_LOG=path): record the outgoing
+                 * byte at transfer start. Test ROMs (blargg/mooneye) print results +
+                 * pass/fail signatures here; zero impact when the env var is unset. */
+                {
+                    static FILE* g_serlog = (FILE*)-1;
+                    if (g_serlog == (FILE*)-1) {
+                        const char* p = getenv("GBRT_SERIAL_LOG");
+                        g_serlog = p ? fopen(p, "wb") : NULL;
+                    }
+                    if (g_serlog) { fputc(ctx->io[0x01], g_serlog); fflush(g_serlog); }
+                }
                 if (sc & 0x01) {
                     /* Internal clock — master. Tick a countdown until the
                      * 8 bits would have shifted out, then notify the link

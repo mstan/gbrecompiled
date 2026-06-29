@@ -135,6 +135,22 @@ mooneye `ei_timing`/`di_timing`/`reti_intr_timing`/`stat_irq_blocking` PASS.
       (`c_emitter.cpp:2949`); `intr_2_mode*_timing` FAIL — needs per-instruction tick.
 - [ ] Delete dead `ime_scheduled` write (`c_emitter.cpp:520`).
 
+**blargg CPU-conformance scorecard (2026-06-28)** — `accuracy/oracle/run_cputest.sh` (recompile →
+build → run headless → decide pass/fail from the serial stream via env-gated `GBRT_SERIAL_LOG` in
+the runtime's FF02 handler). Raw: `accuracy/out/cpu_scorecard.txt`.
+- **cpu_instrs 01–11: ALL PASS** — every CPU instruction is correct.
+- **instr_timing: PASS** — instruction-level cycle counts are correct.
+- **mem_timing: FAIL (#3)** — memory-access timing *within* an instruction is wrong. This is the
+  sub-instruction cycle-accuracy gap: the recomp ticks per-instruction (`gb_tick` once per opcode),
+  so a memory read/write lands at the opcode boundary, not its exact M-cycle.
+- **mem_timing-2, halt_bug: NO OUTPUT** (no serial even at 8000 frames → recomp likely hangs/diverges
+  on these; needs per-ROM investigation — possibly real HALT/mem-timing bugs).
+- **Verdict:** the recomp CPU is instruction-correct and instruction-timing-correct, but lacks
+  **sub-instruction (M-cycle) memory/IO timing**. This single gap is the common root of: mem_timing
+  fail, the Mealybug per-pixel mid-line residual (Axis 5a), and the audio onset jitter (Axis 5b).
+  It is the highest-leverage deep fix. (mooneye granular timing tests would refine this but are
+  source-only here — no rgbds for prebuilts.)
+
 ---
 
 ## Axis 4 — Memory map / MMIO        Status: MODERATE-STRONG

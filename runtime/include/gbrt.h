@@ -552,6 +552,15 @@ void gb_rst(GBContext* ctx, uint8_t vector);
 void gbrt_set_rtc_epoch(int64_t unix_seconds);
 
 /**
+ * @brief Dump final CPU registers to GBRT_REGS_LOG (headless test-ROM grading).
+ *
+ * No-op unless the GBRT_REGS_LOG env var names a writable path. Used by the
+ * accuracy harness to read mooneye's pass/fail register magic at the frame
+ * limit without a debugger.
+ */
+void gbrt_dump_final_regs(GBContext* ctx);
+
+/**
  * @brief Jump to address in HL (JP HL)
  */
 void gbrt_jump_hl(GBContext* ctx);

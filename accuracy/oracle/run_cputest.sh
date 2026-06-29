@@ -25,20 +25,25 @@ PATH="$CLEAN_PATH" ninja -C "$D/build" >/dev/null 2>&1 || { echo "$name | BUILD-
 exe=$(ls "$D/build/"*.exe 2>/dev/null | head -1)
 echo "$romwin" > "$D/build/rom.cfg"
 ser="$D/build/serial.txt"; rm -f "$ser"
-( cd "$D/build" && timeout 90 bash -c "PATH=\"/c/msys64/mingw64/bin:\$PATH\" GBRECOMP_BENCHMARK=1 GBRT_HARDWARE_MODE=dmg GBRT_SERIAL_LOG=serial.txt \"$exe\" --limit-frames $FRAMES >/dev/null 2>&1" )
+reg="$D/build/regs.txt"; rm -f "$reg"
+( cd "$D/build" && timeout 90 bash -c "PATH=\"/c/msys64/mingw64/bin:\$PATH\" GBRECOMP_BENCHMARK=1 GBRT_HARDWARE_MODE=dmg GBRT_SERIAL_LOG=serial.txt GBRT_REGS_LOG=regs.txt \"$exe\" --limit-frames $FRAMES >/dev/null 2>&1" )
 ( taskkill //F //IM "$(basename "$exe")" >/dev/null 2>&1 ) || true
 
-# Decide pass/fail
+# Decide pass/fail.
+# mooneye: register magic at completion — PASS = B C D E H L = 03 05 08 0D 15 22
+# (Fibonacci); FAIL = all six = 0x42 ('B'). Read via the GBRT_REGS_LOG dump (no
+# debugger needed). blargg: "Passed"/"Failed #n" over serial.
 verdict="UNKNOWN"
-if [ -f "$ser" ]; then
+if [ -f "$reg" ] && grep -qE "B=03 C=05 D=08 E=0D H=15 L=22" "$reg"; then
+    verdict="PASS(mooneye)"
+elif [ -f "$reg" ] && grep -qE "B=42 C=42 D=42 E=42 H=42 L=42" "$reg"; then
+    verdict="FAIL(mooneye)"
+elif [ -f "$ser" ]; then
     txt=$(tr -d '\0' < "$ser" | tr -c '[:print:]\n' ' ')
-    # mooneye magic Fibonacci (hex bytes 03 05 08 0D 15 22)
-    if xxd -p "$ser" 2>/dev/null | tr -d '\n' | grep -q "030508[0]*0d[0]*15[0]*22\|0305080d1522"; then
-        verdict="PASS(mooneye)"
-    elif echo "$txt" | grep -qi "Passed"; then verdict="PASS"
+    if echo "$txt" | grep -qi "Passed"; then verdict="PASS"
     elif echo "$txt" | grep -qi "Failed"; then verdict="FAIL: $(echo "$txt" | grep -io 'Failed[^ ]* *[#0-9]*' | head -1)"
-    else verdict="INCONCLUSIVE (serial: $(echo "$txt" | tr -s ' ' | tail -c 60))"; fi
+    else verdict="INCONCLUSIVE (serial: $(echo "$txt" | tr -s ' ' | tail -c 60)$([ -f "$reg" ] && echo "; regs: $(cat "$reg")"))"; fi
 else
-    verdict="NO-SERIAL"
+    verdict="NO-SERIAL$([ -f "$reg" ] && echo " (regs: $(cat "$reg"))")"
 fi
 printf "%-40s | %s\n" "$name" "$verdict"

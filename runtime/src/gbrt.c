@@ -2520,6 +2520,28 @@ void gb_ret(GBContext* ctx) { ctx->pc = gb_pop16(ctx); }
 void gbrt_jump_hl(GBContext* ctx) { ctx->pc = ctx->hl; }
 void gb_rst(GBContext* ctx, uint8_t vec) { gb_push16(ctx, ctx->pc); ctx->pc = vec; }
 
+/* Final-register dump for headless test-ROM grading. Gated on GBRT_REGS_LOG;
+ * writes the CPU regs once at process exit so the harness can read mooneye's
+ * result without a debugger: a passing mooneye test leaves the Fibonacci magic
+ * in B C D E H L = 03 05 08 0D 15 22 (then spins on LD B,B / a halt-loop, so the
+ * registers are still intact at the frame limit). No-op when the env is unset. */
+void gbrt_dump_final_regs(GBContext* ctx) {
+    const char* path = getenv("GBRT_REGS_LOG");
+    if (!path || !*path || !ctx) {
+        return;
+    }
+    gb_pack_flags(ctx);
+    FILE* f = fopen(path, "w");
+    if (!f) {
+        return;
+    }
+    fprintf(f,
+            "A=%02X F=%02X B=%02X C=%02X D=%02X E=%02X H=%02X L=%02X SP=%04X PC=%04X\n",
+            ctx->a, ctx->f, ctx->b, ctx->c, ctx->d, ctx->e, ctx->h, ctx->l,
+            ctx->sp, ctx->pc);
+    fclose(f);
+}
+
 static bool gbrt_condition_true(const GBContext* ctx, uint8_t condition) {
     switch (condition) {
         case 0: return !ctx->f_z;      /* NZ */

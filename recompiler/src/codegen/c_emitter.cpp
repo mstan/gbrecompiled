@@ -3966,6 +3966,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        gbrt_flush_interpreter_summary();\n";
     main_ss << "    }\n";
     main_ss << "    gbrt_disable_interpreter_summary();\n";
+    main_ss << "    gbrt_dump_final_regs(ctx);\n";
     main_ss << "    gb_context_destroy(ctx);\n";
     main_ss << "    return exit_code;\n";
     main_ss << "}\n";

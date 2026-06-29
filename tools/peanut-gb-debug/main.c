@@ -515,6 +515,7 @@ static uint8_t g_joypad_bits = 0xFF;
 int main(int argc, char *argv[])
 {
     const char *rom_path = NULL;
+    const char *sav_path = NULL;
     int port = 4371;
     int headless = 0;
     int max_frames = 0;
@@ -526,6 +527,8 @@ int main(int argc, char *argv[])
             headless = 1;
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
             max_frames = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--sav") == 0 && i + 1 < argc)
+            sav_path = argv[++i];
         else
             rom_path = argv[i];
     }
@@ -549,6 +552,15 @@ int main(int argc, char *argv[])
     fclose(f);
 
     fprintf(stderr, "[emu] Loaded ROM: %s (%zu bytes)\n", rom_path, g_rom_size);
+
+    /* Load battery save into cart RAM (so Continue sees the migrated save) */
+    if (sav_path) {
+        FILE *sf = fopen(sav_path, "rb");
+        if (!sf) { fprintf(stderr, "Failed to open sav: %s\n", sav_path); return 1; }
+        size_t n = fread(g_cart_ram, 1, sizeof(g_cart_ram), sf);
+        fclose(sf);
+        fprintf(stderr, "[emu] Loaded sav: %s (%zu bytes into cart RAM)\n", sav_path, n);
+    }
 
     /* Init Peanut-GB */
     struct gb_s gb;

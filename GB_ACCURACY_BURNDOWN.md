@@ -84,7 +84,7 @@ The in-memory query ring (this branch) makes the same stream live-queryable.
 
 | # | Axis | Verdict | Gap | Lever |
 |---|------|---------|-----|-------|
-| 1 | Instruction semantics | **instruction-accurate** | `oam_bug` FAIL; `(HL)`-as-magic-index-6 operand design already caused a real `AND (HL)` miscompile | Typed operands (audit Phase 3); emitter golden tests for `(HL)` RMW + AF push/pop masking |
+| 1 | Instruction semantics | **instruction-accurate; (HL)/AF golden-locked** | `oam_bug` not modeled (DMG OAM quirk; blargg `oam_bug`/mooneye source-only) — low priority | DONE: `accuracy/golden/` structural+behavioral guard for `(HL)` RMW/ALU + PUSH/POP AF masking. (optional) typed operands audit Phase 3 |
 | 2 | Cycle / timing | **block-batched (approximate)**; control-flow instruction-accurate | `gb_tick` batched at block boundaries → timer/DMA/IME side-effects land late; most mooneye `*_timing` FAIL | Per-instruction `gb_tick()`; re-batch only timing-inert blocks (audit Phase 4) |
 | 3 | Interrupt / event timing | **instruction-accurate dispatch; block-granular delivery** | Functions can't be interrupted mid-block; T-cycle PPU-IRQ tests FAIL; dead `ime_scheduled` write | Same per-instruction tick; tighten block granularity in IRQ-sensitive regions |
 | 4 | Memory / MMIO | **CLOSED (DMG)** — `unused_hwio-GS` PASS | (optional) promote IO trace to always-on ring; `unused_hwio-C` (CGB) legitimately fails on real CGB HW too | DONE: SC/TAC/IF unused-bit OR-masks + unmapped→0xFF + DMG-guard FF55/FF68-6B (`gbrt.c`). cpu_instrs/instr_timing still PASS |

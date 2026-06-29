@@ -543,6 +543,15 @@ void gb_ret(GBContext* ctx);
 void gb_rst(GBContext* ctx, uint8_t vector);
 
 /**
+ * @brief Seed the MBC3 RTC wall clock for deterministic/replay runs.
+ *
+ * By default the RTC reads the host clock (time(NULL)); injecting a fixed
+ * unix-seconds epoch makes RTC-cart elapsed-time advance reproducible.
+ * Equivalent to the GBRT_RTC_EPOCH env var; an explicit call wins over env.
+ */
+void gbrt_set_rtc_epoch(int64_t unix_seconds);
+
+/**
  * @brief Jump to address in HL (JP HL)
  */
 void gbrt_jump_hl(GBContext* ctx);

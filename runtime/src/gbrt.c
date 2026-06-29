@@ -459,6 +459,37 @@ static bool gb_save_id_differs_from_legacy_title(const GBContext* ctx, const cha
     return strcmp(save_id, legacy_title) != 0;
 }
 
+/* Injectable wall clock for the MBC3 RTC — the lone core non-determinism
+ * (Axis 7). Default is the host time(NULL); a seeded override (env
+ * GBRT_RTC_EPOCH = unix seconds >= 0, or gbrt_set_rtc_epoch) makes the
+ * elapsed-time advance on RTC carts reproducible for oracle/replay runs.
+ * Explicit setter wins over env; env is read once and cached. See gbrt.log. */
+static int64_t g_rtc_epoch_override = -1; /* < 0 => use host clock */
+static bool    g_rtc_epoch_resolved = false;
+
+void gbrt_set_rtc_epoch(int64_t unix_seconds) {
+    g_rtc_epoch_override = unix_seconds;
+    g_rtc_epoch_resolved = true; /* explicit injection wins over env */
+}
+
+static time_t gbrt_wall_clock_now(void) {
+    if (!g_rtc_epoch_resolved) {
+        const char* e = getenv("GBRT_RTC_EPOCH");
+        if (e && *e) {
+            char* end = NULL;
+            long long v = strtoll(e, &end, 10);
+            if (end != e && v >= 0) {
+                g_rtc_epoch_override = (int64_t)v;
+            }
+        }
+        g_rtc_epoch_resolved = true;
+    }
+    if (g_rtc_epoch_override >= 0) {
+        return (time_t)g_rtc_epoch_override;
+    }
+    return time(NULL);
+}
+
 static void gb_rtc_refresh_latch(GBContext* ctx) {
     if (!ctx) {
         return;
@@ -567,7 +598,7 @@ static bool gb_context_try_load_rtc(GBContext* ctx) {
     ctx->rtc.last_time = persisted.cycle_remainder % 4194304u;
     ctx->rtc.active = (ctx->rtc.dh & 0x40u) == 0;
 
-    time_t now = time(NULL);
+    time_t now = gbrt_wall_clock_now();
     if (ctx->rtc.active && persisted.saved_unix_time > 0 && now != (time_t)-1 && now > 0) {
         uint64_t now_u64 = (uint64_t)now;
         if (now_u64 > persisted.saved_unix_time) {
@@ -595,7 +626,7 @@ static bool gb_context_save_rtc(GBContext* ctx) {
     memset(&persisted, 0, sizeof(persisted));
     persisted.magic = GBRTC_PERSIST_MAGIC;
     persisted.version = GBRTC_PERSIST_VERSION;
-    time_t now = time(NULL);
+    time_t now = gbrt_wall_clock_now();
     persisted.saved_unix_time = (now == (time_t)-1 || now < 0) ? 0u : (uint64_t)now;
     persisted.cycle_remainder = ctx->rtc.last_time;
     persisted.s = ctx->rtc.s;

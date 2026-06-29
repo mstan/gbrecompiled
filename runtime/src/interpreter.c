@@ -51,6 +51,49 @@ static const uint8_t CB_OPCODE_CYCLES[256] = {
     /* 0xF0-0xFF */   8,  8,  8,  8,  8,  8, 16,  8,  8,  8,  8,  8,  8,  8, 16,  8
 };
 
+/* Sub-instruction memory timing: opcodes whose data-bus access lands on the
+ * instruction's LAST M-cycle on hardware. The interpreter performs the bus
+ * access inline in the switch and ticks the whole instruction afterwards (tail
+ * tick at the end of the loop), which would register the access at the
+ * instruction's FIRST cycle. For the opcodes marked 1 below, we gb_tick the
+ * full instruction BEFORE entering the switch and guard the tail tick, so the
+ * access samples PPU/timer state at the correct (final) M-cycle.
+ *
+ * This is the interpreter half of the compiled-code tick-before-access fix and
+ * the actual unblock for the interpreted timing test ROMs (blargg mem_timing,
+ * Mealybug m3_*). Total per-instruction cycle count is UNCHANGED (the tick is
+ * relocated, not duplicated), so timing-insensitive results (cpu_instrs) do not
+ * regress; only the intra-instruction sampling point moves.
+ *
+ * Marked: single data-bus load/store/IO and ALU A,(HL) -- these become exactly
+ * correct (one access, on the last M-cycle). INC/DEC (HL) and CB-(HL) are
+ * read-modify-write: tick-before puts BOTH the read and the write at the end,
+ * which is correct for the write (the timing-critical access) but late for the
+ * read -- a known whole-instruction-granularity approximation (blargg mem_timing
+ * read-modify-write may still fail). Stack/control ops (PUSH/POP/CALL/RET/
+ * LD (nn),SP) keep the tail tick for now: their multi-byte accesses target the
+ * stack (RAM/HRAM), never PPU/IO, so intra-instruction sampling is moot here;
+ * revisit if mem_timing demands it. CB (0xCB) is classified inside its case
+ * (only (HL) variants touch memory), not via this table. See interpreter.log. */
+static const uint8_t MEM_TICK_BEFORE[256] = {
+    /* 0x00-0x0F */   0,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,0,0,
+    /* 0x10-0x1F */   0,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,0,0,
+    /* 0x20-0x2F */   0,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,0,0,
+    /* 0x30-0x3F */   0,0,1,0, 1,1,1,0, 0,0,1,0, 0,0,0,0,
+    /* 0x40-0x4F */   0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0,
+    /* 0x50-0x5F */   0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0,
+    /* 0x60-0x6F */   0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0,
+    /* 0x70-0x7F */   1,1,1,1, 1,1,0,1, 0,0,0,0, 0,0,1,0,
+    /* 0x80-0x8F */   0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0,
+    /* 0x90-0x9F */   0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0,
+    /* 0xA0-0xAF */   0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0,
+    /* 0xB0-0xBF */   0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0,
+    /* 0xC0-0xCF */   0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+    /* 0xD0-0xDF */   0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+    /* 0xE0-0xEF */   1,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,0,0,
+    /* 0xF0-0xFF */   1,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,0,0
+};
+
 /* Extra cycles for conditional branches when taken */
 #define BRANCH_TAKEN_EXTRA 4   /* JR cc, JP cc add 4 cycles when taken */
 #define CALL_TAKEN_EXTRA 12    /* CALL cc adds 12 cycles when taken */
@@ -212,7 +255,18 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
         /* Track cycles for this instruction - will be adjusted for branches/CB prefix */
         uint8_t cycles = OPCODE_CYCLES[opcode];
         uint8_t extra_cycles = 0;  /* For conditional branches when taken */
-        
+
+        /* Sub-instruction memory timing: for marked load/store/IO/ALU-(HL)
+         * opcodes, advance the clock for the whole instruction BEFORE the inline
+         * bus access so it samples PPU/timer state at the final M-cycle (the tail
+         * tick below is then guarded). None of the marked opcodes are conditional,
+         * so extra_cycles is always 0 for them. CB-(HL) sets this inside its case. */
+        int ticked_before = 0;
+        if (MEM_TICK_BEFORE[opcode]) {
+            gb_tick(ctx, cycles);
+            ticked_before = 1;
+        }
+
         switch (opcode) {
             case 0x00: /* NOP */ break;
             
@@ -710,6 +764,14 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
                 cycles = CB_OPCODE_CYCLES[cb_op];  /* Override with CB-specific timing */
                 uint8_t r = cb_op & 7;
                 uint8_t b = (cb_op >> 3) & 7;
+                /* Sub-instruction memory timing: only (HL) variants (r==6) touch
+                 * the bus. Tick the whole instruction before the access so it
+                 * lands on the final M-cycle (read-modify-write writes correctly;
+                 * BIT b,(HL) reads correctly). Tail tick is then guarded. */
+                if (r == 6) {
+                    gb_tick(ctx, cycles);
+                    ticked_before = 1;
+                }
                 uint8_t val = get_reg8(ctx, r);
                 
                 if (cb_op < 0x40) {
@@ -756,8 +818,11 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
                 return;
         }
         
-        /* Per-instruction cycle counting - uses table lookup + extra for branches taken */
-        gb_tick(ctx, cycles + extra_cycles);
+        /* Per-instruction cycle counting - uses table lookup + extra for branches taken.
+         * Guarded for memory-access opcodes that already ticked BEFORE the access. */
+        if (!ticked_before) {
+            gb_tick(ctx, cycles + extra_cycles);
+        }
         if (ctx->single_step_mode) {
             gbrt_finish_interpreter_session(ctx, entry_bank, addr, instructions_executed, entry_cycles);
             return;

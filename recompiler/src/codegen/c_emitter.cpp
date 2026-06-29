@@ -1215,8 +1215,30 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         return;  // Comment-only instruction
     }
     
+    // Sub-instruction memory timing: for plain load/store/IO opcodes the bus access
+    // happens on the instruction's LAST M-cycle on hardware, but the generated code
+    // emits the access first and the cycle tick afterwards (tail) -- so the access
+    // would register at the instruction's START. Tick (and advance PC) BEFORE the
+    // access for these opcodes so it lands at the correct cycle. Fixes blargg
+    // mem_timing and places mid-line PPU/IO writes at the right dot (Axis 5a/5b).
+    // Read-modify-write / stack / ALU-[hl] keep the tail tick (multi-access timing).
+    bool tick_before_access =
+        options.emit_cycle_counting && instr.cycles > 0 &&
+        (instr.opcode == ir::Opcode::LOAD8     || instr.opcode == ir::Opcode::STORE8 ||
+         instr.opcode == ir::Opcode::IO_READ   || instr.opcode == ir::Opcode::IO_READ_C ||
+         instr.opcode == ir::Opcode::IO_WRITE  || instr.opcode == ir::Opcode::IO_WRITE_C ||
+         instr.opcode == ir::Opcode::STORE16);
+    if (tick_before_access) {
+        if (next_pc_val != 0) {
+            emit_indent();
+            out << "ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
+        }
+        emit_indent();
+        out << "gb_tick(ctx, " << (int)instr.cycles << ");\n";
+    }
+
     emit_indent();
-    
+
     switch (instr.opcode) {
         case ir::Opcode::NOP:
             out << "/* NOP */\n";
@@ -2176,15 +2198,18 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
     }
 
     // In correctness mode, advance PC/timing after every non-control-flow instruction.
+    // (Skipped for memory-access opcodes that already ticked BEFORE the access above.)
     if (!is_control_flow) {
-        if (next_pc_val != 0) {
-            emit_indent();
-            out << "ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
-        }
+        if (!tick_before_access) {
+            if (next_pc_val != 0) {
+                emit_indent();
+                out << "ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
+            }
 
-        if (options.emit_cycle_counting && instr.cycles > 0) {
-            emit_indent();
-            out << "gb_tick(ctx, " << (int)instr.cycles << ");\n";
+            if (options.emit_cycle_counting && instr.cycles > 0) {
+                emit_indent();
+                out << "gb_tick(ctx, " << (int)instr.cycles << ");\n";
+            }
         }
 
         if (is_last_in_group) {

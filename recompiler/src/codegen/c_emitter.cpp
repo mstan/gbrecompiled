@@ -3643,6 +3643,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            gb_platform_set_dump_frames(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--dump-present-frames\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_dump_present_frames(argv[++i]);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--dump-cycle-frames\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            gb_platform_set_dump_cycle_frames(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--screenshot-prefix\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_set_screenshot_prefix(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--log-file\") == 0 && i + 1 < argc) {\n";
@@ -3843,6 +3845,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            double slice_start_ms = gb_profile_now_ms();\n";
     main_ss << "            gb_run_cycles(ctx, slice_budget);\n";
     main_ss << "            emu_ms += gb_profile_now_ms() - slice_start_ms;\n";
+    main_ss << "            gb_platform_check_cycle_dump(ctx);\n";
     main_ss << "            uint32_t slice_cycles = ctx->frame_cycles - slice_start_cycles;\n";
     main_ss << "            if (!gb_platform_poll_events(ctx)) {\n";
     main_ss << "                running = false;\n";

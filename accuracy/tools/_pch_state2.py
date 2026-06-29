@@ -2,7 +2,9 @@
 disabled while the oracle sounds, was length_counter==0 (LENGTH expiry) or dac=0 (DAC)?
 state file = 8 int16/sample: [4x enabled<<8|vol][4x len|dac<<12|len_en<<13].
 Usage: _pch_state2.py rec.pch ora.pch rec.state8 [lag_ms]"""
-import sys, numpy as np
+import sys, os, numpy as np
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import audio_drift_diff as A
 RATE = 44100
 def load(p, nch):
     raw = np.fromfile(p, dtype="<i2"); n = (raw.size // nch) * nch
@@ -18,10 +20,10 @@ length  = st[:, 4:] & 0xFF
 dac     = (st[:, 4:] >> 12) & 1
 len_en  = (st[:, 4:] >> 13) & 1
 names = ["CH1 square", "CH2 square", "CH3 wave", "CH4 noise"]
-W = int(0.05 * RATE)
-def win_active(x, thr=0.10):
-    n = (len(x)//W)*W; w = x[:n].reshape(-1, W)
-    return np.repeat((w > 0).mean(axis=1) > thr, W)
+def win_active(x, thr=0.5):
+    # DC-robust: a disabled-but-DAC-on channel holds a constant DC level (~16) that
+    # the old (x>0) test counted as "sounding". AC energy distinguishes a real note.
+    return A.win_active_ac(x, RATE, win_s=0.05, thr=thr)
 print("among recomp-DISABLED-while-oracle-sounding samples: cause breakdown")
 print("%-11s | n disabled | len==0%% | dac==0%% | len_en%% | mean len" % "")
 print("-" * 72)

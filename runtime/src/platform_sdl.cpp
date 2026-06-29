@@ -532,6 +532,18 @@ static uint32_t g_dump_present_frames[MAX_DUMP_FRAMES];
 static int g_dump_present_count = 0;
 static char g_screenshot_prefix[64] = "screenshot";
 
+/* Guest-CYCLE-based frame dump. Unlike g_dump_frames (keyed to rendered/presented
+ * VBlank frames), this triggers on elapsed guest cycles, so it captures a frame
+ * even when the ROM keeps the LCD off, enables it late, or halts after rendering
+ * (e.g. Mealybug PPU test ROMs). A target "frame N" = N * 70224 T-cycles, matching
+ * SameBoy's gb_fb_oracle GB_run_frame cadence. Checked every gb_run_cycles slice. */
+#define GB_T_CYCLES_PER_FRAME 70224ull
+static uint64_t g_dump_cycle_targets[MAX_DUMP_FRAMES];
+static uint32_t g_dump_cycle_framenums[MAX_DUMP_FRAMES];
+static bool     g_dump_cycle_done[MAX_DUMP_FRAMES];
+static int      g_dump_cycle_count = 0;
+static uint64_t g_dump_cycle_max = 0;
+
 static bool env_flag_enabled(const char* name) {
     const char* value = SDL_getenv(name);
     if (!value || !value[0]) {
@@ -1883,6 +1895,25 @@ void gb_platform_set_screenshot_prefix(const char* prefix) {
     if (prefix) snprintf(g_screenshot_prefix, sizeof(g_screenshot_prefix), "%s", prefix);
 }
 
+void gb_platform_set_dump_cycle_frames(const char* frames) {
+    g_dump_cycle_count = 0;
+    g_dump_cycle_max = 0;
+    if (!frames) return;
+    char* copy = strdup(frames);
+    char* token = strtok(copy, ",");
+    while (token && g_dump_cycle_count < MAX_DUMP_FRAMES) {
+        uint32_t fn = (uint32_t)strtoul(token, NULL, 10);
+        uint64_t target = (uint64_t)fn * GB_T_CYCLES_PER_FRAME;
+        g_dump_cycle_framenums[g_dump_cycle_count] = fn;
+        g_dump_cycle_targets[g_dump_cycle_count] = target;
+        g_dump_cycle_done[g_dump_cycle_count] = false;
+        if (target > g_dump_cycle_max) g_dump_cycle_max = target;
+        g_dump_cycle_count++;
+        token = strtok(NULL, ",");
+    }
+    free(copy);
+}
+
 static void save_ppm(const char* filename, const uint32_t* fb, int width, int height, int frame_count) {
     const std::string resolved_filename = resolve_writable_path(filename, "artifacts");
     // Calculate simple hash
@@ -1911,6 +1942,33 @@ static void save_ppm(const char* filename, const uint32_t* fb, int width, int he
     free(row);
     fclose(f);
     printf("[AUTO] Saved screenshot: %s\n", resolved_filename.c_str());
+}
+
+/* Capture the current framebuffer when guest time crosses each requested target.
+ * Called every gb_run_cycles slice from the main loop, so it fires regardless of
+ * LCD/render/halt state. In benchmark (headless) mode, exits once all targets are
+ * captured so the harness terminates without relying on rendered-frame counts. */
+void gb_platform_check_cycle_dump(GBContext* ctx) {
+    if (g_dump_cycle_count == 0 || !ctx) return;
+    uint64_t cyc = (uint64_t)ctx->cycles;
+    for (int i = 0; i < g_dump_cycle_count; i++) {
+        if (!g_dump_cycle_done[i] && cyc >= g_dump_cycle_targets[i]) {
+            const uint32_t* fb = gb_get_framebuffer(ctx);
+            if (fb) {
+                char filename[160];
+                snprintf(filename, sizeof(filename), "%s_%05u.ppm",
+                         g_screenshot_prefix, g_dump_cycle_framenums[i]);
+                save_ppm(filename, fb, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
+                         (int)g_dump_cycle_framenums[i]);
+            }
+            g_dump_cycle_done[i] = true;
+        }
+    }
+    if (g_dump_cycle_max > 0 && cyc >= g_dump_cycle_max && g_benchmark_mode) {
+        bool all = true;
+        for (int i = 0; i < g_dump_cycle_count; i++) if (!g_dump_cycle_done[i]) all = false;
+        if (all) { fflush(stdout); exit(0); }
+    }
 }
 
 
@@ -5586,6 +5644,9 @@ void gb_platform_set_title(const char* title) {
 }
 
 void gb_platform_set_dump_frames(const char* frames) { (void)frames; }
+
+void gb_platform_set_dump_cycle_frames(const char* frames) { (void)frames; }
+void gb_platform_check_cycle_dump(GBContext* ctx) { (void)ctx; }
 
 void gb_platform_set_screenshot_prefix(const char* prefix) { (void)prefix; }
 

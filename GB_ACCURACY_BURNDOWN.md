@@ -184,17 +184,26 @@ blocking; registers latched at mode-3 start (scanline-granular).
       m3_bgp_change 26.9 % off). The recomp's scanline renderer needs per-dot/fetcher rendering to
       pass the Mealybug `m3_*` suite.
 
-**Mealybug `m3_*` subset scorecard (2026-06-28)** via `accuracy/oracle/{run_testrom,score_mealybug}.sh`
-(each ROM recompiled → built → run → fb_diff vs `expected/DMG-blob/*.png`):
-- `m3_bgp_change`: **26.9 %** differing vs DMG ground truth (sub-scanline BGP change — confirmed gap).
-- `m3_obp0_change`: **fails to LINK** (`ld returned 1`) — a concrete **recompiler gap** surfaced by
-  the test-ROM stress run (separate from PPU; track under Axis 6).
-- `m3_scx_low_3_bits`, `m3_scy_change`, `m3_lcdc_{bg_en,obj_en,win_en_multiple,tile_sel}_change`:
-  built+ran, but **no framebuffer dumped** — these Mealybug ROMs enable the LCD *late* and/or halt,
-  so the recomp's *rendered-frame*-based `--dump-frames` counter never reaches the target.
-- **Harness refinement to finish the scorecard:** make the dump **guest-cycle-based** (like
-  `gb_state_oracle`) instead of rendered-frame-based, so render-once/late-LCD tests are captured;
-  also auto-pick the dump point after the test stabilizes. Then re-score the full 31-ROM `m3_*` set.
+**COMPLETE Mealybug `m3_*` scorecard (2026-06-28)** via `accuracy/oracle/{run_testrom,score_mealybug}.sh`
+— now **guest-cycle-based dump** (`--dump-cycle-frames N` = N×70224 T-cycles, fires regardless of
+LCD/halt; new runtime API `gb_platform_set_dump_cycle_frames`/`gb_platform_check_cycle_dump`, CLI flag
++ per-slice check in `c_emitter.cpp` generated main). All 23 m3_* ROMs with DMG ground truth now
+capture a framebuffer. `m3_obp0_change`'s earlier "link failure" was a **stale-exe file lock**
+(`Permission denied` on relink), NOT a recompiler gap — fixed by a pre-build `taskkill` in the harness.
+
+% differing vs `expected/DMG-blob/*.png`, frame 20 (lower = better):
+
+| < 1 % (PASS) | 1–10 % (close) | 10–50 % | > 50 % (scanline-renderer can't do mid-mode-3) |
+|---|---|---|---|
+| obj_size_change_scx **0.8** | window_timing_wx_0 4.1; window_timing 5.3; lcdc_bg_en_change 9.5 | bgp_change 26.9; win_en_multiple_wx 26.1; scx_high_5_bits 36.2; win_en_multiple 39.0; wx_4 40.8; wx_5 40.7; wx_6 41.6 | scy_change 67.0; bgp_change_sprites 88.3; lcdc_obj_en_change_variant 94.2; lcdc_bg_map_change 94.6; lcdc_obj_size_change 94.9; lcdc_win_map_change 95.0; lcdc_tile_sel_win_change 96.2; lcdc_tile_sel_change 96.3; scx_low_3_bits 97.7; obp0_change 98.7; lcdc_obj_en_change 99.4; wx_4_change_sprites 100.0 |
+
+**Reading:** 1/22 sub-scanline-exact, 3 close, the rest fail **by design** — the recomp renders one
+register value per scanline, so any register change *mid-mode-3* (BGP/OBP/LCDC/SCX/SCY/WX/window) is
+applied at a scanline boundary instead of the exact dot. This is the quantified Axis-5a sub-scanline
+gap. **Lever:** per-dot/fetcher PPU rendering (large; would let the recomp pass the `m3_*` suite).
+Some >90% cases also render blank at frame 20 (recomp 1 gray level) — a few need a per-ROM dump frame.
+*(Caveat: `gb_fb_oracle` renders blank on several m3_* ROMs under skip-boot, so the bundled
+`expected/` PNGs are the ground truth, not the SameBoy fb oracle.)* Raw table: `accuracy/out/mealybug_scorecard.txt`.
 
 ### 5b — Audio / APU  ← FIRST ACTIVE SLICE        Status: APPROXIMATE
 
@@ -349,37 +358,46 @@ structurally correct: trigger resets volume to `nr12>>4` (`audio.c:669-677`); en
 (`:425-429`), length 256 Hz (`:382-398`), frame sequencer 512 Hz / no double-clock
 (`:1020-1042`, DIV advances at T-rate `gbrt.c:3555`). So the bug is **not** in the obvious code.
 
-**ROOT CAUSE — length-counter divergence (PINNED 2026-06-28).** Internal per-channel state trace
-(recomp `audio.c` `enabled`/`volume`/`length_counter`/`dac`/`length_enabled` via `GBRT_AUDIO_PCH`;
-oracle `gb_audio_oracle.c` `length_enabled`), diffed by `_pch_state.py` / `_pch_state2.py`:
-- Of the square/noise samples silent-while-oracle-sounding, **65–72 % are the channel DISABLED**
-  (not envelope-zero, not duty); of those disables, **95–100 % are `length_counter==0` with
-  `length_enabled` set and DAC on** — i.e. the **length counter expired and cut the note**. Wave
-  is unaffected (its `length_enabled` is 0 % on both).
-- The recomp holds `length_enabled` asserted far more than SameBoy (recomp 94/99/99 % for
-  CH1/2/4 vs SameBoy **27/48/48 %**), and its counter reaches 0 where SameBoy's doesn't — so the
-  recomp silences notes SameBoy sustains.
-- **Verdict:** the recomp's length handling (`audio.c:671/709/759` naive `= value & 0x40`, simple
-  256 Hz countdown, trigger reload `:670`) does not implement GB's **obscure length-counter
-  behavior** (length-enable extra-clock quirk, trigger-with-length-enable, NRx1 reload timing)
-  that SameBoy does. Pokémon's engine (`pokered/audio/engine_1.asm:946` `or $80` "counter mode")
-  leans on that behavior.
+**CORRECTED ROOT CAUSE — DC-offset measurement artifact, NOT a recomp bug (2026-06-28, trace round #2).**
+The earlier "length-counter divergence" verdict was WRONG; it was an artifact of comparing the raw
+per-channel captures. What actually happens:
+- The Pokémon engine writes `NR12/22/42=08` (DAC on, vol 0) + `NRx4=0x40` (length-enable, **no
+  trigger**) at init, never triggering the channels during the silent copyright/intro phase. With
+  the DAC on but the channel disabled, **SameBoy correctly emits a constant DC level (digital ~16)**;
+  the recomp represents the same state as `0`. The DC level is **inaudible** — the output high-pass
+  removes it — but in the raw `.pch` it looks like a "stuck" channel, so `_pch_state2`/`perchannel_diff`
+  + the `(x>0)` active-fraction falsely reported ~48 % "note-drop".
+- Proof recomp is correct: (1) framebuffers match game-state at invariant frames (copyright@f180,
+  GAME FREAK@f330, intro@f600 → CPUs lockstep); (2) SameBoy's APU **write stream is byte-identical**
+  to the recomp's (env `GB_APU_WTRACE` in `SameBoy/Core/apu.c`) — same init, first trigger at write
+  #332 in both → neither triggers during 0–10 s; (3) pret disasm: first music is `Music_IntroBattle`
+  started inside the GameFreak intro (`engine/movie/intro.asm:333`), copyright is silent; (4) FINAL
+  `.s16` output: 0–5 s BOTH RMS=0, 10–20 s comparable. `length_enabled` is exonerated:
+  `(enabled & length_enabled)=0 %` on every channel → the length counter never cuts a sounding note.
+  **DO NOT port length-counter quirks** (they'd disable *earlier* — wrong direction).
 
-**Fix (deferred to a focused task):** reimplement the GB length-counter quirks in `audio.c` to
-match hardware/SameBoy, validated against the mooneye `length`/`length_*` test ROMs (not just
-Pokémon), then re-run `_pch_state.py` — the disabled-while-sounding fraction should collapse.
-This is the lever for the square/noise note-drop (the last big chunk of the mix residual).
+**TOOLS FIXED (DC-robust, 2026-06-28).** Added `highpass`/`ac_rms`/`win_active_ac` to
+`audio_drift_diff.py`; `perchannel_diff.py` and `_pch_state2.py` now gate activity on **AC** energy
+(DC-removed) instead of raw nonzero. After the fix, `_pch_state2` false-disabled collapsed ~99 %
+(CH1 248835→15105, CH2 423625→2470, CH4 423732→2577; remainder is mostly `dac==0` envelope/DAC
+timing, not length). `perchannel_diff` now shows matched AC activity and **specCos 1.000/0.995/1.000/
+1.000, pitch ~0 c** on all 4 channels — the recomp APU is accurate.
+
+**Remaining real residual (small, separate task):** in the FINAL output, 5–10 s the recomp is
+quieter than the oracle (RMS ~1000/527 vs ~3385/3933) during the GameFreak intro — investigate on
+the final `.s16` with invariant-point alignment, NOT the raw per-channel capture.
 
 ---
 
-| Metric | Value | Reading |
+| Metric (DMG-vs-DMG, faithful oracle, 2026-06-28 re-score) | Value | Reading |
 |---|---|---|
-| **Spectral similarity** (log-mel cosine, drift-tolerant headline) | **mean 0.921, p50 0.939, p10 0.831** | Same music; ~92% spectrally close through different DAC models. |
-| Onset-envelope cross-correlation peak | **0.817** | Strong rhythmic/structural agreement. |
-| Alignment lag (recomp vs oracle) | **−824 ms** | Recomp reaches audio-engine init ~0.8 s later; removed before similarity. |
-| Onset timing | **62 % matched, |Δ|mean 26 ms** (p10/p90 ±46 ms) | Beats line up but with audible jitter. |
-| Raw-waveform seg-corr | −0.30 (footnote) | Near-zero **expected** — recomp ±1×vol square vs SameBoy DAC differ in timbre, not tune. |
-| Per-note pitch error (HPS f0) | **|median| 4.3 c, within-50c 69 %** | Recomp plays **in tune** with SameBoy where pitched; residual p90 is noise-channel/octave frames. |
+| **Spectral similarity** (log-mel cosine, drift-tolerant headline) | **mean 0.951, p50 0.966, p10 0.890** | Same music; spectrally near-identical through different DAC models. |
+| Onset-envelope cross-correlation peak | **0.903** | Strong rhythmic/structural agreement. |
+| Alignment lag (recomp vs oracle) | **+23.2 ms** | Small; the old −824 ms was an SGB-vs-DMG model mismatch (use `GBRT_HARDWARE_MODE=dmg`). |
+| Onset timing | **96 % matched, |Δ|mean 26 ms** (p10/p90 −46/+24 ms) | Beats line up; residual jitter from per-instruction APU sync. |
+| Raw-waveform seg-corr | ~0.21 (footnote) | Near-zero **expected** — recomp vs SameBoy DAC differ in timbre, not tune. |
+| Per-note pitch error (HPS f0) | **|median| 1.7 c, within-50c 79 %** | Recomp plays **in tune**; per-channel pitch ~0 c (perchannel_diff). |
+| Per-channel spectral cosine (DC-robust perchannel_diff) | **CH1 1.000 / CH2 0.995 / CH3 1.000 / CH4 1.000** | APU generation accurate on every channel. |
 
 ### Harness validation (multi-ROM + negative control)
 

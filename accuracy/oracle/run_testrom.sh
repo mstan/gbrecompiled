@@ -19,6 +19,9 @@ D="$WT/testroms/$name"
 romwin=$(cygpath -w "$ROM" 2>/dev/null | sed 's#\\#/#g'); romwin="${romwin:-$ROM}"
 
 echo "[testrom] recompiling $name ..."
+# Kill any stale instance first: a still-running exe locks the output file and the
+# relink fails with "Permission denied" (looks like a link gap but isn't).
+( taskkill //F //IM "$name.exe" >/dev/null 2>&1 ) || true
 "$REPO/build/bin/gbrecomp.exe" "$ROM" -o "$D" >/dev/null 2>&1
 # Point the generated project's runtime at the worktree runtime (absolute).
 sed -i -E "s#set\\(GBRT_DIR \"[^\"]*\"\\)#set(GBRT_DIR \"$RT\")#" "$D/CMakeLists.txt"
@@ -32,11 +35,15 @@ PATH="$CLEAN_PATH" ninja -C "$D/build" >/dev/null 2>&1 || { echo "[testrom] buil
 # Pre-fill rom.cfg so the launcher loads the exact ROM (SHA-checked) headless.
 echo "$romwin" > "$D/build/rom.cfg"
 echo "[testrom] running recomp -> frame $FRAME"
-# --limit-frames makes benchmark mode exit after dumping (it otherwise loops
-# forever); timeout is a hard safety net.
+# --dump-cycle-frames triggers on elapsed guest cycles (frame N = N*70224 T-cycles),
+# so it captures even when the ROM keeps the LCD off / enables it late / halts after
+# rendering (rendered-frame --dump-frames misses those). Benchmark mode exits once the
+# cycle target is captured; --limit-frames + timeout are hard safety nets.
+# The exe needs mingw64/bin on PATH for its DLLs (SDL2/libstdc++/...). Set it only
+# for this launch so the python diff steps still resolve the pyenv python (numpy).
 ( cd "$D/build" && rm -f tr_*.ppm \
-  && timeout 40 bash -c "GBRECOMP_BENCHMARK=1 GBRT_HARDWARE_MODE=dmg ./$name.exe \
-       --dump-frames $FRAME --limit-frames $((FRAME + 5)) --screenshot-prefix tr >/dev/null 2>&1" )
+  && timeout 40 bash -c "PATH=\"/c/msys64/mingw64/bin:\$PATH\" GBRECOMP_BENCHMARK=1 GBRT_HARDWARE_MODE=dmg ./$name.exe \
+       --dump-cycle-frames $FRAME --limit-frames $((FRAME + 30)) --screenshot-prefix tr >/dev/null 2>&1" )
 ( taskkill //F //IM "$name.exe" >/dev/null 2>&1 ) || true
 rec="$OUT/recomp_tr_$name.ppm"
 cp "$D/build/tr_$(printf '%05d' "$FRAME").ppm" "$rec"

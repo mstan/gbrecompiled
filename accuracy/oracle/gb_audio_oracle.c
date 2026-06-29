@@ -56,6 +56,15 @@ static void on_sample(GB_gameboy_t *gb, GB_sample_t *sample)
         };
         fwrite(le, 1, 4, g_lenen);
     }
+    if (getenv("GB_DUMP_STATE") && g_sample_index == 20000) {
+        fprintf(stderr, "[dump@5000] global_enable=%d\n", gb->apu.global_enable);
+        for (int i = 0; i < 4; i++)
+            fprintf(stderr, "  ch%d: is_active=%d samples=%d\n", i+1,
+                    gb->apu.is_active[i], gb->apu.samples[i]);
+        fprintf(stderr, "  sq1 vol=%d sq2 vol=%d\n",
+                gb->apu.square_channels[0].current_volume,
+                gb->apu.square_channels[1].current_volume);
+    }
     g_sample_index++;
 }
 
@@ -69,6 +78,12 @@ static void skip_boot_dmg(GB_gameboy_t *gb)
     gb->sp = 0xFFFE;
     gb->pc = 0x0100;
     gb->boot_rom_finished = true;
+    /* NOTE: SameBoy correctly emits a constant DC level (digital ~16) on a
+     * disabled-but-DAC-on channel (NR12!=0, never triggered). It is INAUDIBLE
+     * (the output high-pass removes it) but shows up in the raw per-channel .pch
+     * as a "stuck" 0/16 pattern -> do NOT mistake it for note-drop. Per-channel
+     * diagnostics must mean-subtract/high-pass before comparing vs the recomp,
+     * which represents the same state as 0. The final .s16 output is unaffected. */
 }
 
 int main(int argc, char **argv)

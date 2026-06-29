@@ -25,9 +25,44 @@ import argparse, json, sys
 import numpy as np
 
 try:
-    from scipy.signal import stft, find_peaks, fftconvolve
+    from scipy.signal import stft, find_peaks, fftconvolve, butter, sosfiltfilt
 except Exception as e:                                   # pragma: no cover
     print("ERROR: scipy required (%s)" % e, file=sys.stderr); sys.exit(2)
+
+
+# --------------------------------------------------------------- DC-robust activity
+def highpass(x, rate, cut=40.0, order=4):
+    """Remove DC + sub-audio low frequencies. A disabled-but-DAC-on GB channel holds
+    a constant DC level (digital ~16) in the raw per-channel capture — inaudible (the
+    output high-pass removes it) but it inflates raw RMS and masquerades as a sounding
+    note. High-passing drops that DC hold (and the slow DAC on/off block switching)
+    while keeping the audio-band oscillation of a real note, so activity tests compare
+    apples-to-apples vs the recomp (which represents the same state as 0)."""
+    x = np.asarray(x, dtype=np.float64)
+    if len(x) < 3 * order + 1:
+        return (x - np.mean(x)).astype(np.float32)
+    sos = butter(order, cut / (rate * 0.5), btype="highpass", output="sos")
+    return sosfiltfilt(sos, x).astype(np.float32)
+
+
+def ac_rms(x, rate, cut=40.0):
+    """RMS of the audio-band (DC-removed) signal."""
+    return float(np.sqrt(np.mean(highpass(x, rate, cut) ** 2)))
+
+
+def win_active_ac(x, rate, win_s=0.05, cut=40.0, thr=0.5):
+    """Per-sample boolean (repeated per window): window has audio-band AC energy above
+    thr. DC holds -> ~0 -> inactive; real notes -> high -> active."""
+    h = highpass(x, rate, cut)
+    W = max(1, int(win_s * rate)); n = (len(h) // W) * W
+    if n == 0:
+        return np.zeros(len(x), dtype=bool)
+    w = h[:n].reshape(-1, W)
+    rms = np.sqrt((w * w).mean(axis=1))
+    act = np.repeat(rms > thr, W)
+    if len(act) < len(x):                                # pad tail
+        act = np.concatenate([act, np.zeros(len(x) - len(act), dtype=bool)])
+    return act
 
 
 # ----------------------------------------------------------------------------- io

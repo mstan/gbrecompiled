@@ -68,12 +68,15 @@ def main():
           % (rec.shape[0], ora.shape[0], args.rate))
     print("=" * 78)
     print("%-11s %7s %7s  %7s %7s  %7s  %s"
-          % ("channel", "rec rms", "ora rms", "lag ms", "onsetX", "specCos", "pitch/energy"))
+          % ("channel", "rec acR", "ora acR", "lag ms", "onsetX", "specCos", "pitch/energy"))
     print("-" * 78)
 
     for c in range(4):
         r, o = rec[:, c], ora[:, c]
-        rrms, orms = raw_rms(r), raw_rms(o)
+        # Gate activity on AC (DC-removed) RMS: a disabled-but-DAC-on channel holds a
+        # constant DC level in the oracle .pch that inflates raw RMS and falsely reads
+        # as "playing". AC-RMS makes recomp (0) and oracle (DC hold) comparable.
+        rrms, orms = A.ac_rms(r, args.rate), A.ac_rms(o, args.rate)
         r_act, o_act = rrms > args.active_rms, orms > args.active_rms
         if not r_act and not o_act:
             print("%-11s %7.2f %7.2f  %s" % (NAMES[c], rrms, orms, "(silent both)"))

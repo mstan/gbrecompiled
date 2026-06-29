@@ -774,6 +774,20 @@ void gb_platform_set_input_record_file(const char* path);
 void gb_platform_set_dump_frames(const char* frames);
 
 /**
+ * @brief Set guest-frame numbers to dump by elapsed guest CYCLES (frame N = N*70224
+ * T-cycles), independent of rendered/VBlank frames. Robust for ROMs that keep the LCD
+ * off, enable it late, or halt after rendering (e.g. Mealybug PPU tests). Format
+ * "frame1,frame2,...". Pair with gb_platform_check_cycle_dump() in the run loop.
+ */
+void gb_platform_set_dump_cycle_frames(const char* frames);
+
+/**
+ * @brief Capture the framebuffer when guest time crosses each requested target.
+ * Call once per gb_run_cycles slice. In benchmark mode, exits when all are captured.
+ */
+void gb_platform_check_cycle_dump(GBContext* ctx);
+
+/**
  * @brief Set filename prefix for screenshots
  */
 void gb_platform_set_screenshot_prefix(const char* prefix);

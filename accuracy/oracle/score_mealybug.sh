@@ -4,19 +4,34 @@ set -uo pipefail
 MB=/f/Projects/mealybug-tearoom-tests
 WT=/f/Projects/gbcrecomp/_wt-accuracy
 FRAME="${1:-20}"
-TESTS=(m3_bgp_change m3_obp0_change m3_scx_low_3_bits m3_scy_change
-       m3_lcdc_bg_en_change m3_lcdc_obj_en_change m3_lcdc_win_en_change_multiple
-       m3_lcdc_tile_sel_change)
 
-printf "%-34s | %-10s | %s\n" "m3 test (mid-mode-3 effect)" "build/run" "vs DMG ground truth"
-printf -- "------------------------------------------------------------------------------\n"
+# All m3_* (mid-mode-3) ROMs that have a DMG-blob ground-truth PNG. Guest-cycle dump
+# (run_testrom --dump-cycle-frames) captures even late-LCD/halting ROMs.
+TESTS=()
+for rom in "$MB"/_roms/m3_*.gb; do
+    t=$(basename "${rom%.gb}")
+    [ -f "$MB/expected/DMG-blob/$t.png" ] && TESTS+=("$t")
+done
+
+printf "%-36s | %-9s | %s\n" "m3 test (mid-mode-3 effect)" "build/run" "vs DMG ground truth"
+printf -- "--------------------------------------------------------------------------------\n"
+pass=0; built=0; total=0
 for t in "${TESTS[@]}"; do
+    total=$((total+1))
     rom="$MB/_roms/$t.gb"; exp="$MB/expected/DMG-blob/$t.png"
     log=$(bash "$WT/accuracy/oracle/run_testrom.sh" "$rom" "$FRAME" "$exp" 2>&1)
     if echo "$log" | grep -q "build FAILED"; then
-        printf "%-34s | %-10s | %s\n" "$t" "FAIL" "(did not build)"; continue
+        printf "%-36s | %-9s | %s\n" "$t" "BUILD-ERR" "(recompiler/link gap)"; continue
     fi
-    # the last "differing pixels" line is the vs-expected diff
     res=$(echo "$log" | grep "differing pixels" | tail -1 | sed -E 's/.*differing pixels: //')
-    printf "%-34s | %-10s | %s\n" "$t" "ok" "${res:-(no output)}"
+    if [ -z "$res" ]; then
+        printf "%-36s | %-9s | %s\n" "$t" "NO-FB" "(no framebuffer captured)"; continue
+    fi
+    built=$((built+1))
+    pct=$(echo "$res" | sed -E 's/.*\(([0-9.]+)%\)/\1/')
+    # treat <1% differing as PASS (sub-scanline exact); else report the gap
+    awk "BEGIN{exit !($pct < 1.0)}" && { pass=$((pass+1)); tag="PASS"; } || tag="ok"
+    printf "%-36s | %-9s | %s  %s\n" "$t" "$tag" "$res" ""
 done
+printf -- "--------------------------------------------------------------------------------\n"
+printf "scored %d/%d ROMs ; PASS(<1%%) %d ; frame=%d\n" "$built" "$total" "$pass" "$FRAME"

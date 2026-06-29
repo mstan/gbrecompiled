@@ -48,10 +48,14 @@ echo "[testrom] running recomp -> frame $FRAME"
 rec="$OUT/recomp_tr_$name.ppm"
 cp "$D/build/tr_$(printf '%05d' "$FRAME").ppm" "$rec"
 
-# SameBoy oracle (note: blank on some Mealybug ROMs -- prefer the expected PNG).
+# SameBoy oracle. "ldbb" makes it capture at the `LD B,B` software breakpoint
+# (how Mealybug signals "screenshot now") with post-boot IO+VRAM state, instead
+# of a fixed frame; it falls back to frame N for ROMs that never hit LD B,B.
+# Cap at >= 90 frames so a late breakpoint isn't missed.
 clean="$OUT/${name}.gb"; cp "$ROM" "$clean"
 ora="$OUT/oracle_tr_$name.ppm"
-timeout 30 "$WT/accuracy/oracle/gb_fb_oracle.exe" "$clean" "$ora" "$FRAME" dmg >/dev/null 2>&1 || true
+ldbb_cap=$(( FRAME > 90 ? FRAME : 90 ))
+timeout 30 "$WT/accuracy/oracle/gb_fb_oracle.exe" "$clean" "$ora" "$ldbb_cap" dmg ldbb >/dev/null 2>&1 || true
 
 echo "[testrom] === vs SameBoy oracle ==="
 python "$WT/accuracy/tools/fb_diff.py" "$rec" "$ora" 2>&1 | grep -E "differing|MISMATCH|levels" || true

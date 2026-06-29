@@ -1127,6 +1127,40 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     }
 }
 
+/* Replicate the VRAM tile data the DMG boot ROM leaves behind: the Nintendo
+ * logo (cart header 0x104-0x133) expanded into tiles 1-24, plus the fixed ®
+ * trademark symbol in tile 25. We skip the bootrom, so without this VRAM bank 0
+ * starts blank — but real post-boot hardware has these tiles, and some ROMs
+ * rely on them without loading their own (the Mealybug m3_*_sprites tests use
+ * tile 0x19 = the ®). Algorithm transcribed from the DMG boot ROM
+ * (DoubleBitsAndWriteRow + TrademarkSymbol): each logo byte's two nibbles are
+ * each bit-doubled to an 8-pixel row, written to two consecutive rows' low
+ * bit-plane (high plane left 0). Games that load their own tiles overwrite this
+ * harmlessly. DMG only — the CGB boot logo path differs (color attrs). */
+static void gbrt_load_boot_logo_vram(GBContext* ctx) {
+    static const uint8_t trademark[8] = {0x3C,0x42,0xB9,0xA5,0xB9,0xA5,0x42,0x3C};
+    if (!ctx->rom || ctx->rom_size < 0x134) return;
+    uint8_t* vram = ctx->vram;   /* bank 0 */
+    int hl = 0x10;               /* VRAM offset of tile 1 (0x8010) */
+    for (int i = 0; i < 48; i++) {
+        uint8_t b = ctx->rom[0x104 + i];
+        for (int half = 0; half < 2; half++) {   /* top nibble, then low nibble */
+            uint8_t c = 0;
+            for (int k = 0; k < 4; k++) {
+                uint8_t bit = (uint8_t)((b >> 7) & 1);
+                b = (uint8_t)(b << 1);
+                c = (uint8_t)((c << 1) | bit);    /* double the bit */
+                c = (uint8_t)((c << 1) | bit);
+            }
+            vram[hl] = c; hl += 2;   /* low plane of row N   (high plane = 0) */
+            vram[hl] = c; hl += 2;   /* low plane of row N+1 (vertical double) */
+        }
+    }
+    for (int i = 0; i < 8; i++) {    /* ® trademark into tile 25 even offsets */
+        vram[hl] = trademark[i]; hl += 2;
+    }
+}
+
 bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
     if (ctx->rom) free(ctx->rom);
     ctx->rom = (uint8_t*)malloc(size);
@@ -1294,7 +1328,13 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
             }
         }
     }
-    
+
+    /* Post-boot VRAM state (Nintendo logo + ® tile) for DMG carts; some ROMs
+     * rely on these boot-left tiles without loading their own. */
+    if (!gb_is_cgb_hardware(ctx)) {
+        gbrt_load_boot_logo_vram(ctx);
+    }
+
     return true;
 }
 

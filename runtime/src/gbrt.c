@@ -1867,6 +1867,7 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
             return ctx->io[addr - 0xFF00];
         }
         if (addr == 0xFF55) {
+            if (!gb_is_cgb_hardware(ctx)) return 0xFF; /* HDMA5 unmapped on DMG */
             return gb_hdma_status_read(ctx);
         }
         if (addr == 0xFF56) {
@@ -1906,10 +1907,27 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
             return ppu_read_register((GBPPU*)ctx->ppu, addr);
         }
         if (addr >= 0xFF68 && addr <= 0xFF6B) {
+            if (!gb_is_cgb_hardware(ctx)) return 0xFF; /* CGB palette regs unmapped on DMG */
             gb_sync(ctx);
             return ppu_read_register((GBPPU*)ctx->ppu, addr);
         }
         if (addr >= 0xFF10 && addr <= 0xFF3F) return gb_audio_read(ctx, addr);
+        /* Unused-bit masking for the remaining (non-PPU/non-audio/non-special)
+         * HWIO: unused bits and fully-unmapped IO read back as 1.
+         * Source: mooneye unused_hwio-GS + Pan Docs §I/O Registers. See gbrt.log. */
+        switch (addr) {
+            case 0xFF02: return (uint8_t)(ctx->io[0x02] | 0x7E); /* SC:  bits 1-6 unused */
+            case 0xFF07: return (uint8_t)(ctx->io[0x07] | 0xF8); /* TAC: bits 3-7 unused */
+            case 0xFF0F: return (uint8_t)(ctx->io[0x0F] | 0xE0); /* IF:  bits 5-7 read 1 */
+            default: break;
+        }
+        /* Fully-unmapped IO → 0xFF. CGB-mapped registers are special-cased
+         * above, so any FF4C-FF7F address reaching here is unmapped on this
+         * model (DMG: the whole range; CGB: the genuine holes). */
+        if (addr == 0xFF03 || (addr >= 0xFF08 && addr <= 0xFF0E) ||
+            (addr >= 0xFF4C && addr <= 0xFF7F)) {
+            return 0xFF;
+        }
         return ctx->io[addr - 0xFF00];
     }
     if (addr < 0xFFFF) return ctx->hram[addr - 0xFF80];

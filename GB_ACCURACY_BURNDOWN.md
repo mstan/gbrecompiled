@@ -205,6 +205,27 @@ Some >90% cases also render blank at frame 20 (recomp 1 gray level) — a few ne
 *(Caveat: `gb_fb_oracle` renders blank on several m3_* ROMs under skip-boot, so the bundled
 `expected/` PNGs are the ground truth, not the SameBoy fb oracle.)* Raw table: `accuracy/out/mealybug_scorecard.txt`.
 
+**SEGMENTED MID-SCANLINE RENDERING (2026-06-28).** Replaced the per-scanline latch+one-shot render
+with incremental mid-mode-3 rendering: `ppu_tick` MODE_DRAW now draws the BG/window in pixel ranges
+as mode-3 cycles elapse, sampling LIVE registers per segment (`render_bg_segment(x_start,x_end)`,
+~12-dot warmup then 1px/dot); `gb_write8` catches the PPU up (`gb_sync`) before applying any FF40-4B
+write so the change only affects later dots. (Sprites still render once at mode-3 end — increment 3.)
+Result vs latched baseline (`mealybug_scorecard_segmented.txt`): **net −207pp total pixel error**.
+- BIG wins (tile-granular mid-line): lcdc_win_map_change 95.0→7.8, lcdc_bg_map_change 94.6→8.1,
+  bgp_change_sprites 88.3→29.6, wx_6_change 41.6→38.8.
+- Small regressions (per-pixel, 1–7pp): window_timing_wx_0 4.1→11.4, lcdc_bg_en_change 9.5→14.2,
+  window_timing 5.3→9.5, wx_4 40.8→44.6, bgp_change 26.9→30.1, tile_sel 96.3→99.1.
+- **Pokémon Red: unaffected** (guest-aligned frames 100/250/300/560 = 0.000%, 500 = 0.69%). Verified
+  by regenerating with the new recompiler and dumping by GUEST cycle (`--dump-cycle-frames`); the
+  earlier "frame 250 = 99.6%" was purely the rendered-vs-guest frame-numbering offset.
+**Per-pixel ceiling = CPU↔PPU timing, NOT the PPU.** On m3_bgp_change the expected change is at col 1
+every row but the recomp places it at col 84→132 drifting ~−6/row; neither warmup nor wiring in the
+VARIABLE mode-3 duration (tried, reverted — zero m3 benefit, perturbs STAT timing) moves it. The
+write's guest-cycle→dot mapping is imprecise because these ROMs run in the interpreter and the recomp
+lacks sub-instruction cycle accuracy. Closing the per-pixel gap needs CPU-side cycle accuracy (Axis 3),
+not more PPU work. Decision: KEEP segmented rendering (net win, real-game-safe, foundation for
+mid-scanline raster effects); per-pixel exactness deferred. Visible-game rendering is identical.
+
 ### 5b — Audio / APU  ← FIRST ACTIVE SLICE        Status: APPROXIMATE
 
 Hand-written APU in `runtime/src/audio.c` (1020 lines); 4 channels modeled.

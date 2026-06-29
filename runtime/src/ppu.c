@@ -405,26 +405,37 @@ static uint16_t resolve_obj_color(const GBPPU* ppu,
     return dmg_palette_rgb555[apply_palette(raw_color, dmg_palette_reg)];
 }
 
-static void render_bg_scanline(GBPPU* ppu,
-                               GBContext* ctx,
-                               uint8_t* bg_raw,
-                               uint8_t* bg_priority) {
+/* Render BG/window pixels [x_start, x_end) of the current scanline using LIVE
+ * registers (not the per-scanline latch), into the persistent ppu->bg_raw_line /
+ * bg_priority_line buffers. Called in segments as mode-3 cycles elapse so a
+ * mid-mode-3 register write only affects dots drawn after it. Does NOT advance
+ * window_line (done once per scanline at mode-3 end). */
+static void render_bg_segment(GBPPU* ppu,
+                              GBContext* ctx,
+                              int x_start,
+                              int x_end) {
     uint8_t scanline = ppu->ly;
-    uint8_t lcdc = ppu->latched_lcdc;
+    uint8_t lcdc = ppu->lcdc;
+    uint8_t* bg_raw = ppu->bg_raw_line;
+    uint8_t* bg_priority = ppu->bg_priority_line;
     bool cgb_mode = ppu_is_cgb_mode(ctx);
     bool cgb_compat_mode = ppu_is_cgb_compat_mode(ctx);
     bool bg_visible = cgb_mode ? true : ((lcdc & LCDC_BG_ENABLE) != 0);
     bool window_enable = (lcdc & LCDC_WINDOW_ENABLE) &&
-                         (ppu->latched_wx <= 166) &&
-                         (ppu->latched_wy <= scanline) &&
+                         (ppu->wx <= 166) &&
+                         (ppu->wy <= scanline) &&
                          (cgb_mode || bg_visible);
 
+    if (x_start < 0) x_start = 0;
+    if (x_end > GB_SCREEN_WIDTH) x_end = GB_SCREEN_WIDTH;
+    if (x_start >= x_end) return;
+
     if (!(lcdc & LCDC_LCD_ENABLE)) {
-        memset(&ppu->framebuffer[scanline * GB_SCREEN_WIDTH], 0, GB_SCREEN_WIDTH);
-        memset(bg_raw, 0, GB_SCREEN_WIDTH);
-        memset(bg_priority, 0, GB_SCREEN_WIDTH);
-        for (size_t x = 0; x < GB_SCREEN_WIDTH; x++) {
+        for (int x = x_start; x < x_end; x++) {
+            ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = 0;
             ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_palette_rgb555[0];
+            bg_raw[x] = 0;
+            bg_priority[x] = 0;
         }
         return;
     }
@@ -433,12 +444,13 @@ static void render_bg_scanline(GBPPU* ppu,
         ppu->window_triggered = true;
     }
 
-    for (int x = 0; x < GB_SCREEN_WIDTH; x++) {
+    for (int x = x_start; x < x_end; x++) {
         uint8_t raw_color = 0;
         uint8_t palette_number = 0;
         uint8_t tile_bank = 0;
         bool priority = false;
-        bool in_window = window_enable && (x >= (int)ppu->latched_wx - 7);
+        bool in_window = window_enable && (x >= (int)ppu->wx - 7);
+        if (in_window) ppu->win_rendered_line = true;
         uint16_t tilemap_addr;
         uint8_t tile_x;
         uint8_t tile_y;
@@ -460,7 +472,7 @@ static void render_bg_scanline(GBPPU* ppu,
         }
 
         if (in_window) {
-            int win_x = x - ((int)ppu->latched_wx - 7);
+            int win_x = x - ((int)ppu->wx - 7);
             int win_y = ppu->window_line;
             tilemap_addr = get_window_tilemap_addr(lcdc);
             tile_x = (uint8_t)(win_x / 8);
@@ -468,8 +480,8 @@ static void render_bg_scanline(GBPPU* ppu,
             pixel_x = win_x % 8;
             pixel_y = win_y % 8;
         } else {
-            int bg_x = (x + ppu->latched_scx) & 0xFF;
-            int bg_y = (scanline + ppu->latched_scy) & 0xFF;
+            int bg_x = (x + ppu->scx) & 0xFF;
+            int bg_y = (scanline + ppu->scy) & 0xFF;
             tilemap_addr = get_bg_tilemap_addr(lcdc);
             tile_x = (uint8_t)(bg_x / 8);
             tile_y = (uint8_t)(bg_y / 8);
@@ -495,15 +507,11 @@ static void render_bg_scanline(GBPPU* ppu,
 
         ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = cgb_mode
             ? raw_color
-            : apply_palette(raw_color, ppu->latched_bgp);
+            : apply_palette(raw_color, ppu->bgp);
         ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] =
-            resolve_bg_color(ppu, ctx, palette_number, raw_color, ppu->latched_bgp);
+            resolve_bg_color(ppu, ctx, palette_number, raw_color, ppu->bgp);
         bg_raw[x] = raw_color;
         bg_priority[x] = priority ? 1 : 0;
-    }
-
-    if (ppu->window_triggered && window_enable) {
-        ppu->window_line++;
     }
 
     (void)cgb_compat_mode;
@@ -661,9 +669,14 @@ static void render_sprites_scanline(GBPPU* ppu,
     }
 }
 
+/* Finish the current scanline at mode-3 end: ensure the BG/window is fully drawn
+ * (any pixels not yet covered by the incremental segments), then sprites (one pass,
+ * after the full BG line exists), then advance the window line counter once. */
 void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
-    uint8_t bg_raw[GB_SCREEN_WIDTH];
-    uint8_t bg_priority[GB_SCREEN_WIDTH];
+    if (ppu->render_x < GB_SCREEN_WIDTH) {
+        render_bg_segment(ppu, ctx, ppu->render_x, GB_SCREEN_WIDTH);
+        ppu->render_x = GB_SCREEN_WIDTH;
+    }
 
     if (ppu->ly == 0) {
         gbrt_log_oam_snapshot(ctx, "scanline-0");
@@ -684,11 +697,11 @@ void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
                           ppu->window_line,
                           ppu->window_triggered);
 
-    memset(bg_raw, 0, sizeof(bg_raw));
-    memset(bg_priority, 0, sizeof(bg_priority));
+    render_sprites_scanline(ppu, ctx, ppu->bg_raw_line, ppu->bg_priority_line);
 
-    render_bg_scanline(ppu, ctx, bg_raw, bg_priority);
-    render_sprites_scanline(ppu, ctx, bg_raw, bg_priority);
+    if (ppu->win_rendered_line) {
+        ppu->window_line++;
+    }
 }
 
 static void convert_to_rgb(GBPPU* ppu) {
@@ -808,22 +821,40 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 }
 
                 ppu->mode = PPU_MODE_DRAW;
+                ppu->render_x = 0;            /* start incremental mid-scanline render */
+                ppu->win_rendered_line = false;
                 latch_scanline_registers(ppu);
                 update_stat(ppu, ctx);
                 check_stat_interrupt(ppu, ctx, "oam->draw");
                 break;
 
-            case PPU_MODE_DRAW:
+            case PPU_MODE_DRAW: {
+                /* Incrementally render the BG/window as mode-3 cycles elapse, sampling
+                 * LIVE registers, so a mid-mode-3 write (caught up via gb_sync on the
+                 * write) only affects dots drawn after it. ~12-cycle fetch warmup, then
+                 * 1 pixel/dot. */
+                /* Pixel x emerges after a ~12-dot fetch warmup (172 - 160), then
+                 * ~1 px/dot. (Fixed mode-3 duration; the variable-duration variant
+                 * gave no m3 benefit and perturbs STAT timing, so it's not used.) */
+                int warmup = (int)CYCLES_PIXEL_DRAW - GB_SCREEN_WIDTH;
+                if (warmup < 0) warmup = 0;
+                int target_x = (int)ppu->mode_cycles - warmup;
+                if (target_x > GB_SCREEN_WIDTH) target_x = GB_SCREEN_WIDTH;
+                if (target_x > ppu->render_x) {
+                    render_bg_segment(ppu, ctx, ppu->render_x, target_x);
+                    ppu->render_x = target_x;
+                }
                 if (ppu->mode_cycles < CYCLES_PIXEL_DRAW) {
                     return;
                 }
                 ppu->mode_cycles -= CYCLES_PIXEL_DRAW;
-                ppu_render_scanline(ppu, ctx);
+                ppu_render_scanline(ppu, ctx);   /* finish BG + sprites + window_line */
                 ppu->mode = PPU_MODE_HBLANK;
                 update_stat(ppu, ctx);
                 check_stat_interrupt(ppu, ctx, "draw->hblank");
                 gbrt_hdma_hblank(ctx);
                 break;
+            }
 
             case PPU_MODE_HBLANK:
                 if (ppu->mode_cycles < CYCLES_HBLANK) {

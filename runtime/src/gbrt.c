@@ -2242,6 +2242,10 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             return;
         }
         if ((addr >= 0xFF40 && addr <= 0xFF4B) || (addr >= 0xFF68 && addr <= 0xFF6B)) {
+            /* Catch the PPU up to the current cycle BEFORE applying the write, so
+             * dots already drawn this scanline keep the OLD register value and the
+             * change only affects subsequent dots (mid-mode-3 effects / Mealybug). */
+            gb_sync(ctx);
             ppu_write_register((GBPPU*)ctx->ppu, ctx, addr, value);
             return;
         }

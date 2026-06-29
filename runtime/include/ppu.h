@@ -137,6 +137,14 @@ typedef struct GBPPU {
     uint32_t scanline_draw_cycles;   /* Variable mode 3 duration */
     uint32_t scanline_hblank_cycles; /* Adjusted mode 0 duration */
     uint8_t  scanline_sprite_count;  /* Sprites found on this line */
+
+    /* Segmented mid-scanline (mode 3) rendering state. The BG/window scanline is
+     * drawn in pixel ranges as mode-3 cycles elapse, sampling LIVE registers per
+     * segment, so mid-mode-3 register writes (Mealybug m3_*) affect later dots. */
+    int      render_x;               /* Next BG pixel to draw this scanline (0..160) */
+    bool     win_rendered_line;      /* Window drawn on this scanline (window_line++) */
+    uint8_t  bg_raw_line[GB_SCREEN_WIDTH];      /* Persistent across segments */
+    uint8_t  bg_priority_line[GB_SCREEN_WIDTH];
     
     /* Framebuffer (2-bit color indices) */
     uint8_t framebuffer[GB_FRAMEBUFFER_SIZE];

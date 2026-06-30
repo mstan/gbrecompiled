@@ -5,8 +5,14 @@
 **Current target**: Tetris (Japan) — fully playable, no glitches. That proves the runtime is correct
 and builds the foundation that makes every subsequent game easier.
 
-This is NOT a GB emulator. We are NOT cycle-accurate in generated code. We are translating Z80 machine
-code to C, compiling it natively, and running it. The runtime handles hardware. That's it.
+This is NOT a GB emulator in the interpreter sense — we translate Z80 to C and compile it natively, so
+there is no per-instruction decode/dispatch loop. But we ARE cycle-accurate: the generated code emits
+correct hardware ticks (`gb_tick`) and advances the PPU/timer/APU/DMA at the right cycle — down to
+sub-instruction (per-M-cycle) granularity where a test or game depends on it. The static win (killing the
+decode loop) is orthogonal to tick granularity, so cycle-accuracy and native speed coexist. What we are
+NOT is *wall-clock / time-locked*: frame pacing is the host's job (SDL), not the core. Cycle-accurate
+tick placement is the DEFAULT; a per-region opt-out can batch ticks back to whole-instruction granularity
+to micro-optimize hot paths that touch no timing-sensitive hardware.
 
 Tetris is the vehicle. The recompiler + runtime is the product.
 

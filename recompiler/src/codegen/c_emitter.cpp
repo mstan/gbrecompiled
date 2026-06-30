@@ -1236,12 +1236,22 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
     // access for these opcodes so it lands at the correct cycle. Fixes blargg
     // mem_timing and places mid-line PPU/IO writes at the right dot (Axis 5a/5b).
     // Read-modify-write / stack / ALU-[hl] keep the tail tick (multi-access timing).
+    // ALU A,(HL) (single memory READ on the last M-cycle) and BIT b,(HL)
+    // (read-only) also touch the data bus and must tick-before, matching the
+    // interpreter's MEM_TICK_BEFORE. (RMW (HL) is handled by tick_rmw_split.)
+    bool is_alu_hl_read =
+        (instr.src.type != ir::OperandType::IMM8) && (instr.src.value.reg8 == 6) &&
+        (instr.opcode == ir::Opcode::ADD8 || instr.opcode == ir::Opcode::ADC8 ||
+         instr.opcode == ir::Opcode::SUB8 || instr.opcode == ir::Opcode::SBC8 ||
+         instr.opcode == ir::Opcode::AND8 || instr.opcode == ir::Opcode::OR8  ||
+         instr.opcode == ir::Opcode::XOR8 || instr.opcode == ir::Opcode::CP8);
+    bool is_bit_hl = (instr.opcode == ir::Opcode::BIT) && (instr.dst.value.reg8 == 6);
     bool tick_before_access =
         options.emit_cycle_counting && instr.cycles > 0 &&
         (instr.opcode == ir::Opcode::LOAD8     || instr.opcode == ir::Opcode::STORE8 ||
          instr.opcode == ir::Opcode::IO_READ   || instr.opcode == ir::Opcode::IO_READ_C ||
          instr.opcode == ir::Opcode::IO_WRITE  || instr.opcode == ir::Opcode::IO_WRITE_C ||
-         instr.opcode == ir::Opcode::STORE16);
+         instr.opcode == ir::Opcode::STORE16   || is_alu_hl_read || is_bit_hl);
     if (tick_before_access) {
         if (next_pc_val != 0) {
             emit_indent();

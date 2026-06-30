@@ -29,8 +29,10 @@ check 'gb_and8\(ctx, gb_read8\(ctx, ctx->hl\)\)'  'AND (HL) reads mem'
 check 'gb_or8\(ctx, gb_read8\(ctx, ctx->hl\)\)'   'OR (HL) reads mem'
 check 'gb_xor8\(ctx, gb_read8\(ctx, ctx->hl\)\)'  'XOR (HL) reads mem'
 check 'gb_add8\(ctx, gb_read8\(ctx, ctx->hl\)\)'  'ADD A,(HL) reads mem'
-check 'gb_write8\(ctx, ctx->hl, gb_inc8\(ctx, gb_read8\(ctx, ctx->hl\)\)\)' 'INC (HL) RMW'
-check 'gb_write8\(ctx, ctx->hl, gb_dec8\(ctx, gb_read8\(ctx, ctx->hl\)\)\)' 'DEC (HL) RMW'
+# RMW (HL): read at HL (bug guard) + cycle-accurate split (read; gb_tick; write).
+check 'gb_inc8\(ctx, gb_read8\(ctx, ctx->hl\)\)'  'INC (HL) reads mem at HL'
+check 'gb_dec8\(ctx, gb_read8\(ctx, ctx->hl\)\)'  'DEC (HL) reads mem at HL'
+check '__rmw = gb_inc8\(ctx, gb_read8\(ctx, ctx->hl\)\); gb_tick\(ctx, 4\); gb_write8\(ctx, ctx->hl, __rmw\)' 'INC (HL) RMW tick-split'
 check 'gb_push16\(ctx, ctx->af & 0xFFF0\)'        'PUSH AF masks F'
 check 'gb_pop16\(ctx\) & 0xFFF0'                  'POP AF masks F'
 # Negative: the documented bug — an (HL) ALU op compiled to a bare register.

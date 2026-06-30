@@ -1197,7 +1197,21 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
     auto emit_indent = [&out, indent]() {
         for (int i = 0; i < indent; i++) out << "    ";
     };
-    
+
+    // (HL) read-modify-write emitter. When `split` (cycle-accurate RMW timing),
+    // the read and write are separated by a gb_tick so the read samples one
+    // M-cycle (4 T) before the write (Gekkio SM83; runtime/include/gb_timing.h);
+    // otherwise it stays a single nested statement. `transform` is the modify
+    // applied to gb_read8(ctx, ctx->hl).
+    auto emit_hl_rmw = [&out](const std::string& transform, bool split) {
+        if (split) {
+            out << "{ uint8_t __rmw = " << transform
+                << "; gb_tick(ctx, 4); gb_write8(ctx, ctx->hl, __rmw); }\n";
+        } else {
+            out << "gb_write8(ctx, ctx->hl, " << transform << ");\n";
+        }
+    };
+
     // Emit source location comment if enabled
     if (options.emit_address_comments && instr.has_source_location) {
         emit_indent();
@@ -1235,6 +1249,28 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         }
         emit_indent();
         out << "gb_tick(ctx, " << (int)instr.cycles << ");\n";
+    }
+
+    // (HL) read-modify-write sub-instruction timing: the read lands one M-cycle
+    // (4 T) before the write. Tick up to the READ M-cycle here, then the opcode
+    // site emits the split form (read; gb_tick(4); write); the tail tick below
+    // is guarded. Total cycle count unchanged. See runtime/include/gb_timing.h.
+    bool is_hl_rmw =
+        (instr.dst.value.reg8 == 6) &&
+        (instr.opcode == ir::Opcode::INC8 || instr.opcode == ir::Opcode::DEC8 ||
+         instr.opcode == ir::Opcode::RLC  || instr.opcode == ir::Opcode::RRC  ||
+         instr.opcode == ir::Opcode::RL   || instr.opcode == ir::Opcode::RR   ||
+         instr.opcode == ir::Opcode::SLA  || instr.opcode == ir::Opcode::SRA  ||
+         instr.opcode == ir::Opcode::SRL  || instr.opcode == ir::Opcode::SWAP ||
+         instr.opcode == ir::Opcode::RES  || instr.opcode == ir::Opcode::SET);
+    bool tick_rmw_split = options.emit_cycle_counting && instr.cycles > 4 && is_hl_rmw;
+    if (tick_rmw_split) {
+        if (next_pc_val != 0) {
+            emit_indent();
+            out << "ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";
+        }
+        emit_indent();
+        out << "gb_tick(ctx, " << (int)(instr.cycles - 4) << ");\n";
     }
 
     emit_indent();
@@ -1403,7 +1439,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::INC8:
             if (instr.dst.value.reg8 == 6) {
                 // INC (HL) - read-modify-write memory at address HL
-                out << "gb_write8(ctx, ctx->hl, gb_inc8(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_inc8(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " = gb_inc8(ctx, ctx->" << reg8_names[instr.dst.value.reg8] << ");\n";
@@ -1413,7 +1449,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::DEC8:
             if (instr.dst.value.reg8 == 6) {
                 // DEC (HL) - read-modify-write memory at address HL
-                out << "gb_write8(ctx, ctx->hl, gb_dec8(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_dec8(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " = gb_dec8(ctx, ctx->" << reg8_names[instr.dst.value.reg8] << ");\n";
@@ -2033,8 +2069,8 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::SET:
             if (instr.dst.value.reg8 == 6) {
                 // SET n,(HL) - read-modify-write memory
-                out << "gb_write8(ctx, ctx->hl, gb_read8(ctx, ctx->hl) | (1 << " 
-                    << (int)instr.src.value.bit_idx << "));\n";
+                emit_hl_rmw("gb_read8(ctx, ctx->hl) | (1 << "
+                            + std::to_string((int)instr.src.value.bit_idx) + ")", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " |= (1 << " << (int)instr.src.value.bit_idx << ");\n";
@@ -2044,8 +2080,8 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::RES:
             if (instr.dst.value.reg8 == 6) {
                 // RES n,(HL) - read-modify-write memory
-                out << "gb_write8(ctx, ctx->hl, gb_read8(ctx, ctx->hl) & ~(1 << " 
-                    << (int)instr.src.value.bit_idx << "));\n";
+                emit_hl_rmw("gb_read8(ctx, ctx->hl) & ~(1 << "
+                            + std::to_string((int)instr.src.value.bit_idx) + ")", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " &= ~(1 << " << (int)instr.src.value.bit_idx << ");\n";
@@ -2077,7 +2113,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::RLC:
             if (instr.dst.value.reg8 == 6) {
                 // RLC (HL) - read, rotate, write back
-                out << "gb_write8(ctx, ctx->hl, gb_rlc(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_rlc(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else if (instr.extra.type == ir::OperandType::IMM8 && instr.extra.value.imm8 == 1) {
                 // RLCA variant (Z flag always 0)
                 out << "gb_rlca(ctx);\n";
@@ -2089,7 +2125,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::RRC:
             if (instr.dst.value.reg8 == 6) {
-                out << "gb_write8(ctx, ctx->hl, gb_rrc(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_rrc(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else if (instr.extra.type == ir::OperandType::IMM8 && instr.extra.value.imm8 == 1) {
                 out << "gb_rrca(ctx);\n";
             } else {
@@ -2100,7 +2136,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::RL:
             if (instr.dst.value.reg8 == 6) {
-                out << "gb_write8(ctx, ctx->hl, gb_rl(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_rl(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else if (instr.extra.type == ir::OperandType::IMM8 && instr.extra.value.imm8 == 1) {
                 out << "gb_rla(ctx);\n";
             } else {
@@ -2111,7 +2147,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::RR:
             if (instr.dst.value.reg8 == 6) {
-                out << "gb_write8(ctx, ctx->hl, gb_rr(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_rr(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else if (instr.extra.type == ir::OperandType::IMM8 && instr.extra.value.imm8 == 1) {
                 out << "gb_rra(ctx);\n";
             } else {
@@ -2122,7 +2158,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SLA:
             if (instr.dst.value.reg8 == 6) {
-                out << "gb_write8(ctx, ctx->hl, gb_sla(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_sla(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " = gb_sla(ctx, ctx->" << reg8_names[instr.dst.value.reg8] << ");\n";
@@ -2131,7 +2167,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SRA:
             if (instr.dst.value.reg8 == 6) {
-                out << "gb_write8(ctx, ctx->hl, gb_sra(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_sra(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " = gb_sra(ctx, ctx->" << reg8_names[instr.dst.value.reg8] << ");\n";
@@ -2140,7 +2176,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SRL:
             if (instr.dst.value.reg8 == 6) {
-                out << "gb_write8(ctx, ctx->hl, gb_srl(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_srl(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " = gb_srl(ctx, ctx->" << reg8_names[instr.dst.value.reg8] << ");\n";
@@ -2149,7 +2185,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SWAP:
             if (instr.dst.value.reg8 == 6) {
-                out << "gb_write8(ctx, ctx->hl, gb_swap(ctx, gb_read8(ctx, ctx->hl)));\n";
+                emit_hl_rmw("gb_swap(ctx, gb_read8(ctx, ctx->hl))", tick_rmw_split);
             } else {
                 out << "ctx->" << reg8_names[instr.dst.value.reg8] 
                     << " = gb_swap(ctx, ctx->" << reg8_names[instr.dst.value.reg8] << ");\n";
@@ -2200,7 +2236,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
     // In correctness mode, advance PC/timing after every non-control-flow instruction.
     // (Skipped for memory-access opcodes that already ticked BEFORE the access above.)
     if (!is_control_flow) {
-        if (!tick_before_access) {
+        if (!tick_before_access && !tick_rmw_split) {
             if (next_pc_val != 0) {
                 emit_indent();
                 out << "ctx->pc = 0x" << std::hex << next_pc_val << std::dec << ";\n";

@@ -2,6 +2,7 @@
 #include "gbrt_debug.h"
 #include "debug_server.h"
 #include "ppu.h"
+#include "gb_timing.h"
 #include <stdlib.h>
 
 /* ============================================================================
@@ -261,8 +262,15 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
          * bus access so it samples PPU/timer state at the final M-cycle (the tail
          * tick below is then guarded). None of the marked opcodes are conditional,
          * so extra_cycles is always 0 for them. CB-(HL) sets this inside its case. */
+        GBOpTiming op_acc = GB_OP_TIMING[opcode];
         int ticked_before = 0;
-        if (MEM_TICK_BEFORE[opcode]) {
+        if (op_acc.kind == GB_ACC_RMW) {
+            /* Read-modify-write: advance only to the READ M-cycle; the write
+             * tick (op_acc.split_t) is emitted mid-handler, so the read samples
+             * one M-cycle before the write (cycle-accurate, not both-at-end). */
+            gb_tick(ctx, (uint8_t)(cycles - op_acc.split_t));
+            ticked_before = 1;
+        } else if (MEM_TICK_BEFORE[opcode]) {
             gb_tick(ctx, cycles);
             ticked_before = 1;
         }
@@ -440,8 +448,10 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             case 0x2D: ctx->l = gb_dec8(ctx, ctx->l); break; /* DEC L */
             case 0x3C: ctx->a = gb_inc8(ctx, ctx->a); break; /* INC A */
             case 0x3D: ctx->a = gb_dec8(ctx, ctx->a); break; /* DEC A */
-            case 0x34: gb_write8(ctx, ctx->hl, gb_inc8(ctx, gb_read8(ctx, ctx->hl))); break; /* INC (HL) */
-            case 0x35: gb_write8(ctx, ctx->hl, gb_dec8(ctx, gb_read8(ctx, ctx->hl))); break; /* DEC (HL) */
+            case 0x34: { uint8_t v = gb_inc8(ctx, gb_read8(ctx, ctx->hl)); /* read @ M2 */
+                         gb_tick(ctx, op_acc.split_t); gb_write8(ctx, ctx->hl, v); break; } /* INC (HL): write @ M3 */
+            case 0x35: { uint8_t v = gb_dec8(ctx, gb_read8(ctx, ctx->hl)); /* read @ M2 */
+                         gb_tick(ctx, op_acc.split_t); gb_write8(ctx, ctx->hl, v); break; } /* DEC (HL): write @ M3 */
             case 0x36: gb_write8(ctx, ctx->hl, READ8(ctx)); break; /* LD (HL), n */
 
             case 0x80: gb_add8(ctx, ctx->b); break; /* ADD A, B */
@@ -765,15 +775,20 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
                 uint8_t r = cb_op & 7;
                 uint8_t b = (cb_op >> 3) & 7;
                 /* Sub-instruction memory timing: only (HL) variants (r==6) touch
-                 * the bus. Tick the whole instruction before the access so it
-                 * lands on the final M-cycle (read-modify-write writes correctly;
-                 * BIT b,(HL) reads correctly). Tail tick is then guarded. */
-                if (r == 6) {
+                 * the bus. RMW ((HL) shifts/RES/SET) reads on M(n-1) and writes on
+                 * M(n): tick up to the read, then tick split_t before the write.
+                 * BIT b,(HL) is a single read on the last M-cycle. Tail tick guarded. */
+                GBOpTiming cb_acc = GB_CB_TIMING[cb_op];
+                if (cb_acc.kind == GB_ACC_RMW) {
+                    gb_tick(ctx, (uint8_t)(cycles - cb_acc.split_t)); /* -> READ M-cycle */
+                    ticked_before = 1;
+                } else if (r == 6) {                                 /* BIT b,(HL): read only */
                     gb_tick(ctx, cycles);
                     ticked_before = 1;
                 }
-                uint8_t val = get_reg8(ctx, r);
-                
+                uint8_t val = get_reg8(ctx, r);   /* READ (samples at the read M-cycle) */
+                int writes_back = 0;
+
                 if (cb_op < 0x40) {
                     /* Shifts and Rotates */
                     switch (b) {
@@ -786,21 +801,28 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
                         case 6: val = gb_swap(ctx, val); break;
                         case 7: val = gb_srl(ctx, val); break;
                     }
-                    set_reg8(ctx, r, val);
+                    writes_back = 1;
                 }
                 else if (cb_op < 0x80) {
-                    /* BIT */
+                    /* BIT — no write-back */
                     gb_bit(ctx, b, val);
                 }
                 else if (cb_op < 0xC0) {
                     /* RES */
                     val &= ~(1 << b);
-                    set_reg8(ctx, r, val);
+                    writes_back = 1;
                 }
                 else {
                     /* SET */
                     val |= (1 << b);
-                    set_reg8(ctx, r, val);
+                    writes_back = 1;
+                }
+
+                if (writes_back) {
+                    if (cb_acc.kind == GB_ACC_RMW) {
+                        gb_tick(ctx, cb_acc.split_t); /* -> WRITE M-cycle */
+                    }
+                    set_reg8(ctx, r, val);            /* WRITE (samples at the last M-cycle) */
                 }
                 break;
             }

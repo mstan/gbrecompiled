@@ -9,7 +9,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO=/f/Projects/gbcrecomp/gb-recompiled
-RT="F:/Projects/gbcrecomp/_wt-accuracy/runtime"
+RT="F:/Projects/gbcrecomp/gb-recompiled/runtime"
 export CLEAN_PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:/c/Windows/system32:/c/Windows"
 ROM="$HERE/golden_hl_af.gb"
 GEN="$HERE/gen"

@@ -7,8 +7,8 @@
 set -uo pipefail
 ROM="$1"; FRAMES="${2:-3000}"
 REPO=/f/Projects/gbcrecomp/gb-recompiled
-WT=/f/Projects/gbcrecomp/_wt-accuracy
-RT="F:/Projects/gbcrecomp/_wt-accuracy/runtime"
+WT=/f/Projects/gbcrecomp/gb-recompiled
+RT="F:/Projects/gbcrecomp/gb-recompiled/runtime"
 export CLEAN_PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:/c/Windows/system32:/c/Windows"
 name=$(basename "${ROM%.*}" | tr ' ' '_')
 D="$WT/testroms/cpu_$name"

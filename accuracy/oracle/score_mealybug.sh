@@ -2,7 +2,7 @@
 # Run a set of Mealybug m3_* tests through the recomp and score vs DMG ground truth.
 set -uo pipefail
 MB=/f/Projects/mealybug-tearoom-tests
-WT=/f/Projects/gbcrecomp/_wt-accuracy
+WT=/f/Projects/gbcrecomp/gb-recompiled
 FRAME="${1:-20}"
 
 # All m3_* (mid-mode-3) ROMs that have a DMG-blob ground-truth PNG. Guest-cycle dump

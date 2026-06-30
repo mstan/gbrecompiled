@@ -3,7 +3,7 @@
 # that render-once-then-halt before frame 20). No rebuild.
 set -uo pipefail
 MB=/f/Projects/mealybug-tearoom-tests
-WT=/f/Projects/gbcrecomp/_wt-accuracy
+WT=/f/Projects/gbcrecomp/gb-recompiled
 OUT=$WT/accuracy/out
 FRAME="${1:-3}"
 TESTS=(m3_bgp_change m3_scx_low_3_bits m3_scy_change m3_lcdc_bg_en_change

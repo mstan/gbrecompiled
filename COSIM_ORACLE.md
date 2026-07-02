@@ -325,6 +325,50 @@ hangs a headless `--cosim`/`--differential` run — zero output, looks dead). Th
 SHA-256-locks to the exact ROM it was recompiled from. So each cosim target needs its own
 `rom.cfg`: `printf '%s\n' '<abs path to the exact ROM>' > <target>_test/build/rom.cfg`.
 
+### Phase B design notes + de-risk (2026-07-01)
+
+**Build de-risk COMPLETE + POSITIVE.** All 21 SameBoy `Core/*.c` compile and archive into
+`libsameboy_core.a` (421 KB) with this recipe (verified 2026-07-01):
+`gcc -std=gnu11 -D_GNU_SOURCE -DGB_INTERNAL -DGB_VERSION='"cosim"' -I<SameBoy>/Core
+-Wno-implicit-function-declaration -c`.
+Do **NOT** pass the `-DGB_DISABLE_*` flags: SameBoy's `.c` files are preprocessed by its
+custom **CPPP** tool (not standard cpp), so those flags drop struct members in `gb.h` while
+leaving CPPP-guarded referencing code in the `.c` → gcc mismatch. Compiling the *full* Core
+(all features on) avoids CPPP entirely; the extra features (cheats/sgb/printer/debugger)
+just add unused code. The only mingw wrinkle is `getline`/`vasprintf` in debugger.c/gb.c
+(interactive/debugger paths the oracle never calls) → `-Wno-implicit-function-declaration`
+lets them compile and link against libmingwex. SameBoy Core is a static-lib target in our
+build, no external build pipeline needed. API surface confirmed: `GB_init`,
+`GB_load_rom_from_buffer`,
+`GB_run` (returns cycles in **8 MHz units** = 2× our 4.19 MHz T-cycle — divide by 2 in
+single speed to map onto `ctx->cycles`), `GB_get_registers` (AF/BC/DE/HL/SP/PC),
+`GB_get_direct_access(RAM|CART_RAM|VRAM|HRAM|IO|OAM|BGP|OBP|IE)`, `GB_reset`.
+
+**Comparison surface = ARCHITECTURAL only (design decision).** SameBoy's micro-arch state
+(its `mode_cycles` convention, APU internal counters, PPU fetcher) is a *different
+representation* of the same hardware behavior and will NOT bit-match our runtime even when
+both are correct. So the cross-oracle hash compares only implementation-neutral
+architectural state: CPU registers (A,F,B,C,D,E,H,L,SP,PC — must match), IME, and MEMORY
+(WRAM, VRAM, OAM, HRAM, cart RAM) + the IO register *values* (LCDC/STAT/LY/SCX/SCY/DIV/
+TIMA/…). This is a NEW neutral extractor, distinct from `gb_cosim_state_hash` (which is
+representation-specific and only valid within pairing 1). Micro-arch fields are excluded
+from the cross-oracle hash by necessity, not by hypothesis.
+
+**OPEN DECISION — boot alignment (blocks the driver's run loop):** our recomp skips the
+boot ROM (`gb_context_reset(ctx, skip_bootrom=true)` → post-boot state); SameBoy runs the
+REAL boot ROM. So at cycle 0 the two are NOT aligned (the classic "boot diverges" problem,
+PRINCIPLES.md). Options:
+- (A) Both real-boot from a shared boot ROM (cleanest cycle-0 alignment; needs dmg_boot.bin/
+  cgb_boot.bin AND the recomp to execute a boot ROM — support unverified).
+- (B) Both post-boot: feed SameBoy a minimal handoff boot ROM matching our recomp's
+  skip-boot end state (needs that state to match exactly).
+- (C) Milestone alignment (no boot ROM): free-run both to a common architectural checkpoint
+  (e.g. first VBlank / a known PC), snapshot + compare architectural state there, then
+  lockstep forward — the PRINCIPLES.md "reproduce by playing, align by order+state" path.
+  Weaker than cycle-0 lockstep but asset-free and robust.
+SameBoy needs a boot ROM either way for (A)/(B); none are compiled in-tree (`BootROMs/*.asm`
+need RGBDS). (C) sidesteps the asset. Decision pending user input.
+
 Phase B (embedded SameBoy oracle — the Beetle pattern):
 - [ ] Build SameBoy `Core/` as a static lib (`libsameboy_core.a`) in the cosim build.
 - [ ] Driver `runtime/src/sameboy_oracle.c` (mirror `beetle_libretro.cpp`): `GB_init` /

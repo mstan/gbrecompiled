@@ -52,6 +52,7 @@ static bool gbcam_capture_webcam(GBContext* ctx) {
 
 bool gbrt_trace_enabled = false;
 bool gbrt_log_lcd_transitions = false;
+bool gbrt_interp_fallback_logging = true;
 uint64_t gbrt_instruction_count = 0;
 uint64_t gbrt_instruction_limit = 0;
 void (*gbrt_instruction_limit_callback)(void) = NULL;

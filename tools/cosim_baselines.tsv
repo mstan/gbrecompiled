@@ -1,0 +1,15 @@
+# Pinned co-simulation A-vs-B (recomp vs interpreter) baselines — the ratchet.
+# The chain hash is the cumulative FNV fold of context-A's full-state hash at
+# every T-cycle checkpoint. A recompiler/runtime change that alters guest
+# behavior changes this hash; that is the regression signal.
+#
+# Regenerate/verify with (exe SHA-locks to its exact ROM; see rom.cfg gotcha):
+#   python tools/gbc_cosim.py --exe <target>_test/build/<exe> \
+#       --ab-frames <frames> --stride <stride> --expect-chain <chain>
+#
+# All rows below produced matched=1 (byte-identical full state at every
+# checkpoint) on 2026-07-01, stride=456 (one scanline).
+#
+# target        stride  frames  chain
+tetris          456     700     30573CCD2C2D82CB
+megaman_xtreme2 456     1000    E2A240E56E7E348E

@@ -71,6 +71,10 @@ def main():
     ap.add_argument("--stride", type=int, default=456, help="T-cycles per checkpoint")
     ap.add_argument("--inject-at", type=int, default=100, help="checkpoint index to inject the Gate-3 fault")
     ap.add_argument("--timeout", type=int, default=180, help="per-run timeout seconds")
+    ap.add_argument("--ab-frames", type=int, default=0,
+                    help="run the A-vs-B measurement to N frames instead of the checkpoint bound")
+    ap.add_argument("--expect-chain", default=None,
+                    help="assert the A-vs-B chain hash equals this hex (regression ratchet)")
     ap.add_argument("--verbose", action="store_true", help="dump raw stderr for each run")
     args = ap.parse_args()
 
@@ -136,15 +140,29 @@ def main():
     # The actual measurement: recomp (A) vs interpreter (B).
     print("-" * 72)
     print("A-vs-B measurement (recomp vs interpreter):")
-    r = run_cosim(args.exe, base + ["--cosim-pair", "ab", "--cosim-audit", "64"], args.timeout)
+    if args.ab_frames > 0:
+        ab = ["--cosim-stride", str(args.stride), "--cosim-frames", str(args.ab_frames),
+              "--cosim-audit", "500"]
+    else:
+        ab = base + ["--cosim-audit", "64"]
+    r = run_cosim(args.exe, ab, args.timeout)
     if r.matched:
-        print(f"  MATCHED all {r.checkpoints} checkpoints / {r.frames} frames. "
-              f"chain={r.chain}  <-- pinned baseline")
+        print(f"  MATCHED all {r.checkpoints} checkpoints / {r.frames} frames. chain={r.chain}")
     else:
         print(f"  FIRST DIVERGENCE at checkpoint {r.div_cp} subsystem={r.subsystem}")
         for line in r.raw.splitlines():
             if "[COSIM]" in line:
                 print("    " + line)
+
+    if args.expect_chain:
+        want = args.expect_chain.upper()
+        got = (r.chain or "").upper()
+        if r.matched and got == want:
+            print(f"[PASS] baseline chain matches ({got})")
+            return 0
+        print(f"[FAIL] baseline chain: got {got or '<none>'} want {want} "
+              f"(matched={r.matched}) -- REGRESSION")
+        return 1
     return 0
 
 

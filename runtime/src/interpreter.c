@@ -153,8 +153,10 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
     uint8_t entry_bank = (addr < 0x4000) ? 0 : (uint8_t)ctx->rom_bank;
     uint32_t entry_cycles = ctx->cycles;
 
-    /* Interpreter fallback logging — stderr, file, and debug server */
-    {
+    /* Interpreter fallback logging — stderr, file, and debug server.
+     * Skipped entirely when disabled (e.g. by the co-sim) because in interpreter
+     * mode this is the per-instruction hot path and the fflush dominates. */
+    if (gbrt_interp_fallback_logging) {
         static int entry_count = 0;
         static FILE* interp_log = NULL;
         entry_count++;

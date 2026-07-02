@@ -298,9 +298,25 @@ Phase A (in-process pairing 1):  ✅ COMPLETE — all four gates pass on Tetris 
 - [x] Gates 1–4 PASS on Tetris DMG attract (recomp-vs-recomp=0 w/ stable chain hash,
       interp-vs-interp=0, injected-fault halts at exact cp & names each subsystem incl. APU,
       hash-vs-byte audit clean). A-vs-B (recomp vs interp) matched over the validated window.
-- [ ] Extend the pinned Tetris baseline to full attract (~600 frames); run the Blargg/
-      Mooneye fixtures (Gate 5). NOTE: interpreter-fallback file logging + full-region hash
-      make long runs slow — add page-hashing / quiet the fallback log before deep runs.
+- [x] Full-attract baselines pinned (2026-07-01). Perf: the long-run bottleneck was
+      `gb_interpret`'s per-instruction fallback logging (fflush + debug-server ping every
+      instruction — it is the interpreter backend's normal path). Gated behind
+      `gbrt_interp_fallback_logging` (default on; `gb_run_cosim` disables it). Result:
+      **Tetris 700 frames / 109,671 checkpoints in ~13 s; MMX2 (CGB) 1000 frames /
+      156,918 checkpoints in ~23 s**, both matched=1 with periodic hash-vs-byte audits.
+      Page-hashing was NOT needed (profiled first, per the spec) — killing the log spam
+      sufficed. Pinned chains (stride 456) recorded in `tools/cosim_baselines.tsv`:
+      tetris 700f = `30573CCD2C2D82CB`, megaman_xtreme2 1000f = `E2A240E56E7E348E`.
+      Ratchet assert: `gbc_cosim.py --ab-frames N --expect-chain HEX` (exit 0 on match).
+- [ ] Gate 5 fixture sweep: run the co-sim across Blargg (`F:\Projects\gb-test-roms`) and
+      Mooneye/mealybug (`F:\Projects\mealybug-tearoom-tests`) as pinned baselines.
+
+Meaning of the all-matched result: over the FULL Tetris attract (incl. demo gameplay) and
+deep into MMX2, the recomp and interpreter backends are byte-identical in complete
+architectural state at every T-cycle checkpoint. That is the strong pairing-1 baseline the
+ratchet defends. Any *residual* divergence from real hardware that both backends share
+(e.g. a bug in a shared model) is invisible to pairing 1 by construction — that class is
+exactly what Phase B's independent SameBoy oracle exists to catch.
 
 ### rom.cfg gotcha (cost a hang; do not relearn)
 The generated exe resolves its ROM via `launcher_get_rom_path()` → a one-line plaintext

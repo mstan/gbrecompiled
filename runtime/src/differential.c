@@ -950,10 +950,15 @@ bool gb_run_cosim(GBContext* ctx_a,
 
     uint64_t saved_instruction_count = gbrt_instruction_count;
     uint64_t saved_instruction_limit = gbrt_instruction_limit;
+    bool saved_interp_logging = gbrt_interp_fallback_logging;
     void* saved_a_joypad = ctx_a->joypad;
     void* saved_b_joypad = ctx_b->joypad;
     gbrt_instruction_count = 0;
     gbrt_instruction_limit = 0;
+    /* In interpreter mode gb_interpret is the per-instruction hot path; its
+     * fallback logging (fflush + debug-server ping every entry) would dominate a
+     * long attract run. The cosim doesn't need it — the ring + gates report. */
+    gbrt_interp_fallback_logging = false;
 
     GBJoypadState joypad_a = {.dpad = 0xFF, .buttons = 0xFF};
     GBJoypadState joypad_b = {.dpad = 0xFF, .buttons = 0xFF};
@@ -1149,5 +1154,6 @@ bool gb_run_cosim(GBContext* ctx_a,
     ctx_b->joypad = saved_b_joypad;
     gbrt_instruction_count = saved_instruction_count;
     gbrt_instruction_limit = saved_instruction_limit;
+    gbrt_interp_fallback_logging = saved_interp_logging;
     return matched;
 }

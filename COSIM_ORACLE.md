@@ -432,17 +432,32 @@ collapsed from 114 scanlines (recomp 0x90 vs SB 0x1E) to a **sub-scanline** boun
 SB 0x90). The lockstep FIFO now also captures SameBoy's per-instruction T-cycle
 (`absolute_debugger_ticks/2`); the sharpened report prints `dcyc`.
 
-**RESIDUAL (now cleanly isolated, the genuine per-M-cycle frontier).** At the new split (instr 54755):
-`recomp cyc=542832 LY=0x8F | SameBoy cyc=542816 LY=0x90 | dcyc=+16`. Two small components: (a) a **+16
-T-cycle CPU-charging drift** over 54,755 instructions (~0.003%), and (b) a **PPU LCD-enable phase lag** —
-recomp reaches LY=144 at a *later* cycle than SameBoy despite having *more* cycles, i.e. recomp does not
-model the "first scanline after LCD-enable is a few cycles short" hardware quirk. Cumulatively the
-residual lag makes recomp's full boot **+140,140 cycles (+0.60%)** vs SameBoy (handoff: recomp
-23,580,484 / DIV=0xCF vs SameBoy 23,440,344 / DIV=0xAB / LY=0x00 / pc=0x0150). NOTE the total went
-+88k→+140k: the old LCD-on bug made LY run *ahead* so the wait loops exited *early*, **partially masking**
-this lag; removing the gross bug unmasks it. Next: add a per-instruction cycle **ring-window dump** at the
-divergence to attribute the +16 CPU drift to specific opcode(s), and model the LCD-enable first-line
-timing in `ppu.c` against the measured offset (do NOT guess the shortfall — measure it via the oracle).
+**RESIDUAL — MEASURED with the ring-window dump + periodic tracer (2026-07-02).** Added an always-on
+64-entry ring (both sides, fetch-boundary state) dumped on the split as `[SBWIN]`, plus a periodic
+`[SBTRACE]` (via `--cosim-log N`) showing `dcyc`/`dly` across the whole boot; also **fixed a
+measurement artifact** — recomp cycles were read *after* the step vs SameBoy's *before*, inflating the
+delta (the old "+16" is really **+4** with fetch-aligned sampling). Findings, unambiguous:
+- **CPU cycle-charging is PERFECT: `dcyc=+0` at EVERY 1000-instruction sample across the entire boot**
+  (recomp and SameBoy T-cycle counts are byte-identical per instruction). There is **no CPU-timing
+  drift** — the earlier "PPU runs ahead / CPU is fine" *and* the "small CPU drift" readings are both
+  retired.
+- **The whole residual is a small PPU scanline-timing offset.** With `dcyc=0`, recomp crosses some LY
+  boundaries a few cycles *later* than SameBoy — enough to differ by exactly 1 LY intermittently
+  (`[SBTRACE]` `*` marks: 53/54, 66/67, …, 8F/90) and eventually to split the BIOS `wait for LY==144`
+  loop at instr 54755. LCD enables at cyc≈266,472 (LY=0, mode 2); LY 0→1 and 1→2 match exactly, the
+  first phase split shows at **LY 2→3** (~cyc 267,832). The offset is **< ~84 cycles** (below the
+  8-instruction sample spacing), i.e. genuinely sub-scanline — the per-M-cycle PPU frontier
+  ([[project_cpu_subinstruction_timing]]).
+- Cumulatively the phase lag still makes recomp's full boot **+140,140 cyc (+0.60%)** vs SameBoy
+  (handoff recomp 23,580,484 / DIV=0xCF vs SameBoy 23,440,344 / DIV=0xAB / LY=0 / pc=0x0150); the total
+  rose +88k→+140k only because the old LCD-on bug's *ahead*-phase was masking this *behind*-lag. NOTE
+  the instruction-aligned lockstep stops at the first split (54755), so most of that +140k accrues in
+  the UNOBSERVED post-split boot — a lighter continue-past-split or a per-LY-tick cycle log is needed to
+  attribute it fully.
+- **Next (PPU timing refinement, touches the validated timing model):** log the exact cycle of each LY
+  increment on both sides (or read SameBoy `display.c`'s LCD-enable + per-line mode-3 timing) to pin the
+  sub-84-cycle offset, then refine `ppu.c` mode timing (first-frame-after-enable and/or variable mode-3)
+  against the MEASURED offset — do NOT guess the shortfall.
 
 ### Phase B design notes + de-risk (2026-07-01)
 

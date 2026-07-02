@@ -1345,12 +1345,30 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
     bool matched = true, error = false;
     GBPPU* rppu = (GBPPU*)recomp_lle_ctx->ppu;
 
+    /* Always-on ring buffer of the most recent instructions, both sides, sampled
+     * at the fetch boundary. On the first PC-stream split we dump the window
+     * leading up to it (query the ring, don't arm-and-capture) so the residual
+     * timing drift (dcyc = recomp - SameBoy T-cycles; dly = LY phase) can be read
+     * per instruction. The periodic tracer below (--cosim-log N) shows the SAME
+     * deltas across the whole boot so the drift's ORIGIN — earlier than any
+     * end-of-run window — is localizable. */
+    #define SBWIN_CAP 64u
+    struct SBWinEntry {
+        uint64_t ic; uint16_t rpc, opc; uint32_t rcyc, ocyc;
+        uint8_t rdiv, odiv, rly, oly, rmode;
+    } win[SBWIN_CAP];
+    memset(win, 0, sizeof(win));
+    uint64_t win_count = 0;
+
     while (icount < max_instr) {
-        /* Recomp: one interpreter instruction. Sample DIV/LY at the fetch
-         * boundary (matching SameBoy's callback capture point). */
+        /* Recomp: one interpreter instruction. Sample PC/DIV/LY/cycles at the
+         * fetch boundary (BEFORE stepping) so it matches SameBoy's callback,
+         * which fires at fetch before the instruction executes. */
         uint16_t r_pc = recomp_lle_ctx->pc;
         uint8_t r_div = (uint8_t)(recomp_lle_ctx->div_counter >> 8);
         uint8_t r_ly = rppu ? rppu->ly : 0;
+        uint32_t r_cyc = recomp_lle_ctx->cycles;
+        uint8_t r_mode = rppu ? (uint8_t)rppu->mode : 0;
         uint8_t was_halted = recomp_lle_ctx->halted;
         gb_debug_step(recomp_lle_ctx, GB_EXECUTION_INTERPRETER);
         /* Skip HALT/STOP idle ticks (no instruction fetched — SameBoy's callback
@@ -1364,20 +1382,46 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
         }
         icount++;
 
+        /* Record this instruction (fetch-boundary state, both sides) into the ring. */
+        {
+            uint32_t s = (uint32_t)(win_count % SBWIN_CAP);
+            win[s].ic = icount; win[s].rpc = r_pc; win[s].opc = o_pc;
+            win[s].rcyc = r_cyc; win[s].ocyc = o_cyc;
+            win[s].rdiv = r_div; win[s].odiv = o_div;
+            win[s].rly = r_ly; win[s].oly = o_ly; win[s].rmode = r_mode;
+            win_count++;
+        }
+
         if (r_pc != o_pc) {
             fprintf(stderr,
                     "[SBORACLE] FIRST DIVERGENCE at instruction %" PRIu64
                     ": recomp pc=%04X vs SameBoy pc=%04X\n"
-                    "[SBORACLE]   at fetch: recomp DIV=%02X LY=%02X cyc=%u | SameBoy DIV=%02X LY=%02X cyc=%u | dcyc=%ld\n"
+                    "[SBORACLE]   at fetch: recomp DIV=%02X LY=%02X cyc=%u | SameBoy DIV=%02X LY=%02X cyc=%u | dcyc=%+ld\n"
                     "[SBORACLE]   => control flow first split here (timing-driven branch). "
                     "recomp boot%s done.\n",
-                    icount, r_pc, o_pc, r_div, r_ly, recomp_lle_ctx->cycles, o_div, o_ly, o_cyc,
-                    (long)recomp_lle_ctx->cycles - (long)o_cyc,
+                    icount, r_pc, o_pc, r_div, r_ly, r_cyc, o_div, o_ly, o_cyc,
+                    (long)r_cyc - (long)o_cyc,
                     recomp_lle_ctx->boot_rom_active ? " NOT" : "");
+            /* Dump the ring window (chronological) leading up to the split. */
+            {
+                uint64_t n = win_count < SBWIN_CAP ? win_count : SBWIN_CAP;
+                fprintf(stderr,
+                        "[SBWIN] last %" PRIu64 " instrs before split "
+                        "(instr | pc r/o | cyc r/o dcyc | ly r/o | rmode | div r/o):\n", n);
+                for (uint64_t k = win_count - n; k < win_count; k++) {
+                    uint32_t s = (uint32_t)(k % SBWIN_CAP);
+                    fprintf(stderr,
+                            "[SBWIN] %8" PRIu64 " | %04X/%04X | %10u/%10u d%+6ld | %02X/%02X%s | m%u | %02X/%02X\n",
+                            win[s].ic, win[s].rpc, win[s].opc,
+                            win[s].rcyc, win[s].ocyc, (long)win[s].rcyc - (long)win[s].ocyc,
+                            win[s].rly, win[s].oly, win[s].rly != win[s].oly ? "*" : " ",
+                            win[s].rmode, win[s].rdiv, win[s].odiv);
+                }
+            }
             if (result) {
                 result->matched = false;
                 result->mismatch_checkpoint = icount;
-                result->mismatch_cycles = recomp_lle_ctx->cycles;
+                result->mismatch_cycles = r_cyc;
                 result->pc_a = r_pc; result->pc_b = o_pc;
                 snprintf(result->message, sizeof(result->message),
                          "PC-stream split at instr %" PRIu64 ": %04X vs %04X (recomp LY=%02X SB LY=%02X)",
@@ -1387,9 +1431,15 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
             break;
         }
 
+        /* Periodic drift tracer: same deltas as the window, sampled across the
+         * whole run so the drift's origin (LCD-enable, a specific frame, a
+         * specific opcode) is visible rather than only its end state. */
         if (opt.log_interval && (icount % opt.log_interval) == 0) {
-            fprintf(stderr, "[SBORACLE] matched %" PRIu64 " instructions (pc=%04X boot%s done)\n",
-                    icount, r_pc, recomp_lle_ctx->boot_rom_active ? " NOT" : "");
+            fprintf(stderr,
+                    "[SBTRACE] i=%8" PRIu64 " pc=%04X cyc r=%u o=%u dcyc=%+ld ly r=%02X o=%02X%s rmode=%u boot%s done\n",
+                    icount, r_pc, r_cyc, o_cyc, (long)r_cyc - (long)o_cyc,
+                    r_ly, o_ly, r_ly != o_ly ? "*" : "", r_mode,
+                    recomp_lle_ctx->boot_rom_active ? " NOT" : "");
         }
     }
 

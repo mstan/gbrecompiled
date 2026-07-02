@@ -325,6 +325,35 @@ hangs a headless `--cosim`/`--differential` run — zero output, looks dead). Th
 SHA-256-locks to the exact ROM it was recompiled from. So each cosim target needs its own
 `rom.cfg`: `printf '%s\n' '<abs path to the exact ROM>' > <target>_test/build/rom.cfg`.
 
+### LLE boot (real BIOS) + LLE-vs-HLE gate — DONE (2026-07-01)
+
+Faithfulness doctrine (per `../psxrecomp`, `../gbarecomp`): support running the real,
+user-provided boot ROM (BIOS) LLE, HLE-skip as the production default/fallback. Implemented:
+- **Runtime boot-ROM execution** (`gbrt.c`): `gb_context_load_boot_rom` + a read overlay in
+  `gb_read8` (DMG/MGB/SGB 0x0000-0x00FF; CGB adds 0x0200-0x08FF) + `0xFF50` unmap in
+  `gb_write8` + an LLE branch in `gb_context_reset` (skip_bootrom=false → map BIOS, PC=0,
+  power-on-clean regs; HLE fallback if no BIOS loaded). GBContext gains `boot_rom`,
+  `boot_rom_size`, `boot_rom_active`.
+- **KEY GOTCHA:** the BIOS must execute via the **interpreter**, never generated dispatch.
+  Generated code keys on PC and runs the *cartridge's* compiled 0x0000, ignoring the
+  read-overlay (which only affects `gb_read8`). The interpreter fetches opcodes through
+  `gb_read8`, so it honors the overlay and runs the actual BIOS. (First LLE attempt in
+  GENERATED mode escaped BIOS space at instruction 1 — `LD SP,$FFFE` never ran.)
+- **LLE-vs-HLE gate** (`gb_run_boot_gate`, CLI `--boot-gate --boot-rom PATH`): runs the real
+  BIOS to the 0xFF50 handoff, then compares the CPU handoff registers (+IME) against the HLE
+  skip-state. RESULT on Tetris + DMG BIOS: handoff at PC=0x0100 SP=0xFFFE, **0 CPU-handoff
+  diffs — our HLE post-boot CPU state is byte-perfect vs the real BIOS.** Informational: DIV
+  differs (LLE div_counter=0x0584 after ~23.5M cyc vs HLE constant 0xABCC — a boot-timing
+  fidelity signal; the mooneye boot_div expectation is DIV=0xAB, so our interpreted boot
+  timing looks off — defer to the SameBoy oracle to arbitrate) and APU differs (expected:
+  BIOS chime vs HLE defaults). Boot ROMs live in `boot_roms/` (gitignored; user-provided).
+- Only `boot_roms/dmg_boot.bin` (canonical, sha1 4ed31ec6…) is present; **cgb_boot.bin still
+  needed** for an MMX2 LLE gate.
+
+This makes Phase B **Option A (cycle-0 lockstep)** viable: both recomp and SameBoy execute
+the same real BIOS from power-on. Open follow-up: the DIV/boot-timing discrepancy (our
+interpreted boot duration vs real) — a genuine fidelity item the SameBoy oracle will pin.
+
 ### Phase B design notes + de-risk (2026-07-01)
 
 **Build de-risk COMPLETE + POSITIVE.** All 21 SameBoy `Core/*.c` compile and archive into

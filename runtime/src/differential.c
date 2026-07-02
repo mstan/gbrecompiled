@@ -1157,3 +1157,116 @@ bool gb_run_cosim(GBContext* ctx_a,
     gbrt_interp_fallback_logging = saved_interp_logging;
     return matched;
 }
+
+bool gb_run_boot_gate(GBContext* lle_ctx,
+                      GBContext* hle_ctx,
+                      uint64_t cycle_cap,
+                      GBCosimResult* result) {
+    if (result) {
+        memset(result, 0, sizeof(*result));
+        result->mismatch_subsystem = -1;
+    }
+    if (cycle_cap == 0) cycle_cap = 50000000ull; /* generous: DMG boot ~ a few frames */
+
+    uint64_t saved_count = gbrt_instruction_count;
+    uint64_t saved_limit = gbrt_instruction_limit;
+    bool saved_log = gbrt_interp_fallback_logging;
+    gbrt_instruction_count = 0;
+    gbrt_instruction_limit = 0;
+    gbrt_interp_fallback_logging = false;
+
+    /* Phase 1: run the real boot ROM (BIOS) to the handoff (0xFF50 unmap). */
+    /* The BIOS is NOT compiled cart code — generated dispatch keys on PC and
+     * would run the cartridge's 0x0000, ignoring the boot-ROM overlay (which
+     * only redirects gb_read8). The interpreter fetches opcodes via gb_read8,
+     * so it honors the overlay and actually executes the BIOS. */
+    uint16_t prev_pc = lle_ctx->pc;
+    int escapes_logged = 0;
+    while (lle_ctx->boot_rom_active && lle_ctx->cycles < cycle_cap) {
+        gb_debug_step(lle_ctx, GB_EXECUTION_INTERPRETER);
+        /* The DMG boot ROM never executes outside 0x0000-0x00FF until it writes
+         * 0xFF50 and falls through to 0x0100. If pc leaves BIOS space while the
+         * BIOS is still mapped, that's a control-flow escape (the bug). */
+        if (escapes_logged < 8 && lle_ctx->boot_rom_active && lle_ctx->pc >= 0x0100 &&
+            prev_pc < 0x0100) {
+            uint16_t sp = lle_ctx->sp;
+            fprintf(stderr,
+                    "[BOOTGATE] ESCAPE #%d: pc %04X -> %04X (BIOS still mapped) sp=%04X "
+                    "[sp]=%02X%02X ime=%u IF=%02X IE=%02X\n",
+                    escapes_logged + 1, prev_pc, lle_ctx->pc, sp,
+                    gb_read8(lle_ctx, (uint16_t)(sp + 1)), gb_read8(lle_ctx, sp),
+                    lle_ctx->ime, lle_ctx->io[0x0F], lle_ctx->io[0x80]);
+            escapes_logged++;
+        }
+        prev_pc = lle_ctx->pc;
+    }
+
+    gbrt_instruction_count = saved_count;
+    gbrt_instruction_limit = saved_limit;
+    gbrt_interp_fallback_logging = saved_log;
+
+    if (lle_ctx->boot_rom_active) {
+        fprintf(stderr,
+                "[BOOTGATE] boot ROM did NOT hand off within %" PRIu64 " cycles (pc=%04X)\n",
+                cycle_cap, lle_ctx->pc);
+        if (result) {
+            result->matched = false;
+            snprintf(result->message, sizeof(result->message), "boot did not hand off");
+        }
+        return false;
+    }
+
+    fprintf(stderr,
+            "[BOOTGATE] boot ROM handed off at cycle %u: LLE pc=%04X sp=%04X vs HLE pc=%04X sp=%04X\n",
+            lle_ctx->cycles, lle_ctx->pc, lle_ctx->sp, hle_ctx->pc, hle_ctx->sp);
+
+    /* PASS/FAIL surface: the CPU handoff registers + IME. These are the exact
+     * architectural state the cartridge inherits at 0x0100, and are what our HLE
+     * skip-state hardcodes — so they MUST match a faithful BIOS. */
+    int mism = 0;
+#define BG_CMP(expr_l, expr_h, name, fmt) \
+    do { if ((expr_l) != (expr_h)) { \
+        fprintf(stderr, "[BOOTGATE]  DIFF %-12s LLE=" fmt "  HLE=" fmt "\n", name, (expr_l), (expr_h)); \
+        mism++; } } while (0)
+    BG_CMP(lle_ctx->pc, hle_ctx->pc, "pc", "%04X");
+    BG_CMP(lle_ctx->sp, hle_ctx->sp, "sp", "%04X");
+    BG_CMP(lle_ctx->a, hle_ctx->a, "a", "%02X");
+    BG_CMP(gb_diff_pack_flags(lle_ctx), gb_diff_pack_flags(hle_ctx), "f", "%02X");
+    BG_CMP(lle_ctx->b, hle_ctx->b, "b", "%02X");
+    BG_CMP(lle_ctx->c, hle_ctx->c, "c", "%02X");
+    BG_CMP(lle_ctx->d, hle_ctx->d, "d", "%02X");
+    BG_CMP(lle_ctx->e, hle_ctx->e, "e", "%02X");
+    BG_CMP(lle_ctx->h, hle_ctx->h, "h", "%02X");
+    BG_CMP(lle_ctx->l, hle_ctx->l, "l", "%02X");
+    BG_CMP(lle_ctx->ime, hle_ctx->ime, "ime", "%u");
+#undef BG_CMP
+
+    /* Informational (NOT pass/fail): the BIOS hands off mid-PPU-frame, and some
+     * device state lives outside ctx->io (the APU registers, for one), so exact
+     * parity with a freshly-reset HLE context is not expected here. */
+    fprintf(stderr, "[BOOTGATE] (info) DIV: LLE div_counter=%04X vs HLE=%04X%s\n",
+            lle_ctx->div_counter, hle_ctx->div_counter,
+            lle_ctx->div_counter == hle_ctx->div_counter ? "" :
+            " — boot-timing fidelity signal; SameBoy (Phase B) arbitrates whether"
+            " our boot timing or the HLE DIV constant is off");
+    uint64_t apu_l = lle_ctx->apu ? gb_audio_cosim_hash(lle_ctx->apu) : 0;
+    uint64_t apu_h = hle_ctx->apu ? gb_audio_cosim_hash(hle_ctx->apu) : 0;
+    fprintf(stderr, "[BOOTGATE] (info) APU state hash: LLE=%016llX HLE=%016llX %s\n",
+            (unsigned long long)apu_l, (unsigned long long)apu_h,
+            apu_l == apu_h ? "(match)" : "(differ — expected: BIOS chime vs HLE defaults)");
+
+    fprintf(stderr,
+            "[BOOTGATE] %d CPU-handoff diff(s). %s\n",
+            mism,
+            mism == 0 ? "HLE post-boot CPU state MATCHES the real BIOS handoff."
+                      : "HLE CPU state differs from the real BIOS handoff (see DIFFs above).");
+
+    if (result) {
+        result->matched = (mism == 0);
+        result->mismatch_cycles = lle_ctx->cycles;
+        result->pc_a = lle_ctx->pc;
+        result->pc_b = hle_ctx->pc;
+        snprintf(result->message, sizeof(result->message), "%d CPU-handoff diffs", mism);
+    }
+    return mism == 0;
+}

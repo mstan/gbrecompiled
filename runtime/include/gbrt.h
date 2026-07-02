@@ -316,6 +316,14 @@ typedef struct GBContext {
     uint8_t* oam;         /**< Object Attribute Memory */
     uint8_t* hram;        /**< High RAM (0xFF80-0xFFFE) */
     uint8_t* io;          /**< I/O registers (0xFF00-0xFF7F) */
+
+    /* Boot ROM (BIOS) — LLE boot. When boot_rom is loaded and the context is
+     * reset without skip_bootrom, the real boot ROM is mapped at 0x0000 and
+     * executed from PC=0; a write to 0xFF50 unmaps it (boot_rom_active=0) and
+     * hands off to the cartridge at 0x0100. NULL => HLE skip (production default). */
+    uint8_t* boot_rom;        /**< Boot ROM buffer, or NULL */
+    size_t   boot_rom_size;   /**< 256 (DMG/MGB/SGB) or 2304 (CGB) */
+    uint8_t  boot_rom_active; /**< Boot ROM currently mapped + executing */
     
     /* RTC state (MBC3) */
     struct {
@@ -398,6 +406,14 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom);
  * @return true on success
  */
 bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size);
+
+/**
+ * @brief Load a boot ROM (BIOS) for LLE boot. Copies `data`. After this, a
+ * gb_context_reset with skip_bootrom=false maps and executes it.
+ * @param size 256 (DMG/MGB/SGB) or 2304 (CGB)
+ * @return true on success
+ */
+bool gb_context_load_boot_rom(GBContext* ctx, const uint8_t* data, size_t size);
 
 /**
  * @brief Save battery-backed RAM to persistent storage
@@ -804,6 +820,19 @@ bool gb_run_cosim(GBContext* ctx_a,
                   GBContext* ctx_b,
                   const GBCosimOptions* options,
                   GBCosimResult* result);
+
+/**
+ * @brief LLE-vs-HLE boot gate. `lle_ctx` must be reset with a boot ROM loaded
+ * (boot_rom_active=1); `hle_ctx` reset with skip_bootrom=true. Runs the real
+ * boot ROM to handoff, then compares the post-boot architectural state (CPU
+ * registers + IME + DIV + I/O page) against the HLE post-boot constants,
+ * reporting every field that differs. Returns true iff they match (our HLE
+ * post-boot state is faithful to the real BIOS handoff).
+ */
+bool gb_run_boot_gate(GBContext* lle_ctx,
+                      GBContext* hle_ctx,
+                      uint64_t cycle_cap,
+                      GBCosimResult* result);
 
 /**
  * @brief Record a generated-dispatch fallback into the interpreter

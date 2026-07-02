@@ -67,3 +67,5 @@ __pycache__/
 tech_docs/
 SameBoy/
 testroms/
+boot_roms/
+# boot ROMs are copyrighted Nintendo BIOS — user-provided, never committed

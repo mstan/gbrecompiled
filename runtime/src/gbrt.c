@@ -979,6 +979,7 @@ void gb_context_destroy(GBContext* ctx) {
     if (ctx->sgb) gb_sgb_destroy(ctx->sgb);
     if (ctx->ir) gb_ir_destroy(ctx->ir);
     if (ctx->rom) free(ctx->rom);
+    if (ctx->boot_rom) free(ctx->boot_rom);
     free(ctx);
 }
 
@@ -1078,6 +1079,7 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     memset(ctx->io, 0, IO_SIZE + 1);
     
     if (skip_bootrom) {
+        ctx->boot_rom_active = 0;
         ctx->pc = 0x0100;
         ctx->sp = 0xFFFE;
 
@@ -1152,6 +1154,29 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
             ctx->io[0x70] = 0xF8; /* SVBK */
         }
         ctx->io[0x80] = 0x00; /* IE */
+    } else if (ctx->boot_rom && ctx->boot_rom_size) {
+        /* LLE boot: map and execute the real boot ROM (BIOS) from power-on.
+         * The boot ROM itself sets SP, programs the I/O, scrolls the logo, and
+         * writes 0xFF50 to hand off to the cartridge at 0x0100. Start from a
+         * power-on-clean CPU (registers 0) with the BIOS mapped over 0x0000. */
+        ctx->boot_rom_active = 1;
+        ctx->pc = 0x0000;
+        ctx->sp = 0x0000;
+        ctx->af = 0x0000;
+        ctx->bc = 0x0000;
+        ctx->de = 0x0000;
+        ctx->hl = 0x0000;
+        gb_unpack_flags(ctx);
+        ctx->div_counter = 0x0000;
+        /* I/O stays at the power-on zero from the memset above; the boot ROM
+         * programs it. Boot-logo VRAM is written by the boot ROM itself. */
+    } else {
+        /* skip_bootrom=false but no boot ROM loaded — fall back to the faithful
+         * HLE post-boot state so the context is always valid (production default
+         * is HLE regardless). */
+        fprintf(stderr, "[GB] reset(skip_bootrom=false) with no boot ROM loaded; using HLE post-boot state\n");
+        gb_context_reset(ctx, true);
+        return;
     }
 
     if (ctx->ppu) {
@@ -1191,6 +1216,19 @@ static void gbrt_load_boot_logo_vram(GBContext* ctx) {
     for (int i = 0; i < 8; i++) {    /* ® trademark into tile 25 even offsets */
         vram[hl] = trademark[i]; hl += 2;
     }
+}
+
+bool gb_context_load_boot_rom(GBContext* ctx, const uint8_t* data, size_t size) {
+    if (!ctx || !data || (size != 0x100 && size != 0x900)) {
+        return false;  /* 256B DMG/MGB/SGB or 2304B CGB only */
+    }
+    if (ctx->boot_rom) free(ctx->boot_rom);
+    ctx->boot_rom = (uint8_t*)malloc(size);
+    if (!ctx->boot_rom) return false;
+    memcpy(ctx->boot_rom, data, size);
+    ctx->boot_rom_size = size;
+    ctx->boot_rom_active = 0;  /* armed on the next non-skip reset */
+    return true;
 }
 
 bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
@@ -1753,7 +1791,19 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
     if (ctx->dma.active && !(addr >= 0xFF00)) {
         return 0xFF;  /* Bus conflict - return undefined */
     }
-    
+
+    /* Boot ROM (BIOS) mapped over the low address space while executing.
+     * DMG/MGB/SGB (256B): 0x0000-0x00FF. CGB (2304B): 0x0000-0x00FF and
+     * 0x0200-0x08FF (0x0100-0x01FF exposes the cartridge header). */
+    if (ctx->boot_rom_active && ctx->boot_rom) {
+        if (addr < 0x0100) {
+            return ctx->boot_rom[addr];
+        }
+        if (ctx->boot_rom_size > 0x100 && addr >= 0x0200 && addr < ctx->boot_rom_size) {
+            return ctx->boot_rom[addr];
+        }
+    }
+
     /* ROM Bank 0 (0x0000-0x3FFF) */
     if (addr < 0x4000) {
         /* MBC1 Mode 1: Upper bits affect bank 0 region too */
@@ -1942,7 +1992,17 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
     if (ctx->dma.active && !(addr >= 0xFF00)) {
         return;  /* Bus conflict - write ignored */
     }
-    
+
+    /* 0xFF50: BOOT — writing a non-zero value unmaps the boot ROM (BIOS) and
+     * hands off to the cartridge. One-way latch on real hardware. */
+    if (addr == 0xFF50) {
+        if (value & 0x01) {
+            ctx->boot_rom_active = 0;
+        }
+        ctx->io[0x50] = value | 0xFE;
+        return;
+    }
+
     /* MBC Write Handling */
     if (addr < 0x8000) {
         /* ================================================================

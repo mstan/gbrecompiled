@@ -3676,6 +3676,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    int cosim_pair = 0;\n";          /* 0=ab, 1=aa, 2=bb */
     main_ss << "    int cosim_inject = 0;\n";        /* GBCosimInjectTarget */
     main_ss << "    unsigned long long cosim_inject_at = 0;\n";
+    main_ss << "    const char* boot_rom_path = NULL;\n";
+    main_ss << "    bool boot_gate_mode = false;\n";
     main_ss << "    bool debug_performance = false;\n";
     main_ss << "    const char* input_script = NULL;\n";
     main_ss << "    const char* log_file = NULL;\n";
@@ -3800,6 +3802,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            else cosim_inject = 0;\n";
     main_ss << "        } else if (strcmp(argv[i], \"--cosim-inject-at\") == 0 && i + 1 < argc) {\n";
     main_ss << "            cosim_inject_at = strtoull(argv[++i], NULL, 10);\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--boot-rom\") == 0 && i + 1 < argc) {\n";
+    main_ss << "            boot_rom_path = argv[++i];\n";
+    main_ss << "        } else if (strcmp(argv[i], \"--boot-gate\") == 0) {\n";
+    main_ss << "            boot_gate_mode = true;\n";
     main_ss << "        } else if (strcmp(argv[i], \"--benchmark\") == 0) {\n";
     main_ss << "            benchmark_mode = true;\n";
     main_ss << "        }\n";
@@ -3903,6 +3909,35 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        gb_context_destroy(cosim_a);\n";
     main_ss << "        gb_context_destroy(cosim_b);\n";
     main_ss << "        return cosim_matched ? 0 : 1;\n";
+    main_ss << "    }\n";
+    main_ss << "\n";
+    main_ss << "    if (boot_gate_mode) {\n";
+    main_ss << "        if (!boot_rom_path) {\n";
+    main_ss << "            fprintf(stderr, \"[BOOTGATE] --boot-gate requires --boot-rom PATH\\n\");\n";
+    main_ss << "            return 1;\n";
+    main_ss << "        }\n";
+    main_ss << "        FILE* bf = fopen(boot_rom_path, \"rb\");\n";
+    main_ss << "        if (!bf) { fprintf(stderr, \"[BOOTGATE] cannot open boot ROM: %s\\n\", boot_rom_path); return 1; }\n";
+    main_ss << "        unsigned char boot_buf[0x900];\n";
+    main_ss << "        size_t boot_sz = fread(boot_buf, 1, sizeof(boot_buf), bf);\n";
+    main_ss << "        fclose(bf);\n";
+    main_ss << "        GBContext* lle = gb_context_create(&runtime_config);\n";
+    main_ss << "        GBContext* hle = gb_context_create(&runtime_config);\n";
+    main_ss << "        if (!lle || !hle) { fprintf(stderr, \"[BOOTGATE] context create failed\\n\"); return 1; }\n";
+    main_ss << "        gb_context_set_save_id(lle, \"" << options.output_prefix << "\");\n";
+    main_ss << "        gb_context_set_save_id(hle, \"" << options.output_prefix << "\");\n";
+    main_ss << "        " << options.output_prefix << "_init(lle);\n";
+    main_ss << "        " << options.output_prefix << "_init(hle);\n";
+    main_ss << "        if (!gb_context_load_boot_rom(lle, boot_buf, boot_sz)) {\n";
+    main_ss << "            fprintf(stderr, \"[BOOTGATE] bad boot ROM size %zu (need 256 or 2304)\\n\", boot_sz);\n";
+    main_ss << "            return 1;\n";
+    main_ss << "        }\n";
+    main_ss << "        gb_context_reset(lle, false);\n";  /* LLE boot */
+    main_ss << "        GBCosimResult bg_result;\n";
+    main_ss << "        bool bg_ok = gb_run_boot_gate(lle, hle, 0, &bg_result);\n";
+    main_ss << "        gb_context_destroy(lle);\n";
+    main_ss << "        gb_context_destroy(hle);\n";
+    main_ss << "        return bg_ok ? 0 : 1;\n";
     main_ss << "    }\n";
     main_ss << "\n";
     main_ss << "    GBContext* ctx = gb_context_create(&runtime_config);\n";

@@ -160,16 +160,19 @@ Fix (gbrt.c LLE power-on): `div_counter = cgb ? 0 : 8`. Verified on tetris (DMG)
 - Tetris oracle still 2,266,364 (that split is the PPU sub-scanline axis, correctly
   independent of DIV).
 
-**Open (Phase 1b): CGB power-on divider.** mem_timing has the CGB flag (0x143=0x80)
-so it runs in CGB mode; SameBoy's cycle-0 div there was also 8, but the CGB
-power-on value + mem_timing's CGB-vs-DMG model handling (it ran the DMG boot ROM in
-a CGB context) need a clean CGB cycle-0 trace before setting the CGB branch. Left
-at 0 (no regression) pending that.
+**Phase 1b DONE: CGB power-on divider is ALSO 8.** Traced MMX2 (real CGB game,
+cgb_boot.bin) at cycle 0: recomp div16=0000 vs SameBoy 0008 — identical to DMG.
+Set the LLE power-on divider to 0x0008 unconditionally (both models). Verified:
+CGB cycle-0 offset now +0; MMX2 oracle divergence unchanged at 81603 (PPU LY
+phase, DIV already matched there); MMX2 A-vs-B chain unchanged
+(B02E9D35794D298E); tetris DMG unchanged (boot gate ABCC, A-vs-B
+E92927C083145FD7). LLE-only change → all HLE production baselines untouched.
 
-After Phase 1b the oracle (LLE) will share production's (HLE) DIV phase, making it
-honest for the REAL read/write-timing measurement (the mem_timing split at
-2,492,083 persisted with DIV matching — that residual is the genuine read-timing
-gap, the next target).
+Now the oracle (LLE) shares production's (HLE) DIV phase, making it honest for the
+REAL read/write-timing measurement. The mem_timing split at 2,492,083 persisted
+with DIV matching — that residual is the genuine read-timing gap, the next target
+(Phase 1 body). NOTE: the HLE CGB post-boot div constant (reset path, CGB branch =
+0x0000) is a SEPARATE question (CGB HLE boot-div accuracy) not addressed here.
 
 ## Risks / watch-outs
 

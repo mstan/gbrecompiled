@@ -226,23 +226,36 @@ The Gate-5 mooneye `acceptance/timer/` sweep pinpoints the `mem_timing` read/wri
   the 4-T-cycle delay after TIMA overflows (reads 0x00), the TIMA-interrupt request
   edge, and writes to TIMA/TMA that land inside that window.
 
-**Root cause (localized):** the reload window in `gb_tick` (`gbrt.c`, the
-`tima_reload_pending` block ~L3792-3814) is processed at whole-`gb_tick`
-granularity and does not model the hardware write-vs-reload interactions:
+**The behaviors each failing test needs (all real, all missing):**
 - `tima_write_reloading`: a TIMA write DURING the reload cycle is ignored (reload
   wins); a TIMA write during the preceding 0x00 window CANCELS the pending reload.
-  `gb_write8` currently just stores TIMA and does not consult `tima_reload_pending`.
 - `tma_write_reloading`: a TMA write on the reload cycle must feed the NEW value
   into the reload (reload latches TMA at that cycle).
-- `rapid_toggle`: TAC enable/disable produces a falling-edge on the timer bit
-  (a spurious TIMA increment) that the current falling-edge loop misses across a
-  TAC write.
-This is a discrete, well-scoped fix in the timer path (`gb_tick` reload window +
-`gb_write8` TIMA/TMA/TAC handling) — NOT the read-M-cycle-offset problem that
-Options A/B/timer-race chased and that regressed `modify_timing`. It must land in
-both backends' shared runtime (the timer lives in `gb_tick`/`gb_write8`, shared),
-and re-validate against these 4 mooneye ROMs + blargg `mem_timing` (target: 01/02
-→ ok without regressing 03) + the 8 pairing gates + oracle.
+- `rapid_toggle`: a TAC write dropping the timer input signal (enable AND
+  div[bit]) 1→0 is a falling edge that clocks TIMA once.
+- `tima_reload`: the TIMA=00→TMA reload and the IF edge must land on the EXACT
+  cycle (4 T after overflow), observable by reads at intermediate cycles.
+
+**Root cause — VERIFIED to be sub-instruction reload precision, NOT the discrete
+write layer (2026-07-02).** Prototyped exactly the "discrete fix": a shared
+`gb_timer_tima_step` (delayed-reload overflow) used by the periodic tick + DIV
+glitch + a NEW TAC-write falling-edge glitch, plus a TIMA-write reload-cancel and
+TMA fresh-latch. Result: **all 4 tests still FAIL, zero movement**; the passing
+controls (`div_write`, `tim00/11`, `tim01_div_trigger`) stayed PASS and blargg
+`mem_timing` stayed **Failed 2 (03 modify_timing still ok, no regression)**.
+Conclusion: the write-interaction/TAC-glitch layer is necessary but NOT sufficient
+— the DOMINANT blocker is that the reload window is processed at whole-instruction
+(`gb_tick`) granularity, so TIMA/IF do not take their intermediate values at the
+exact sub-instruction cycles these tests sample. Fixing it requires a **per-M-cycle
+(cycle-exact) timer/reload model** — the reload and its IF edge must land on the
+precise T-cycle, and TIMA reads mid-window must see 0x00 then the reloaded value.
+That is the SAME architectural change as per-M-cycle memory-read timing
+([[project_cpu_subinstruction_timing]]), not a surgical patch, and it is the
+prerequisite for the write-interaction behaviors above to be observable/testable.
+The prototype was REVERTED (unvalidated logic in the timer path that no test could
+confirm; prior surgical timer edits regressed `modify_timing` twice). Re-apply the
+write-interaction + TAC-glitch behaviors as PART OF the per-M-cycle timer work,
+gated on these 4 mooneye ROMs going green without regressing `modify_timing`.
 
 ## Out of scope / watch-outs
 

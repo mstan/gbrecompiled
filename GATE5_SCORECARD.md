@@ -67,7 +67,11 @@ localizing the `mem_timing` 01/02 timer axis (#3) to the reload-window logic in
 Fibonacci-magic detection is valid, so the FAILs above are real.
 
 ## Follow-ups surfaced
-- **#3 timer reload window** — now pinpointed (4 mooneye ROMs + blargg mem_timing).
+- **#3 timer reload window** — pinpointed to the 4 mooneye ROMs, then root-caused:
+  a discrete write-interaction/TAC-glitch fix was prototyped and proven NOT
+  sufficient (zero movement, no regression), so the real blocker is sub-instruction
+  (per-M-cycle) reload-cycle precision — the architectural per-M-cycle timer model.
+  See MEM_TIMING_SCOPING.md "Timer root-cause".
 - **Harness**: add an instruction/cycle cap to `mooneye_sweep.sh` so LCD-off
   busy-loopers (e.g. reti_timing) report instead of hanging on the frame cap.
 - **Per-M-cycle interrupt dispatch** — the mooneye ei_*/di_* axis; larger than this

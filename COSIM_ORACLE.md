@@ -308,8 +308,17 @@ Phase A (in-process pairing 1):  ✅ COMPLETE — all four gates pass on Tetris 
       sufficed. Pinned chains (stride 456) recorded in `tools/cosim_baselines.tsv`:
       tetris 700f = `30573CCD2C2D82CB`, megaman_xtreme2 1000f = `E2A240E56E7E348E`.
       Ratchet assert: `gbc_cosim.py --ab-frames N --expect-chain HEX` (exit 0 on match).
-- [ ] Gate 5 fixture sweep: run the co-sim across Blargg (`F:\Projects\gb-test-roms`) and
-      Mooneye/mealybug (`F:\Projects\mealybug-tearoom-tests`) as pinned baselines.
+- [~] Gate 5 fixture sweep — STARTED (2026-07-01). Each fixture must be recompiled (nature of a
+      static recompiler). Demonstrated on `instr_timing` (Blargg): pairing-1 gate suite ALL PASS,
+      recomp-vs-interp matched 120 frames, baseline `A7913A54909CC142` pinned in
+      `tools/cosim_baselines.tsv`. **KEY: oracle-level fixture testing is GATED behind the PPU
+      LY-timing fix** — recomp-vs-SameBoy runs from cycle 0 (LLE boot), so every DMG fixture hits
+      the SAME boot-PPU divergence at **instruction 30129** (identical pc 006A/0064, LY 0x90/0x1E
+      to Tetris — it's in the shared DMG BIOS, before the cart's own logic). So: pairing-1
+      baselines are cheap and work per-fixture now; the oracle sweep becomes meaningful only after
+      the PPU LY-vs-cycle timing is fixed. That fix (traced to the BIOS frame-wait loop by the
+      oracle) is the clear next priority — after it, re-run the oracle on the fixtures to test
+      each ROM's actual accuracy logic against SameBoy.
 
 Meaning of the all-matched result: over the FULL Tetris attract (incl. demo gameplay) and
 deep into MMX2, the recomp and interpreter backends are byte-identical in complete

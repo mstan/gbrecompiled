@@ -13,3 +13,4 @@
 # target        stride  frames  chain
 tetris          456     700     30573CCD2C2D82CB
 megaman_xtreme2 456     1000    E2A240E56E7E348E
+instr_timing    456     120     A7913A54909CC142

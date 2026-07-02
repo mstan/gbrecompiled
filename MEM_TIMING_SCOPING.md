@@ -150,6 +150,56 @@ timing as the next distinct axis once reads are clean. This is a bigger, more
 architectural change than a targeted PPU patch — it touches the shared tick/sync
 model used by every instruction in both backends.
 
+## RESOLUTION (2026-07-02) — Option C shipped for LY/STAT; B rejected; timer deferred
+
+Implemented and verified on branch `feat/mem-read-race` (off the clean checkpoint
+`feat/differential-cosim @ 347ed56`). Two commits: LY race, then STAT race.
+
+**What shipped (Option C, address-scoped read-before-increment race):**
+- The fix lives in the READ path (`gb_read8`) + PPU edge tracking, NOT the tick
+  model. A CPU read of a cycle-derived PPU register (`LY` 0xFF44, `STAT` 0xFF41)
+  whose read M-cycle (last 4 T) coincides with the register's edge returns the
+  PRE-edge value ("read wins the race"). We keep the true value in `ppu->ly/stat`
+  (+ `ctx->io`) for internal state/hashing, and remember `{ly_prev,
+  ly_change_cycle}` / `{stat_prev, stat_change_cycle}` (edge cycle =
+  `ctx->cycles - mode_cycles`, recorded at the `ppu_tick` transitions /
+  `update_stat`). `gb_read8` serves the raced value when
+  `change_cycle + 4 > ctx->cycles`.
+- Because it is ADDRESS-SCOPED to the PPU registers, the timer is untouched — so
+  it does NOT regress `mem_timing` the way the fixed read-split (Option B) did.
+
+**Verified (Tetris/DMG, LLE from cycle 0):**
+- SameBoy oracle first-divergence **61348 → 2,266,273** (identical to Option B's
+  win, but with no tick-model change) — out of the BIOS into cart code; the new
+  split is `recomp pc=01FD vs SameBoy pc=0040`, the **VBlank-vector interrupt-
+  dispatch axis** (a separate, next bug).
+- LLE boot handoff vs SameBoy: **+140,140 cyc → +20 cyc**; DIV **0xCF → 0xAB**
+  (matches SameBoy + mooneye boot_div).
+- blargg `mem_timing`: **Failed 2 (modify_timing ok)** — unchanged from baseline,
+  NO regression (Option B was Failed 3).
+- 8 pairing-1 gates pass, A==B, HLE full-state chain preserved `1CB1212F869F05F6`.
+- LLE-vs-HLE boot gate: 0 CPU-handoff diffs.
+
+**Option B (fixed read-split, tick `cycles-4` for all reads) — REJECTED.** It hit
+the same oracle/boot win but regressed `mem_timing` subtest 3 (`modify_timing`
+ok→fail): reading the timer 4 cycles early corrupts the timer-based measurement.
+A fixed read offset cannot satisfy both the PPU LY race and the timer. Isolation
+confirmed the regression is the read-split itself (not the boundary sync).
+
+**Timer (DIV/TIMA) race — ATTEMPTED, BACKED OUT, DEFERRED.** A surgical TIMA/DIV
+read race (return prev only on coincidence) was tried on top of LY/STAT. It
+**regressed `modify_timing` (Failed 2 → 3) and did NOT fix read/write timing**
+(subtests 1/2 stayed 81). Conclusion: `mem_timing` read/write failures are NOT a
+read-M-cycle-offset problem — they are a deeper timer-alignment issue (likely the
+TIMA increment cycle / reload timing). The read-before-increment race is the
+wrong tool for the timer. This is a SEPARATE axis, not pointed to by the current
+oracle coordinate (which is now the VBlank interrupt-dispatch split at 2,266,273).
+Left for a focused follow-up gated on `mem_timing` read/write root-cause.
+
+**CGB caveat:** the edge-cycle math (`ctx->cycles - mode_cycles`, `+4` window) is
+in CPU-T-cycle units and exact for single-speed DMG. CGB double-speed re-verify
+(MMX2 + cgb_boot.bin) is still pending.
+
 ## Out of scope / watch-outs
 
 - Do NOT tune the first-line-after-enable value to mask this (different bug).

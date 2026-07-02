@@ -142,6 +142,8 @@ typedef struct GBPPU {
      * ctx->cycles). See gbrt.c gb_read8 (0xFF44). */
     uint8_t  ly_prev;          /* LY value just before its most recent edge */
     uint32_t ly_change_cycle;  /* absolute ctx->cycles of that LY edge */
+    uint8_t  stat_prev;        /* STAT value just before its most recent change */
+    uint32_t stat_change_cycle;/* absolute ctx->cycles of that STAT change */
 
     /* Registers latched at the start of mode 3 for the active scanline */
     uint8_t latched_lcdc;

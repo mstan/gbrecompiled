@@ -1963,6 +1963,9 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
             if (addr == 0xFF44 && p->ly_change_cycle + 4 > ctx->cycles) {
                 return p->ly_prev;
             }
+            if (addr == 0xFF41 && p->stat_change_cycle + 4 > ctx->cycles) {
+                return (uint8_t)(p->stat_prev | 0x80);
+            }
             return ppu_read_register(p, addr);
         }
         if (addr >= 0xFF68 && addr <= 0xFF6B) {

@@ -324,6 +324,8 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
     ppu->ly = lle_boot ? 0 : 145;
     ppu->ly_prev = ppu->ly;        /* read-before-increment race: no edge yet */
     ppu->ly_change_cycle = 0;
+    ppu->stat_prev = ppu->stat;
+    ppu->stat_change_cycle = 0;
     ppu->lyc = 0x00;
     ppu->dma = (ctx && ctx->config.model == GB_MODEL_CGB) ? 0x00 : 0xFF;
     ppu->bgp = 0xFC;
@@ -762,12 +764,23 @@ static void convert_to_rgb(GBPPU* ppu) {
  * ========================================================================== */
 
 static void update_stat(GBPPU* ppu, GBContext* ctx) {
+    uint8_t old_stat = ppu->stat;
     ppu->stat = (uint8_t)((ppu->stat & ~STAT_MODE_MASK) | ppu->mode);
 
     if (ppu->ly == ppu->lyc) {
         ppu->stat |= STAT_LYC_MATCH;
     } else {
         ppu->stat &= (uint8_t)~STAT_LYC_MATCH;
+    }
+
+    if (ppu->stat != old_stat) {
+        /* read-before-increment race: remember the pre-change STAT + the cycle
+         * of the change so a coincident FF41 read samples the old value. From
+         * ppu_tick transitions edge = ctx->cycles - mode_cycles (the transition
+         * cycle); from a register-write path this under-estimates and the race
+         * simply doesn't fire (safe fallback to the current value). */
+        ppu->stat_prev = old_stat;
+        ppu->stat_change_cycle = ctx->cycles - ppu->mode_cycles;
     }
 
     ctx->io[0x41] = ppu->stat;

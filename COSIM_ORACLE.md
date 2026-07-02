@@ -475,6 +475,43 @@ delta (the old "+16" is really **+4** with fetch-aligned sampling). Findings, un
   Fixing it means reading cycle-derived I/O (FF44/FF04/STAT) at the correct sub-instruction M-cycle, a
   larger architectural change (per-M-cycle memory timing) tracked separately from this PPU fix.
 
+### EI one-instruction-delay + co-sim dispatch-boundary fix (2026-07-02)
+
+After Option C (LY/STAT read-before-increment race; see MEM_TIMING_SCOPING.md "RESOLUTION") advanced the
+first divergence to **instr 2,266,273** (recomp pc=`01FD` vs SameBoy VBlank vector `0x0040`, dcyc=+12),
+that split was framed as "VBlank interrupt-dispatch timing." Extending the always-on SBWIN ring to
+capture **IME / IF / IE on both sides** (`sb_oracle_last_intr` captured inside SameBoy's exec callback,
++ recomp `ime`/`ime_pending`/`io[0x0F]`/`io[0x80]`) refuted the coarse-`gb_sync`-late-IF hypothesis: IF=01
+(VBlank pending) and IE=09 were **identical** on both sides for many instructions before the split, and IME
+went 0→1 on the SAME instruction. TWO distinct causes, both fixed:
+
+1. **EI one-instruction-delay bug (real runtime bug).** `gb_tick`'s tail resolved `ime_pending→ime=1` on the
+   FIRST tick after EI — i.e. EI's OWN trailing `gb_tick(4)` — so IME turned on at the end of EI instead of
+   after the following instruction (Pan Docs EI delay). At `0x0339=EI`, recomp had IME=1 by the `0x033A`
+   boundary and `gb_handle_interrupts` (top of the step) dispatched VBlank *before* `033A` executed; SameBoy
+   executes `033A` first. FIX: `ime_pending` is now a one-instruction counter — EI sets it to **2**, EI's
+   tick decrements to 1 (IME still off for the next instruction's check), the following instruction's tick
+   decrements to 0 and enables IME. Applied to BOTH backends (interpreter.c 0xFB + c_emitter.cpp EI → `=2`)
+   so generated vs interpreted stay in sync; both emit one `gb_tick` per instruction, so the counter
+   decrements identically. RETI unchanged (enables IME immediately, no delay).
+
+2. **Co-sim dispatch-boundary artifact (harness).** `gb_debug_step` ran `gb_handle_interrupts` then executed,
+   folding [dispatch + the vector's first instruction] into one step, so it never presented the vector
+   `0x0040` as a boundary the way SameBoy's fetch callback does — permanently offsetting the instruction-
+   count-aligned stream by one after every dispatch. FIX: `gb_debug_step` now clears `ctx->stopped` first,
+   then if `gb_handle_interrupts` dispatched (set `stopped`) it yields immediately with a new transient
+   `ctx->debug_dispatch_only` flag, executing NO instruction; the co-sim loop skips such a step (consumes no
+   SameBoy instruction), so the vector executes and re-aligns on the next iteration. The flag (NOT `stopped`)
+   is used because a normal frame-completing instruction also sets `stopped` via `gb_tick(frame_done)`.
+
+**Result:** first divergence advanced **2,266,273 → 2,266,364**. The new split is a DIFFERENT axis — a PPU
+sub-scanline LY divergence (recomp LY=02 vs SameBoy LY=03, IME/IF/IE all matching) in Tetris's HRAM OAM-DMA
+wait loop (`0xFFB6`), i.e. the per-M-cycle / DMA-wait timing family, not interrupts. **Validation:** blargg
+`instr_timing` **Passes** (exercises EI timing); `mem_timing` unchanged at "Failed 2" (01:81 02:81 03:ok);
+8/8 pairing gates; boot gate 0-diff; A-vs-B matched all checkpoints with chains re-pinned (tetris
+`E92927C083145FD7`, instr_timing `5D103AEB0D3F03DB`) — the chains changed only because IME-enable timing
+genuinely moved. megaman_xtreme2 baseline is stale pending its ROM.
+
 ### Phase B design notes + de-risk (2026-07-01)
 
 **Build de-risk COMPLETE + POSITIVE.** All 21 SameBoy `Core/*.c` compile and archive into

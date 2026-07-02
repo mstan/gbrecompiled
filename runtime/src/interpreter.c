@@ -760,7 +760,7 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             case 0xFF: gb_rst(ctx, 0x38); gb_tick(ctx, cycles); return;
                 
             case 0xF3: ctx->ime = 0; ctx->ime_pending = 0; break; /* DI - also cancel pending EI */
-            case 0xFB: ctx->ime_pending = 1; break; /* EI */
+            case 0xFB: ctx->ime_pending = 2; break; /* EI - one-instruction delay (resolved in gb_tick) */
             
             /* Unused / Illegal opcodes (No-ops on some hardware, can reach here in tests) */
             case 0xD3: case 0xDB: case 0xDD: case 0xE3: case 0xE4:

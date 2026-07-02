@@ -1356,6 +1356,8 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
     struct SBWinEntry {
         uint64_t ic; uint16_t rpc, opc; uint32_t rcyc, ocyc;
         uint8_t rdiv, odiv, rly, oly, rmode;
+        uint8_t rime, oime, rif, oif, rie, oie; /* interrupt state, both sides */
+        uint8_t rimep, rhalt;                   /* recomp EI-delay + halt latches */
     } win[SBWIN_CAP];
     memset(win, 0, sizeof(win));
     uint64_t win_count = 0;
@@ -1370,7 +1372,19 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
         uint32_t r_cyc = recomp_lle_ctx->cycles;
         uint8_t r_mode = rppu ? (uint8_t)rppu->mode : 0;
         uint8_t was_halted = recomp_lle_ctx->halted;
+        uint8_t r_ime  = recomp_lle_ctx->ime;
+        uint8_t r_imep = recomp_lle_ctx->ime_pending;
+        uint8_t r_if   = (uint8_t)(recomp_lle_ctx->io[0x0F] & 0x1F);
+        uint8_t r_ie   = (uint8_t)(recomp_lle_ctx->io[0x80] & 0x1F);
         gb_debug_step(recomp_lle_ctx, GB_EXECUTION_INTERPRETER);
+        /* Pure interrupt-dispatch step: gb_debug_step moved PC to the vector but
+         * executed NO instruction (debug_dispatch_only). SameBoy emits no
+         * execution callback for the dispatch itself, so consume no SameBoy
+         * instruction and don't record — the vector's first instruction executes
+         * (and re-aligns both streams) on the next iteration. Keyed on
+         * debug_dispatch_only, NOT ctx->stopped: a normal frame-completing
+         * instruction also sets stopped, but it DID execute an instruction. */
+        if (recomp_lle_ctx->debug_dispatch_only) continue;
         /* Skip HALT/STOP idle ticks (no instruction fetched — SameBoy's callback
          * doesn't fire on those either, so the streams stay aligned). */
         if (was_halted && recomp_lle_ctx->halted && recomp_lle_ctx->pc == r_pc) continue;
@@ -1380,6 +1394,10 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
             fprintf(stderr, "[SBORACLE] oracle stream stalled at instruction %" PRIu64 "\n", icount);
             error = true; break;
         }
+        /* Interrupt state at SameBoy's fetch boundary for the instruction just
+         * returned (captured inside the exec callback, not read after-the-fact). */
+        uint8_t o_ime = 0, o_if = 0, o_ie = 0;
+        sb_oracle_last_intr(o, &o_ime, &o_if, &o_ie);
         icount++;
 
         /* Record this instruction (fetch-boundary state, both sides) into the ring. */
@@ -1389,6 +1407,10 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
             win[s].rcyc = r_cyc; win[s].ocyc = o_cyc;
             win[s].rdiv = r_div; win[s].odiv = o_div;
             win[s].rly = r_ly; win[s].oly = o_ly; win[s].rmode = r_mode;
+            win[s].rime = r_ime; win[s].oime = o_ime;
+            win[s].rif = r_if; win[s].oif = o_if;
+            win[s].rie = r_ie; win[s].oie = o_ie;
+            win[s].rimep = r_imep; win[s].rhalt = was_halted;
             win_count++;
         }
 
@@ -1406,16 +1428,22 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
             {
                 uint64_t n = win_count < SBWIN_CAP ? win_count : SBWIN_CAP;
                 fprintf(stderr,
-                        "[SBWIN] last %" PRIu64 " instrs before split "
-                        "(instr | pc r/o | cyc r/o dcyc | ly r/o | rmode | div r/o):\n", n);
+                        "[SBWIN] last %" PRIu64 " instrs before split (instr | pc r/o | cyc r/o dcyc "
+                        "| ly r/o | rmode | div r/o | IF r/o | IE r/o | IME r/o | rEp rH):\n", n);
                 for (uint64_t k = win_count - n; k < win_count; k++) {
                     uint32_t s = (uint32_t)(k % SBWIN_CAP);
+                    int intr_diff = (win[s].rif != win[s].oif) || (win[s].rie != win[s].oie)
+                                 || (win[s].rime != win[s].oime);
                     fprintf(stderr,
-                            "[SBWIN] %8" PRIu64 " | %04X/%04X | %10u/%10u d%+6ld | %02X/%02X%s | m%u | %02X/%02X\n",
+                            "[SBWIN] %8" PRIu64 " | %04X/%04X | %10u/%10u d%+6ld | %02X/%02X%s | m%u | %02X/%02X"
+                            " | %02X/%02X | %02X/%02X | %u/%u | %u %u%s\n",
                             win[s].ic, win[s].rpc, win[s].opc,
                             win[s].rcyc, win[s].ocyc, (long)win[s].rcyc - (long)win[s].ocyc,
                             win[s].rly, win[s].oly, win[s].rly != win[s].oly ? "*" : " ",
-                            win[s].rmode, win[s].rdiv, win[s].odiv);
+                            win[s].rmode, win[s].rdiv, win[s].odiv,
+                            win[s].rif, win[s].oif, win[s].rie, win[s].oie,
+                            win[s].rime, win[s].oime, win[s].rimep, win[s].rhalt,
+                            intr_diff ? " <INTR" : "");
                 }
             }
             if (result) {

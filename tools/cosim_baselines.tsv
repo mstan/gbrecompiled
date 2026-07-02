@@ -10,7 +10,16 @@
 # All rows below produced matched=1 (byte-identical full state at every
 # checkpoint) on 2026-07-01, stride=456 (one scanline).
 #
+# 2026-07-02: re-pinned tetris + instr_timing after the EI one-instruction-delay
+# fix (gb_tick ime_pending counter; EI now sets ime_pending=2). The fix changes
+# WHEN IME is enabled, so the full-state chain legitimately changed; A still ==
+# B (matched all checkpoints) and blargg instr_timing still Passes. The oracle's
+# first divergence advanced 2,266,273 -> 2,266,364 (a PPU/DMA-timing axis).
+# megaman_xtreme2 is STALE — its ROM is not staged in this worktree so its chain
+# could not be re-measured; the EI-delay fix affects it too. Re-pin once the ROM
+# is available (verification will fail against the old value until then).
+#
 # target        stride  frames  chain
-tetris          456     700     30573CCD2C2D82CB
-megaman_xtreme2 456     1000    E2A240E56E7E348E
-instr_timing    456     120     A7913A54909CC142
+tetris          456     700     E92927C083145FD7
+megaman_xtreme2 456     1000    E2A240E56E7E348E  # STALE (pre-EI-delay); re-pin when ROM staged
+instr_timing    456     120     5D103AEB0D3F03DB

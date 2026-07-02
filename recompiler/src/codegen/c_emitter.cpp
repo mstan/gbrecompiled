@@ -2046,7 +2046,10 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             break;
             
         case ir::Opcode::EI:
-            out << "ctx->ime_pending = 1;\n";
+            /* One-instruction EI delay: set 2, gb_tick decrements to 0 over the
+             * next instruction before enabling IME (see gb_tick in gbrt.c). Must
+             * match the interpreter's EI so generated vs interpreted stay in sync. */
+            out << "ctx->ime_pending = 2;\n";
             break;
             
         case ir::Opcode::DAA:

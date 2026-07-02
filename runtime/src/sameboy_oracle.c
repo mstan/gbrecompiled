@@ -44,7 +44,12 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
 }
 
 #define SB_FIFO_CAP 8192
-typedef struct { uint16_t pc; uint8_t div; uint8_t ly; uint32_t cyc; } SBTraceEntry;
+typedef struct {
+    uint16_t pc; uint8_t div; uint8_t ly; uint32_t cyc;
+    uint8_t ime;   /* interrupt master enable (0/1) at the fetch boundary */
+    uint8_t iflag; /* IF (0xFF0F) masked to bits 0-4 */
+    uint8_t ie;    /* IE (0xFFFF) masked to bits 0-4 */
+} SBTraceEntry;
 
 struct SBOracle {
     GB_gameboy_t gb;              /* MUST be first: the execution callback recovers
@@ -54,6 +59,7 @@ struct SBOracle {
     SBTraceEntry fifo[SB_FIFO_CAP];
     uint32_t fifo_head, fifo_tail;
     uint8_t  fifo_overflow;
+    SBTraceEntry last_popped;     /* the entry most recently returned by next_instruction */
     uint32_t pixels[160 * 144];   /* headless pixel sink */
 };
 
@@ -69,6 +75,9 @@ static void sb_exec_cb(GB_gameboy_t *gb, uint16_t address, uint8_t opcode) {
     o->fifo[o->fifo_tail].div = GB_read_memory(gb, 0xFF04);
     o->fifo[o->fifo_tail].ly  = GB_read_memory(gb, 0xFF44);
     o->fifo[o->fifo_tail].cyc = (uint32_t)(gb->absolute_debugger_ticks / 2);
+    o->fifo[o->fifo_tail].ime = (uint8_t)(gb->ime ? 1 : 0);
+    o->fifo[o->fifo_tail].iflag = (uint8_t)(GB_read_memory(gb, 0xFF0F) & 0x1F);
+    o->fifo[o->fifo_tail].ie  = (uint8_t)(GB_read_memory(gb, 0xFFFF) & 0x1F);
     o->fifo_tail = next;
 }
 
@@ -147,6 +156,12 @@ uint64_t sb_oracle_instruction_count(const SBOracle* o) {
     return o->icount;
 }
 
+void sb_oracle_last_intr(SBOracle* o, uint8_t* ime, uint8_t* iflag, uint8_t* ie) {
+    if (ime)   *ime   = o->last_popped.ime;
+    if (iflag) *iflag = o->last_popped.iflag;
+    if (ie)    *ie    = o->last_popped.ie;
+}
+
 bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly, uint32_t* cyc) {
     int guard = 0;
     while (o->fifo_head == o->fifo_tail) {
@@ -156,6 +171,7 @@ bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t
     }
     SBTraceEntry e = o->fifo[o->fifo_head];
     o->fifo_head = (o->fifo_head + 1u) % SB_FIFO_CAP;
+    o->last_popped = e;
     if (pc)  *pc  = e.pc;
     if (div) *div = e.div;
     if (ly)  *ly  = e.ly;

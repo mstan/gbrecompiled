@@ -65,6 +65,14 @@ bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t
 /* Instructions executed so far (execution-callback count). */
 uint64_t sb_oracle_instruction_count(const SBOracle* o);
 
+/* Interrupt state (IME / IF / IE; IF+IE masked to bits 0-4) sampled at the fetch
+ * boundary of the instruction MOST RECENTLY returned by sb_oracle_next_instruction.
+ * Captured inside the execution callback, so it reflects the boundary state — NOT
+ * a later state (SameBoy runs ahead to refill its FIFO). Lets the co-sim ring
+ * explain interrupt-dispatch divergences: was the interrupt pending+enabled on
+ * one side but not the other at the same instruction boundary. Any out-ptr may be NULL. */
+void sb_oracle_last_intr(SBOracle* o, uint8_t* ime, uint8_t* iflag, uint8_t* ie);
+
 #ifdef __cplusplus
 }
 #endif

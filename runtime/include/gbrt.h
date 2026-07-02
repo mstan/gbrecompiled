@@ -204,6 +204,9 @@ typedef struct GBContext {
     uint8_t halt_bug;     /**< HALT bug: next instruction byte read twice */
     uint8_t single_step_mode; /**< Debug mode: execute at most one instruction */
     uint8_t cgb_double_speed; /**< CGB double-speed mode is enabled */
+    uint8_t debug_dispatch_only; /**< gb_debug_step yielded on an interrupt dispatch WITHOUT
+                                  *   executing an instruction (co-sim boundary alignment).
+                                  *   Transient; not part of architectural state hashes. */
     
     /* OAM DMA state */
     struct {

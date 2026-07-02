@@ -3820,7 +3820,14 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
         if (ctx->frame_done || (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) ctx->stopped = 1;
     }
     if (ctx->apu) gb_audio_step(ctx, system_cycles);
-    if (ctx->ime_pending) { ctx->ime = 1; ctx->ime_pending = 0; }
+    /* EI enables IME with a mandatory one-instruction delay (Pan Docs; matches
+     * SameBoy). EI sets ime_pending=2; its own trailing tick decrements to 1
+     * (IME still off while the NEXT instruction's interrupt check runs), and the
+     * following instruction's tick decrements to 0 and enables IME. So an
+     * interrupt is first serviced only AFTER the instruction that follows EI.
+     * Both backends emit one gb_tick per instruction, so this decrements
+     * identically in the interpreter and generated code. */
+    if (ctx->ime_pending) { if (--ctx->ime_pending == 0) ctx->ime = 1; }
 }
 
 void gb_handle_interrupts(GBContext* ctx) {
@@ -3982,14 +3989,33 @@ uint32_t gb_step(GBContext* ctx) {
 uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
     uint32_t start = ctx->cycles;
 
+    /* Clear any leftover stop signal FIRST (gb_tick also sets ctx->stopped on
+     * frame_done, which is unrelated to interrupt dispatch and must not be
+     * mistaken for one below). After this, a set ctx->stopped can only come from
+     * gb_handle_interrupts dispatching an interrupt on THIS call. */
+    ctx->stopped = 0;
+    ctx->debug_dispatch_only = 0;
+
     gb_handle_interrupts(ctx);
+
+    /* If an interrupt was just dispatched, PC now points at the vector and NO
+     * instruction has executed yet. Yield here so a single-stepping caller sees
+     * the vector as its own step boundary — matching a real CPU / SameBoy, whose
+     * execution callback fires at the post-dispatch fetch, not on the dispatch
+     * itself. Without this the dispatch and the vector's first instruction would
+     * be folded into one step, permanently offsetting an instruction-count-aligned
+     * stream by one after every interrupt. debug_dispatch_only tells the co-sim
+     * this step executed NO instruction (distinct from ctx->stopped, which a
+     * normal frame-completing instruction also sets via gb_tick). */
+    if (ctx->stopped) {
+        ctx->debug_dispatch_only = 1;
+        return ctx->cycles - start;
+    }
 
     /* Match gb_run_frame() scheduling around HALT exit and stopped state. */
     if (ctx->halted && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F)) {
         ctx->halted = 0;
     }
-
-    ctx->stopped = 0;
 
     if (ctx->stop_mode_active) {
         if (gb_stop_should_resume(ctx)) {

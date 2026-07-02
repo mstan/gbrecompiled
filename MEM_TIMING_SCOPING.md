@@ -200,6 +200,38 @@ Left for a focused follow-up gated on `mem_timing` read/write root-cause.
 in CPU-T-cycle units and exact for single-speed DMG. CGB double-speed re-verify
 (MMX2 + cgb_boot.bin) is still pending.
 
+## Timer root-cause LOCALIZED via mooneye timer suite (2026-07-02)
+
+The Gate-5 mooneye `acceptance/timer/` sweep pinpoints the `mem_timing` read/write
+(01/02) timer axis. 9/13 PASS, 4 FAIL, and the split is diagnostic:
+
+- **PASS (9):** `div_write`, `tim00/tim01/tim10/tim11` (all 4 TAC frequencies), and
+  all 4 `tim0*_div_trigger` / `tim1*_div_trigger`. So basic TIMA counting, the TAC
+  frequency selection, and DIV-write-triggered TIMA increments (falling-edge on the
+  selected DIV bit) are all CORRECT.
+- **FAIL (4):** `tima_reload`, `tima_write_reloading`, `tma_write_reloading`,
+  `rapid_toggle` — every failure is on the **TIMA overflow → TMA reload window**:
+  the 4-T-cycle delay after TIMA overflows (reads 0x00), the TIMA-interrupt request
+  edge, and writes to TIMA/TMA that land inside that window.
+
+**Root cause (localized):** the reload window in `gb_tick` (`gbrt.c`, the
+`tima_reload_pending` block ~L3792-3814) is processed at whole-`gb_tick`
+granularity and does not model the hardware write-vs-reload interactions:
+- `tima_write_reloading`: a TIMA write DURING the reload cycle is ignored (reload
+  wins); a TIMA write during the preceding 0x00 window CANCELS the pending reload.
+  `gb_write8` currently just stores TIMA and does not consult `tima_reload_pending`.
+- `tma_write_reloading`: a TMA write on the reload cycle must feed the NEW value
+  into the reload (reload latches TMA at that cycle).
+- `rapid_toggle`: TAC enable/disable produces a falling-edge on the timer bit
+  (a spurious TIMA increment) that the current falling-edge loop misses across a
+  TAC write.
+This is a discrete, well-scoped fix in the timer path (`gb_tick` reload window +
+`gb_write8` TIMA/TMA/TAC handling) — NOT the read-M-cycle-offset problem that
+Options A/B/timer-race chased and that regressed `modify_timing`. It must land in
+both backends' shared runtime (the timer lives in `gb_tick`/`gb_write8`, shared),
+and re-validate against these 4 mooneye ROMs + blargg `mem_timing` (target: 01/02
+→ ok without regressing 03) + the 8 pairing gates + oracle.
+
 ## Out of scope / watch-outs
 
 - Do NOT tune the first-line-after-enable value to mask this (different bug).

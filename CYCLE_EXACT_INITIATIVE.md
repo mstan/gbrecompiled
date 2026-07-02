@@ -169,10 +169,54 @@ phase, DIV already matched there); MMX2 A-vs-B chain unchanged
 E92927C083145FD7). LLE-only change → all HLE production baselines untouched.
 
 Now the oracle (LLE) shares production's (HLE) DIV phase, making it honest for the
-REAL read/write-timing measurement. The mem_timing split at 2,492,083 persisted
-with DIV matching — that residual is the genuine read-timing gap, the next target
-(Phase 1 body). NOTE: the HLE CGB post-boot div constant (reset path, CGB branch =
-0x0000) is a SEPARATE question (CGB HLE boot-div accuracy) not addressed here.
+REAL read/write-timing measurement. NOTE: the HLE CGB post-boot div constant (reset
+path, CGB branch = 0x0000) is a SEPARATE question (CGB HLE boot-div accuracy) not
+addressed here.
+
+## Phase 1 body — step 1 DONE: model/boot resolved + STALE-BUILD correction (2026-07-02)
+
+Resolving the mem_timing model/boot inconsistency before measuring the read gap
+surfaced two corrections to the prior measurement:
+
+**(a) Honest lens = DMG-consistent.** The oracle model auto-follows the recomp
+model (`differential.c` `is_cgb = recomp.config.model==GB_MODEL_CGB`), so the only
+inconsistency was the boot ROM. mem_timing.gb has CGB flag 0x80 → `--model auto`
+picks CGB, but it is a DMG-natured test. Measuring three ways:
+- `auto`(CGB)+dmg_boot and `--model dmg`+dmg_boot BOTH diverge at the same place
+  (CGB model didn't shift a DMG test), but feeding a 256B DMG boot to a CGB model
+  is the broken config — use `--model dmg` + dmg_boot.
+- `--model cgb` + cgb_boot diverges FIRST at **81,598** (PPU LY 8F-vs-90 phase drift
+  — the Phase 5 CGB axis), which MASKS the read gap. So the read-timing gap must be
+  measured in DMG mode; CGB hides it behind the PPU LY drift.
+
+**(b) The prior "2,492,083, DIV matching" measurement was STALE.** The
+mem_timing_test binary was built 13:14, BEFORE the Phase 1a `div=8` fix committed
+(13:18/13:29, gbrt.c modified 13:27). So that binary ran recomp power-on div16=0
+(8 BEHIND SameBoy); the div16 was silently −8 for the entire run (the DIV *register*
+high byte matched by luck, which is all the register-level boot gate could see). The
+"DIV matching" claim was register-level only. Rebuilding mem_timing_test
+(`ninja -C mem_timing_test/build` recompiles ../runtime/src/gbrt.c) fixed it:
+div16 now = 0x0008 == SameBoy at cyc 0, dd=+0 from power-on.
+
+**Honest coordinate (post-rebuild, DMG-consistent):** first divergence
+**instr 2,492,056** (was the stale 2,492,083). recomp pc=C2C9 vs SameBoy pc=C2BA,
+with DIV=D6/D6, LY=78/78, div16 D618/D61C — everything matches through 2,492,055,
+then a clean **dcyc=−4** (recomp now 4 cyc BEHIND; the stale binary had +4 AHEAD —
+sign flipped once the divider aligned). The instruction at C2C7 is a conditional JR:
+recomp not-taken (+8), SameBoy taken (+12). The condition is a DIV-delta the WRAM
+measurement helper (C003–C00F) computed for the instruction-under-test; recomp's
+delta is 1 M-cycle (4 T) short of SameBoy's = the sub-instruction access-timing gap.
+
+**Next (needs Ghidra):** disassemble the mem_timing measurement helper (C003–C00F)
++ harness (C2C0–C2C9) to identify which access in the tested op lands at the wrong
+M-cycle (read vs write, and N), then implement the `GB_ACC_READ`/`GB_ACC_WRITE`
+split per-opcode via GB_OP_TIMING in interpreter.c + c_emitter.cpp atomically.
+
+**Watch-out for future sessions:** the mem_timing (and any per-generated-project)
+artifact links ../runtime as a subdir build — after ANY runtime/src edit, rebuild
+the specific test artifact (`ninja -C <artifact>/build`), not just `build/`, or you
+measure a stale runtime. Re-audit whether other Phase 1a/1b verifications
+(tetris boot gate, MMX2 A-vs-B) used freshly-rebuilt artifacts.
 
 ## Risks / watch-outs
 

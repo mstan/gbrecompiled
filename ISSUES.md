@@ -14,28 +14,30 @@ whose fixes were carried forward during master's evolution. `git cherry` marks
 them "+" but that's exact patch-id, useless across this much drift. **There is
 essentially nothing to fold into master.**
 
+Three superseded ancestors (`feature/pokemon-red-blue`,
+`feature/toml-config-and-analyzer-fixes`, `pr/vblank-completion`) were pruned
+2026-07-02 after verification (SHAs in the record below). Remaining branches:
+
 | Branch | Unique | Verified status vs master | Recommendation |
 |---|---|---|---|
-| `feature/pokemon-red-blue` | 19 | **Superseded ancestor.** Every fix verified present in master: LCD-off frame timing (gbrt.c:3936, verbatim), VBlank completion (`vblank_serviced`), serial timing (superseded by a richer serial system), HRAM DMA sprite fix (generator.cpp:199), STORE8 IMM8 guard (c_emitter.cpp:1243), analyzer fall-through. No Red/Blue-*specific* injection in these commits. | Nothing to harvest. Delete-candidate (or keep as a target bookmark) — user's call. |
-| `feature/toml-config-and-analyzer-fixes` | 1 | Analyzer fall-through fix is in master; TOML config likely superseded by master's `config.cpp`. | Nothing to harvest. Delete-candidate. |
-| `pr/vblank-completion` | 1 | **In master** (`vblank_serviced`, gbrt.c:3921). | Superseded — delete-candidate unless kept as an upstream-PR bookmark. |
 | `pr/window-wy-trigger` | 1 | **Partly missing.** Master latches window on `WY <= LY` (ppu.c:439/456); this uses strict `LY == WY`. Subtle edge case (mid-frame WY rewrite below current line). Rare/test-ROM tier, NOT a game-affecting bug. | Low value; fold only if chasing PPU edge-case accuracy. |
 | `pr/audio-underrun-fade` | 1 | Master already smooths underruns (hold-last-sample, platform_sdl.cpp:4187); this is an alternative fade-to-zero design. | Not a missing fix; a design variant. Keep as an idea or drop. |
-| `merge/onto-gbrecomp` | 7 vs `gbrecomp/main` | Upstream-contribution staging. **Unpushed** — git blocked `-d` deletion. | Keep until the upstream push decision; do NOT force-delete. |
+| `merge/onto-gbrecomp` | 7 vs `gbrecomp/main` | Upstream-contribution staging. **Unpushed** — git blocks `-d` deletion. | Keep until the upstream push decision; do NOT force-delete. |
 | `merge/upstream-squash` | 1 vs `origin/main` | Squash of the fork onto upstream base. **Unpushed.** | Keep pending upstream decision. |
 | `wip/heuristic-eval-pre-merge` | 1 | Deliberate pre-merge backup snapshot. | Keep as a backup bookmark. |
 | `debug/peanut-sav-loader` | 1 | `--sav` flag for the peanut-gb debug env. LOW. | Keep; minor tooling. |
 | `main` | — | The `origin/main`-tracking line (ahead 99 of origin). | Keep — a real upstream line, not stale. |
 
-**Net:** the tree is *cleaner than it looks* — `feature/pokemon-red-blue`,
-`feature/toml-config-and-analyzer-fixes`, and `pr/vblank-completion` are
-superseded ancestors safe to prune (delete-candidates, user's call); the
-`merge/*` branches must stay (unpushed upstream work); the rest are
-bookmarks/idea-variants with no unique fix worth pulling.
+**Net:** what remains are the two `merge/*` upstream-staging branches (unpushed,
+must stay), two `pr/*` idea-variants (no unique game-affecting fix), a backup
+snapshot, a debug-tooling branch, and `main`. Nothing left to fold into master.
 
 **Deleted-branch SHA record (restorable via `git branch <name> <sha>`):**
 - `accuracy/discovery` → `44d63b6` (blargg CPU-conformance scorecard; fully merged into master)
 - `feat/shadow-enhancements` → `d122b2a` (shadow work; content now in master as `c5d6b1a`; `myfork/feat/shadow-enhancements` still has it)
+- `feature/pokemon-red-blue` → `6208b1e` (superseded ancestor; all fixes verified in master)
+- `feature/toml-config-and-analyzer-fixes` → `65fa919` (superseded ancestor; analyzer fix in master)
+- `pr/vblank-completion` → `a2c30c7` (superseded; `vblank_serviced` already in master)
 
 ## Parked (diminishing returns — do NOT resume without a real-game need)
 

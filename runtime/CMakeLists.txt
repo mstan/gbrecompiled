@@ -180,3 +180,29 @@ endif()
 if(WIN32)
     target_link_libraries(gbrt PUBLIC ws2_32 comdlg32)
 endif()
+
+# ---------------------------------------------------------------------------
+# Embedded SameBoy oracle (cross-oracle co-simulation; see COSIM_ORACLE.md).
+# OFF by default — production/normal builds never link SameBoy. Enable with
+#   -DGBC_COSIM_SAMEBOY=ON -DSAMEBOY_DIR=<path to SameBoy source tree>
+# Builds SameBoy's Core (all features on — do NOT pass -DGB_DISABLE_*, which
+# needs SameBoy's CPPP preprocessor) plus our sameboy_oracle.c driver into a
+# static lib, links it into gbrt, and defines GBC_HAVE_SAMEBOY.
+# ---------------------------------------------------------------------------
+option(GBC_COSIM_SAMEBOY "Build the embedded SameBoy oracle" OFF)
+set(SAMEBOY_DIR "F:/Projects/SameBoy" CACHE PATH "Path to the SameBoy source tree (has Core/)")
+if(GBC_COSIM_SAMEBOY)
+    if(NOT EXISTS "${SAMEBOY_DIR}/Core/gb.h")
+        message(FATAL_ERROR "GBC_COSIM_SAMEBOY=ON but ${SAMEBOY_DIR}/Core/gb.h not found; set -DSAMEBOY_DIR=")
+    endif()
+    file(GLOB SAMEBOY_CORE_SRC "${SAMEBOY_DIR}/Core/*.c")
+    add_library(sameboy_core STATIC ${SAMEBOY_CORE_SRC} src/sameboy_oracle.c)
+    target_include_directories(sameboy_core PRIVATE
+        "${SAMEBOY_DIR}/Core"
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(sameboy_core PRIVATE _GNU_SOURCE GB_INTERNAL GB_VERSION="cosim")
+    target_compile_options(sameboy_core PRIVATE -std=gnu11 -w -Wno-implicit-function-declaration)
+    target_link_libraries(gbrt PUBLIC sameboy_core)
+    target_compile_definitions(gbrt PUBLIC GBC_HAVE_SAMEBOY=1)
+    message(STATUS "SameBoy oracle: ON (${SAMEBOY_DIR})")
+endif()

@@ -354,6 +354,37 @@ This makes Phase B **Option A (cycle-0 lockstep)** viable: both recomp and SameB
 the same real BIOS from power-on. Open follow-up: the DIV/boot-timing discrepancy (our
 interpreted boot duration vs real) — a genuine fidelity item the SameBoy oracle will pin.
 
+### Phase B v1 — embedded SameBoy oracle BOOTS + arbitrates (2026-07-01)
+
+The embedded SameBoy Core oracle is built and runs in-process (Tetris, DMG). Delivered:
+- **Build:** `runtime/CMakeLists.txt` option `GBC_COSIM_SAMEBOY` (+`SAMEBOY_DIR`) builds all 21
+  SameBoy `Core/*.c` + `runtime/src/sameboy_oracle.c` into `sameboy_core`, links it into gbrt,
+  defines `GBC_HAVE_SAMEBOY`. Linker needed a local `getline` shim (mingw libmingwex lacks it;
+  only SameBoy's debugger/interactive paths reference it — never the oracle).
+- **Driver** `sameboy_oracle.c` (Beetle-isolation: only TU that sees SameBoy headers; compiled
+  with `GB_INTERNAL`): `sb_oracle_create` (GB_init + load same BIOS+ROM + reset), `GB_run`
+  stepping with the 8 MHz→T-cycle /2 map, `GB_get_registers`/`GB_get_direct_access` for the
+  neutral extractor.
+- **Neutral architectural hash** (`cosim_neutral.h`): CPU regs+IME + WRAM/VRAM/OAM/HRAM/cart-RAM,
+  identical field order on both sides (`gb_cosim_neutral_hash` recomp / `sb_oracle_neutral_hash`).
+- **CLI** `--oracle-selfcheck` and `--cosim-oracle` (both need `--boot-rom PATH`).
+
+**HEADLINE RESULT (the DIV question, arbitrated):** SameBoy boots the same DMG BIOS and hands
+off at **tcycle=23,440,344, DIV=0xAB**; our LLE boot hands off at **23,528,836, DIV=0x05**.
+→ (1) SameBoy's DIV=0xAB **matches our HLE constant 0xABCC and the mooneye boot_div spec — our
+HLE post-boot state was RIGHT.** (2) Boot durations differ by only **~88,492 cycles (~0.4%)** —
+not a gross bug; the accumulated per-M-cycle timing imprecision (the known sub-instruction-timing
+gap, `project_cpu_subinstruction_timing`). The oracle is now the standing arbiter for that.
+
+**Known limitation (lockstep alignment):** `gb_run_sameboy_cosim` currently aligns forward on
+relative post-handoff cycles. Because the boot timing drifts ~0.4% AND each side's "handoff"
+lands at a different PC (recomp 0x0100 at the 0xFF50 write; SameBoy 0x0150 after boot_rom_finished),
+cycle-alignment is confounded — the first-divergence report is a near-miss (pc 0x0294 vs 0x0293),
+not exact. Clean first-divergence localization needs **instruction-retirement / PC-landmark
+alignment** (compare state after equal instruction counts, not equal cycles) — the timing drift
+makes pure cycle-lockstep ill-posed. That refinement is the next Phase-B step; the oracle +
+neutral extractors are the durable asset and already delivered the arbitration above.
+
 ### Phase B design notes + de-risk (2026-07-01)
 
 **Build de-risk COMPLETE + POSITIVE.** All 21 SameBoy `Core/*.c` compile and archive into

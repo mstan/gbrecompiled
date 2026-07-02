@@ -1270,3 +1270,141 @@ bool gb_run_boot_gate(GBContext* lle_ctx,
     }
     return mism == 0;
 }
+
+/* ============================================================================
+ * Cross-oracle co-simulation vs embedded SameBoy. Only compiled when the
+ * runtime is built with -DGBC_COSIM_SAMEBOY (GBC_HAVE_SAMEBOY). See COSIM_ORACLE.md.
+ * ========================================================================== */
+#ifdef GBC_HAVE_SAMEBOY
+#include "sameboy_oracle.h"
+#include "cosim_neutral.h"
+
+/* Advance an LLE recomp context (interpreter — the BIOS is not compiled, and the
+ * interpreter exercises the shared device/timing models the oracle judges) to
+ * the BIOS handoff (boot_rom_active clears). Returns the handoff T-cycle. */
+static uint32_t gb_recomp_run_to_handoff(GBContext* ctx, uint64_t cap) {
+    while (ctx->boot_rom_active && ctx->cycles < cap) {
+        gb_debug_step(ctx, GB_EXECUTION_INTERPRETER);
+    }
+    return ctx->cycles;
+}
+
+void gb_sameboy_selfcheck(const uint8_t* boot_rom, size_t boot_rom_size,
+                          const uint8_t* rom, size_t rom_size, int is_cgb) {
+    SBOracle* o = sb_oracle_create(is_cgb ? SB_MODEL_CGB : SB_MODEL_DMG,
+                                   boot_rom, boot_rom_size, rom, rom_size);
+    if (!o) { fprintf(stderr, "[SBORACLE] sb_oracle_create failed\n"); return; }
+
+    /* Run to the BIOS handoff. */
+    uint64_t cap = 60000000ull;
+    while (!sb_oracle_boot_done(o) && sb_oracle_tcycles(o) < cap) {
+        sb_oracle_run_to_tcycle(o, sb_oracle_tcycles(o) + 1024);
+    }
+    fprintf(stderr,
+            "[SBORACLE] SameBoy boot handoff: tcycle=%" PRIu64 " pc=%04X DIV(FF04)=%02X LY(FF44)=%02X\n",
+            sb_oracle_tcycles(o), sb_oracle_pc(o),
+            sb_oracle_read(o, 0xFF04), sb_oracle_read(o, 0xFF44));
+
+    /* Run ~60 more frames and report a neutral hash + a couple of regs. */
+    sb_oracle_run_to_tcycle(o, sb_oracle_tcycles(o) + 60ull * 70224ull);
+    GBNeutralSubHashes sub;
+    uint64_t top = sb_oracle_neutral_hash(o, &sub);
+    fprintf(stderr,
+            "[SBORACLE] +60 frames: tcycle=%" PRIu64 " pc=%04X neutral=%016llX cpu=%016llX wram=%016llX\n",
+            sb_oracle_tcycles(o), sb_oracle_pc(o),
+            (unsigned long long)top, (unsigned long long)sub.cpu, (unsigned long long)sub.wram);
+    sb_oracle_destroy(o);
+}
+
+bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
+                          const uint8_t* boot_rom, size_t boot_rom_size,
+                          const GBCosimOptions* options, GBCosimResult* result) {
+    GBCosimOptions opt = { .checkpoint_stride = 456, .max_checkpoints = 0, .log_interval = 0 };
+    if (options) { opt = *options; if (opt.checkpoint_stride == 0) opt.checkpoint_stride = 456; }
+    if (result) { memset(result, 0, sizeof(*result)); result->mismatch_subsystem = -1; }
+
+    int is_cgb = (recomp_lle_ctx->config.model == GB_MODEL_CGB);
+    SBOracle* o = sb_oracle_create(is_cgb ? SB_MODEL_CGB : SB_MODEL_DMG,
+                                   boot_rom, boot_rom_size,
+                                   recomp_lle_ctx->rom, recomp_lle_ctx->rom_size);
+    if (!o) {
+        fprintf(stderr, "[SBORACLE] sb_oracle_create failed\n");
+        if (result) snprintf(result->message, sizeof(result->message), "oracle create failed");
+        return false;
+    }
+
+    bool saved_log = gbrt_interp_fallback_logging;
+    gbrt_interp_fallback_logging = false;
+
+    /* Boot both through the real BIOS; report each side's handoff (the DIV/
+     * timing arbitration). */
+    uint32_t r_handoff = gb_recomp_run_to_handoff(recomp_lle_ctx, 60000000ull);
+    while (!sb_oracle_boot_done(o) && sb_oracle_tcycles(o) < 60000000ull) {
+        sb_oracle_run_to_tcycle(o, sb_oracle_tcycles(o) + 1024);
+    }
+    uint64_t o_handoff = sb_oracle_tcycles(o);
+    fprintf(stderr,
+            "[SBORACLE] boot handoff: recomp tcycle=%u DIV=%02X | SameBoy tcycle=%" PRIu64 " DIV=%02X%s\n",
+            r_handoff, (uint8_t)(recomp_lle_ctx->div_counter >> 8),
+            o_handoff, sb_oracle_read(o, 0xFF04),
+            (r_handoff == o_handoff) ? "" : "  <-- boot-timing divergence");
+
+    /* Forward lockstep on RELATIVE post-handoff cycles (absorbs any boot-timing
+     * offset): compare the neutral architectural hash at each stride. */
+    uint64_t checkpoint = 0;
+    bool matched = true;
+    uint32_t next_rel = opt.checkpoint_stride;
+    while (opt.max_checkpoints == 0 || checkpoint < opt.max_checkpoints) {
+        /* advance recomp by stride (interpreter) */
+        uint32_t target_r = r_handoff + next_rel;
+        while (recomp_lle_ctx->cycles < target_r) {
+            gb_debug_step(recomp_lle_ctx, GB_EXECUTION_INTERPRETER);
+        }
+        sb_oracle_run_to_tcycle(o, o_handoff + next_rel);
+
+        GBNeutralSubHashes rs, os;
+        uint64_t rh = gb_cosim_neutral_hash(recomp_lle_ctx, &rs);
+        uint64_t oh = sb_oracle_neutral_hash(o, &os);
+        if (rh != oh) {
+            int sub = -1;
+            for (int i = 0; i < GB_NEUTRAL_SUBHASH_COUNT; i++) {
+                if (gb_neutral_subhash_by_index(&rs, i) != gb_neutral_subhash_by_index(&os, i)) { sub = i; break; }
+            }
+            fprintf(stderr,
+                    "[SBORACLE] FIRST DIVERGENCE at rel-cycle %u (recomp cyc=%u, SameBoy cyc=%" PRIu64
+                    ") subsystem=%s\n[SBORACLE]  recomp pc=%04X DIV=%02X LY=%02X | SameBoy pc=%04X DIV=%02X LY=%02X\n",
+                    next_rel, recomp_lle_ctx->cycles, sb_oracle_tcycles(o),
+                    sub >= 0 ? gb_neutral_subhash_name(sub) : "?",
+                    recomp_lle_ctx->pc, (uint8_t)(recomp_lle_ctx->div_counter >> 8),
+                    ((GBPPU*)recomp_lle_ctx->ppu)->ly,
+                    sb_oracle_pc(o), sb_oracle_read(o, 0xFF04), sb_oracle_read(o, 0xFF44));
+            if (result) {
+                result->matched = false;
+                result->mismatch_checkpoint = checkpoint;
+                result->mismatch_cycles = recomp_lle_ctx->cycles;
+                result->mismatch_subsystem = sub;
+                snprintf(result->message, sizeof(result->message),
+                         "neutral divergence in %s at rel-cycle %u",
+                         sub >= 0 ? gb_neutral_subhash_name(sub) : "?", next_rel);
+            }
+            matched = false;
+            break;
+        }
+        checkpoint++;
+        next_rel += opt.checkpoint_stride;
+        if (opt.log_interval && (checkpoint % opt.log_interval) == 0) {
+            fprintf(stderr, "[SBORACLE] matched %" PRIu64 " checkpoints (rel-cycle %u)\n",
+                    checkpoint, next_rel);
+        }
+    }
+
+    if (matched) {
+        fprintf(stderr, "[SBORACLE] MATCHED %" PRIu64 " checkpoints vs SameBoy\n", checkpoint);
+        if (result) { result->matched = true; result->checkpoints_completed = checkpoint;
+                      snprintf(result->message, sizeof(result->message), "matched vs SameBoy"); }
+    }
+    gbrt_interp_fallback_logging = saved_log;
+    sb_oracle_destroy(o);
+    return matched;
+}
+#endif /* GBC_HAVE_SAMEBOY */

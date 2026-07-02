@@ -55,6 +55,11 @@ uint64_t gb_cosim_state_hash(const GBContext* ctx, CosimSubHashes* sub);
 uint64_t gb_cosim_subhash_by_index(const CosimSubHashes* sub, int index);
 const char* gb_cosim_subhash_name(int index);
 
+/* Implementation-neutral architectural-state hash (recomp side) for the
+ * cross-oracle co-sim vs SameBoy. See cosim_neutral.h. */
+#include "cosim_neutral.h"
+uint64_t gb_cosim_neutral_hash(const GBContext* ctx, GBNeutralSubHashes* sub);
+
 /* APU sub-hash — implemented in audio.c because GBAudio is opaque outside it.
  * Hashes ONLY guest-architectural APU fields (channels, NR50/51/52, frame
  * sequencer); excludes host sample timers, the DC-blocker, and last output. */

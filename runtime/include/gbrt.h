@@ -834,6 +834,24 @@ bool gb_run_boot_gate(GBContext* lle_ctx,
                       uint64_t cycle_cap,
                       GBCosimResult* result);
 
+/* ---- Cross-oracle co-sim vs embedded SameBoy (only defined when the runtime
+ * is built with -DGBC_COSIM_SAMEBOY; see COSIM_ORACLE.md). ---- */
+
+/* Boot SameBoy on the same BIOS+ROM in-process and report its boot-handoff
+ * T-cycle / PC / DIV / LY, then a neutral-state hash after a few frames. Proves
+ * the embedded oracle runs and yields the reference boot timing (arbitrates the
+ * LLE-vs-HLE DIV question). */
+void gb_sameboy_selfcheck(const uint8_t* boot_rom, size_t boot_rom_size,
+                          const uint8_t* rom, size_t rom_size, int is_cgb);
+
+/* Cycle-0 lockstep of an LLE-booted recomp context against SameBoy on the same
+ * BIOS+ROM, comparing the implementation-neutral architectural hash. Reports the
+ * boot-handoff timing of each side and the first neutral-state divergence.
+ * `recomp_lle_ctx` must be LLE-reset (boot ROM loaded, skip_bootrom=false). */
+bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
+                          const uint8_t* boot_rom, size_t boot_rom_size,
+                          const GBCosimOptions* options, GBCosimResult* result);
+
 /**
  * @brief Record a generated-dispatch fallback into the interpreter
  */

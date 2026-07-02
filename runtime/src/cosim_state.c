@@ -244,6 +244,60 @@ uint64_t gb_cosim_subhash_by_index(const CosimSubHashes* sub, int index) {
     }
 }
 
+/* ---- Implementation-neutral architectural hash (recomp side) ----
+ * Serializes only architecturally-defined state, in the exact order the SameBoy
+ * extractor (sameboy_oracle.c) uses, so the two are directly comparable. */
+uint64_t gb_cosim_neutral_hash(const GBContext* ctx, GBNeutralSubHashes* sub) {
+    GBNeutralSubHashes s;
+    /* CGB hardware has 32KB WRAM / 16KB VRAM (even in DMG-compat mode); DMG/SGB
+     * have 8KB / 8KB. Match the size SameBoy's GB_get_direct_access reports. */
+    int cgb_hw = (ctx->config.model == GB_MODEL_CGB);
+    uint32_t wram_sz = cgb_hw ? 0x8000u : 0x2000u;
+    uint32_t vram_sz = cgb_hw ? 0x4000u : 0x2000u;
+
+    uint8_t f_packed = (uint8_t)((ctx->f_z ? 0x80 : 0) | (ctx->f_n ? 0x40 : 0) |
+                                 (ctx->f_h ? 0x20 : 0) | (ctx->f_c ? 0x10 : 0));
+    s.cpu = gb_neutral_cpu_hash(ctx->a, f_packed, ctx->b, ctx->c, ctx->d, ctx->e,
+                                ctx->h, ctx->l, ctx->sp, ctx->pc, ctx->ime);
+    s.wram = gb_neutral_fnv_bytes(GB_NEUTRAL_FNV_OFFSET, ctx->wram, wram_sz);
+    s.vram = gb_neutral_fnv_bytes(GB_NEUTRAL_FNV_OFFSET, ctx->vram, vram_sz);
+    s.oam  = gb_neutral_fnv_bytes(GB_NEUTRAL_FNV_OFFSET, ctx->oam, COSIM_OAM_SIZE);
+    s.hram = gb_neutral_fnv_bytes(GB_NEUTRAL_FNV_OFFSET, ctx->hram, COSIM_HRAM_SIZE);
+    s.cart_ram = (ctx->eram && ctx->eram_size)
+                 ? gb_neutral_fnv_bytes(GB_NEUTRAL_FNV_OFFSET, ctx->eram, (uint32_t)ctx->eram_size)
+                 : GB_NEUTRAL_FNV_OFFSET;
+
+    if (sub) *sub = s;
+    uint64_t top = GB_NEUTRAL_FNV_OFFSET;
+    for (int i = 0; i < GB_NEUTRAL_SUBHASH_COUNT; i++)
+        top = fnv_u64(top, gb_neutral_subhash_by_index(&s, i));
+    return top;
+}
+
+uint64_t gb_neutral_subhash_by_index(const GBNeutralSubHashes* sub, int index) {
+    switch (index) {
+        case 0: return sub->cpu;
+        case 1: return sub->wram;
+        case 2: return sub->vram;
+        case 3: return sub->oam;
+        case 4: return sub->hram;
+        case 5: return sub->cart_ram;
+        default: return 0;
+    }
+}
+
+const char* gb_neutral_subhash_name(int index) {
+    switch (index) {
+        case 0: return "cpu";
+        case 1: return "wram";
+        case 2: return "vram";
+        case 3: return "oam";
+        case 4: return "hram";
+        case 5: return "cart_ram";
+        default: return "?";
+    }
+}
+
 const char* gb_cosim_subhash_name(int index) {
     switch (index) {
         case 0:  return "cpu";

@@ -1955,7 +1955,15 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
         }
         if (addr >= 0xFF40 && addr <= 0xFF4B) {
             gb_sync(ctx);
-            return ppu_read_register((GBPPU*)ctx->ppu, addr);
+            GBPPU* p = (GBPPU*)ctx->ppu;
+            /* Read-before-increment race (Gekkio "read wins"): a read whose read
+             * M-cycle (last 4 T) coincides with the LY edge samples the pre-edge
+             * value on hardware. PPU-scoped, so the timer is untouched. This is
+             * what the SameBoy oracle pins at the boot LY==0x90 wait loop. */
+            if (addr == 0xFF44 && p->ly_change_cycle + 4 > ctx->cycles) {
+                return p->ly_prev;
+            }
+            return ppu_read_register(p, addr);
         }
         if (addr >= 0xFF68 && addr <= 0xFF6B) {
             if (!gb_is_cgb_hardware(ctx)) return 0xFF; /* CGB palette regs unmapped on DMG */

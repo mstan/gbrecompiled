@@ -322,6 +322,8 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
     ppu->scy = 0x00;
     ppu->scx = 0x00;
     ppu->ly = lle_boot ? 0 : 145;
+    ppu->ly_prev = ppu->ly;        /* read-before-increment race: no edge yet */
+    ppu->ly_change_cycle = 0;
     ppu->lyc = 0x00;
     ppu->dma = (ctx && ctx->config.model == GB_MODEL_CGB) ? 0x00 : 0xFF;
     ppu->bgp = 0xFC;
@@ -911,6 +913,8 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 }
                 ppu->mode_cycles -= hblank_len;
                 ppu->lcd_on_first_line = false;   /* first line consumed */
+                ppu->ly_prev = ppu->ly;           /* read-before-increment race */
+                ppu->ly_change_cycle = ctx->cycles - ppu->mode_cycles;
                 ppu->ly++;
 
                 if (ppu->ly >= VISIBLE_SCANLINES) {
@@ -936,6 +940,8 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                     return;
                 }
                 ppu->mode_cycles -= CYCLES_SCANLINE;
+                ppu->ly_prev = ppu->ly;           /* read-before-increment race */
+                ppu->ly_change_cycle = ctx->cycles - ppu->mode_cycles;
                 ppu->ly++;
 
                 if (ppu->ly >= TOTAL_SCANLINES) {

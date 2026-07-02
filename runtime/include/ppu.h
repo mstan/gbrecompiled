@@ -131,6 +131,18 @@ typedef struct GBPPU {
     uint8_t obpi;       /* 0xFF6A - OBJ palette index */
     uint8_t opri;       /* Internal object priority mode */
 
+    /* Read-before-increment race (Gekkio "read wins"): a CPU read of a cycle-
+     * derived PPU register (LY) that lands within its read M-cycle (last 4 T)
+     * of the register's edge samples the PRE-edge value on hardware. The true
+     * value stays in ly (+ ctx->io[0x44]) for internal state and hashing; we
+     * remember the pre-edge value and the absolute cycle of the edge so
+     * gb_read8 can serve the raced value without perturbing the timer. The
+     * edge cycle is ctx->cycles - mode_cycles (mode_cycles is the unconsumed
+     * remainder of the current gb_sync, in the same CPU-cycle units as
+     * ctx->cycles). See gbrt.c gb_read8 (0xFF44). */
+    uint8_t  ly_prev;          /* LY value just before its most recent edge */
+    uint32_t ly_change_cycle;  /* absolute ctx->cycles of that LY edge */
+
     /* Registers latched at the start of mode 3 for the active scanline */
     uint8_t latched_lcdc;
     uint8_t latched_scy;

@@ -1,6 +1,7 @@
 #include "gbrt.h"
 #include "audio.h"
 #include "ppu.h"
+#include "cosim_state.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -367,11 +368,26 @@ static bool gb_diff_compare_ppu(const GBContext* generated_ctx,
     DIFF_PPU_FIELD(bgpi, "%u");
     DIFF_PPU_FIELD(obpi, "%u");
     DIFF_PPU_FIELD(opri, "%u");
+    DIFF_PPU_FIELD(latched_lcdc, "%u");
+    DIFF_PPU_FIELD(latched_scy, "%u");
+    DIFF_PPU_FIELD(latched_scx, "%u");
+    DIFF_PPU_FIELD(latched_bgp, "%u");
+    DIFF_PPU_FIELD(latched_obp0, "%u");
+    DIFF_PPU_FIELD(latched_obp1, "%u");
+    DIFF_PPU_FIELD(latched_wy, "%u");
+    DIFF_PPU_FIELD(latched_wx, "%u");
     DIFF_PPU_FIELD(stat_irq_state, "%u");
     DIFF_PPU_FIELD(mode, "%u");
     DIFF_PPU_FIELD(mode_cycles, "%u");
     DIFF_PPU_FIELD(window_line, "%u");
     DIFF_PPU_FIELD(window_triggered, "%u");
+    DIFF_PPU_FIELD(scanline_draw_cycles, "%u");
+    DIFF_PPU_FIELD(scanline_hblank_cycles, "%u");
+    DIFF_PPU_FIELD(scanline_sprite_count, "%u");
+    DIFF_PPU_FIELD(render_x, "%d");
+    DIFF_PPU_FIELD(win_rendered_line, "%u");
+    DIFF_PPU_FIELD(scanline_sprite_list_count, "%d");
+    DIFF_PPU_FIELD(sprite_list_built, "%u");
     DIFF_PPU_FIELD(frame_ready, "%u");
 
 #undef DIFF_PPU_FIELD
@@ -476,6 +492,14 @@ static bool gb_diff_compare_contexts(const GBContext* generated,
     DIFF_FIELD(last_sync_cycles, "%u");
     DIFF_FIELD(frame_done, "%u");
     DIFF_FIELD(div_counter, "%u");
+    DIFF_FIELD(tima_reload_pending, "%u");
+    DIFF_FIELD(serial_cycles_remaining, "%d");
+    DIFF_FIELD(serial_transfer.active, "%u");
+    DIFF_FIELD(serial_transfer.fast_clock, "%u");
+    DIFF_FIELD(serial_transfer.cycles_remaining, "%u");
+    DIFF_FIELD(serial_transfer.deferred, "%u");
+    DIFF_FIELD(serial_transfer.slave_armed, "%u");
+    DIFF_FIELD(serial_transfer.slave_outgoing, "%u");
     DIFF_FIELD(last_joypad, "%u");
     DIFF_FIELD(dma.active, "%u");
     DIFF_FIELD(dma.source_high, "%u");
@@ -520,19 +544,16 @@ static bool gb_diff_compare_contexts(const GBContext* generated,
             return false;
         }
     } else {
-        int16_t generated_left = 0;
-        int16_t generated_right = 0;
-        int16_t interpreted_left = 0;
-        int16_t interpreted_right = 0;
-
-        gb_audio_get_samples(generated->apu, &generated_left, &generated_right);
-        gb_audio_get_samples(interpreted->apu, &interpreted_left, &interpreted_right);
-
-        if (generated_left != interpreted_left || generated_right != interpreted_right) {
+        /* Compare full guest-architectural APU state (channels, envelope, LFSR,
+         * wave RAM, frame sequencer) via the co-sim hash — NOT just the mixed
+         * output sample, which was the pre-co-sim blind spot. */
+        uint64_t generated_apu = gb_audio_cosim_hash(generated->apu);
+        uint64_t interpreted_apu = gb_audio_cosim_hash(interpreted->apu);
+        if (generated_apu != interpreted_apu) {
             snprintf(message, message_size,
-                     "audio sample mismatch: (%d,%d) != (%d,%d)",
-                     generated_left, generated_right,
-                     interpreted_left, interpreted_right);
+                     "APU internal state mismatch: %016llX != %016llX",
+                     (unsigned long long)generated_apu,
+                     (unsigned long long)interpreted_apu);
             return false;
         }
     }
@@ -822,4 +843,311 @@ bool gb_run_differential(GBContext* generated_ctx,
     gbrt_instruction_count = saved_instruction_count;
     gbrt_instruction_limit = saved_instruction_limit;
     return true;
+}
+
+/* ============================================================================
+ * Differential co-simulation — first-divergence decision procedure.
+ * See COSIM_ORACLE.md. Steps two backends in lockstep, checkpoints the full
+ * per-subsystem state hash on the shared T-cycle clock, halts at the first
+ * split, and drills with the exact byte/field compare to NAME the field.
+ * ========================================================================== */
+
+#define GB_COSIM_RING_CAP 64
+
+typedef struct {
+    uint64_t index;      /* checkpoint index */
+    uint32_t cycles;     /* ctx->cycles at the checkpoint (shared ruler) */
+    uint64_t hash_a;     /* full-state hash of A */
+    uint64_t hash_b;     /* full-state hash of B */
+    uint16_t pc_a;       /* leader PC (report only) */
+    uint16_t pc_b;
+    uint16_t bank_a;
+    bool split;          /* A and B hashes differed here */
+} GBCosimRingEntry;
+
+static const char* gb_cosim_mode_name(GBExecutionMode m) {
+    return (m == GB_EXECUTION_GENERATED) ? "generated" : "interpreter";
+}
+
+static void gb_cosim_apply_inject(GBContext* ctx, GBCosimInjectTarget target) {
+    switch (target) {
+        case GB_COSIM_INJECT_WRAM:
+            if (ctx->wram) ctx->wram[0x123] ^= 0xFF;
+            break;
+        case GB_COSIM_INJECT_PPU: {
+            GBPPU* p = (GBPPU*)ctx->ppu;
+            if (p) p->mode_cycles += 1;
+            break;
+        }
+        case GB_COSIM_INJECT_APU:
+            gb_audio_cosim_inject(ctx->apu);
+            break;
+        case GB_COSIM_INJECT_CPU:
+            ctx->b ^= 0x01;
+            break;
+        case GB_COSIM_INJECT_TIMER:
+            ctx->div_counter += 1;
+            break;
+        case GB_COSIM_INJECT_NONE:
+        default:
+            break;
+    }
+}
+
+static void gb_cosim_dump_window(FILE* stream,
+                                 const GBCosimRingEntry* ring,
+                                 size_t ring_count,
+                                 size_t ring_head) {
+    size_t n = ring_count < GB_COSIM_RING_CAP ? ring_count : GB_COSIM_RING_CAP;
+    fprintf(stream, "[COSIM] window (last %zu checkpoints):\n", n);
+    for (size_t k = 0; k < n; k++) {
+        /* oldest..newest */
+        size_t slot = (ring_head + GB_COSIM_RING_CAP - n + k) % GB_COSIM_RING_CAP;
+        const GBCosimRingEntry* e = &ring[slot];
+        fprintf(stream,
+                "[COSIM]   cp=%-8" PRIu64 " cyc=%-10u A=%016llX B=%016llX pcA=%03X:%04X%s\n",
+                e->index, e->cycles,
+                (unsigned long long)e->hash_a, (unsigned long long)e->hash_b,
+                e->bank_a, e->pc_a, e->split ? "  <-- SPLIT" : "");
+    }
+}
+
+bool gb_run_cosim(GBContext* ctx_a,
+                  GBContext* ctx_b,
+                  const GBCosimOptions* options,
+                  GBCosimResult* result) {
+    GBCosimOptions opt = {
+        .mode_a = GB_EXECUTION_GENERATED,
+        .mode_b = GB_EXECUTION_INTERPRETER,
+        .checkpoint_stride = 456,
+        .max_frames = 0,
+        .max_checkpoints = 0,
+        .audit_interval = 0,
+        .log_interval = 0,
+        .inject_target = GB_COSIM_INJECT_NONE,
+        .inject_at_checkpoint = 0,
+        .input_script = NULL,
+    };
+    if (options != NULL) {
+        opt = *options;
+        if (opt.checkpoint_stride == 0) opt.checkpoint_stride = 456;
+    }
+
+    if (result != NULL) {
+        memset(result, 0, sizeof(*result));
+        result->mismatch_subsystem = -1;
+    }
+
+    GBDiffInputScript input_script;
+    char setup_message[256] = {0};
+    if (!gb_diff_parse_input_script(opt.input_script, &input_script,
+                                    setup_message, sizeof(setup_message))) {
+        if (result != NULL) snprintf(result->message, sizeof(result->message), "%s", setup_message);
+        fprintf(stderr, "[COSIM] %s\n", setup_message);
+        return false;
+    }
+    bool scripted = (opt.input_script != NULL && *opt.input_script != '\0');
+
+    uint64_t saved_instruction_count = gbrt_instruction_count;
+    uint64_t saved_instruction_limit = gbrt_instruction_limit;
+    void* saved_a_joypad = ctx_a->joypad;
+    void* saved_b_joypad = ctx_b->joypad;
+    gbrt_instruction_count = 0;
+    gbrt_instruction_limit = 0;
+
+    GBJoypadState joypad_a = {.dpad = 0xFF, .buttons = 0xFF};
+    GBJoypadState joypad_b = {.dpad = 0xFF, .buttons = 0xFF};
+    if (scripted) {
+        ctx_a->joypad = &joypad_a;
+        ctx_b->joypad = &joypad_b;
+        gb_diff_apply_input_state(&input_script, ctx_a, &joypad_a);
+        gb_diff_apply_input_state(&input_script, ctx_b, &joypad_b);
+    }
+
+    static GBCosimRingEntry ring[GB_COSIM_RING_CAP];
+    size_t ring_head = 0;   /* next write slot */
+    size_t ring_count = 0;
+
+    uint64_t checkpoint_index = 0;
+    uint64_t frames_completed = 0;
+    uint32_t next_cp_cycles = opt.checkpoint_stride;
+    uint64_t chain_hash = 1469598103934665603ULL; /* FNV offset — regression pin over A */
+    bool matched = true;
+
+    fprintf(stderr,
+            "[COSIM] start pair=(%s vs %s) stride=%u audit=%" PRIu64 " inject=%d@%" PRIu64 "\n",
+            gb_cosim_mode_name(opt.mode_a), gb_cosim_mode_name(opt.mode_b),
+            opt.checkpoint_stride, opt.audit_interval,
+            (int)opt.inject_target, opt.inject_at_checkpoint);
+
+    for (;;) {
+        if (scripted) {
+            gb_diff_apply_input_state(&input_script, ctx_a, &joypad_a);
+            gb_diff_apply_input_state(&input_script, ctx_b, &joypad_b);
+        }
+
+        gb_debug_step(ctx_a, opt.mode_a);
+        gb_debug_step(ctx_b, opt.mode_b);
+
+        /* Frame accounting mirrors gb_run_differential. */
+        if (ctx_a->frame_done && ctx_b->frame_done) {
+            frames_completed++;
+            gb_reset_frame(ctx_a);
+            gb_reset_frame(ctx_b);
+            if (scripted) {
+                input_script.frame_index++;
+                gb_diff_apply_input_state(&input_script, ctx_a, &joypad_a);
+                gb_diff_apply_input_state(&input_script, ctx_b, &joypad_b);
+            }
+            if (opt.max_frames > 0 && frames_completed >= opt.max_frames) {
+                break;
+            }
+        }
+
+        /* Checkpoint on the shared T-cycle clock. Both backends hold equal
+         * ctx->cycles per step until the true divergence, so they cross the
+         * stride boundary at the same step. */
+        if (ctx_a->cycles < next_cp_cycles) {
+            continue;
+        }
+        next_cp_cycles += opt.checkpoint_stride;
+
+        /* Gate 3: perturb A at the requested checkpoint so the tool MUST halt. */
+        if (opt.inject_target != GB_COSIM_INJECT_NONE &&
+            checkpoint_index == opt.inject_at_checkpoint) {
+            gb_cosim_apply_inject(ctx_a, opt.inject_target);
+            fprintf(stderr, "[COSIM] injected fault target=%d at checkpoint %" PRIu64 "\n",
+                    (int)opt.inject_target, checkpoint_index);
+        }
+
+        CosimSubHashes sub_a, sub_b;
+        uint64_t hash_a = gb_cosim_state_hash(ctx_a, &sub_a);
+        uint64_t hash_b = gb_cosim_state_hash(ctx_b, &sub_b);
+        bool split = (hash_a != hash_b);
+
+        /* Push ring entry (bounded reporting). */
+        ring[ring_head] = (GBCosimRingEntry){
+            .index = checkpoint_index,
+            .cycles = ctx_a->cycles,
+            .hash_a = hash_a,
+            .hash_b = hash_b,
+            .pc_a = ctx_a->pc,
+            .pc_b = ctx_b->pc,
+            .bank_a = gb_diff_current_bank(ctx_a),
+            .split = split,
+        };
+        ring_head = (ring_head + 1) % GB_COSIM_RING_CAP;
+        if (ring_count < GB_COSIM_RING_CAP) ring_count++;
+
+        /* Chain hash over A's trajectory — the regression baseline pin. */
+        for (int b = 0; b < 8; b++)
+            chain_hash = (chain_hash ^ ((hash_a >> (8 * b)) & 0xFF)) * 1099511628211ULL;
+
+        if (split) {
+            /* Localize: first differing subsystem. */
+            int subsystem = -1;
+            for (int i = 0; i < GB_COSIM_SUBHASH_COUNT; i++) {
+                if (gb_cosim_subhash_by_index(&sub_a, i) !=
+                    gb_cosim_subhash_by_index(&sub_b, i)) {
+                    subsystem = i;
+                    break;
+                }
+            }
+
+            /* Drill: exact byte/field compare NAMES the divergent field. */
+            char message[256] = {0};
+            if (gb_diff_compare_contexts(ctx_a, ctx_b, true, message, sizeof(message))) {
+                /* Hash split but exact-compare clean => the hash covers a field
+                 * the exact-compare does not. Report the subsystem; not a tool
+                 * lie, but a surface-coverage gap to close in the exact path. */
+                snprintf(message, sizeof(message),
+                         "hash split in subsystem '%s' not localized by exact compare",
+                         subsystem >= 0 ? gb_cosim_subhash_name(subsystem) : "?");
+            }
+
+            fprintf(stderr,
+                    "[COSIM] FIRST DIVERGENCE at checkpoint %" PRIu64
+                    " cyc=%u subsystem=%s\n[COSIM] %s\n",
+                    checkpoint_index, ctx_a->cycles,
+                    subsystem >= 0 ? gb_cosim_subhash_name(subsystem) : "?",
+                    message);
+            gb_cosim_dump_window(stderr, ring, ring_count, ring_head);
+            gb_diff_print_state(stderr, "A", ctx_a);
+            gb_diff_print_state(stderr, "B", ctx_b);
+
+            if (result != NULL) {
+                result->matched = false;
+                result->checkpoints_completed = checkpoint_index;
+                result->frames_completed = frames_completed;
+                result->mismatch_checkpoint = checkpoint_index;
+                result->mismatch_cycles = ctx_a->cycles;
+                result->mismatch_subsystem = subsystem;
+                result->chain_hash = chain_hash;
+                result->pc_a = ctx_a->pc;
+                result->pc_b = ctx_b->pc;
+                snprintf(result->message, sizeof(result->message), "%s", message);
+            }
+            matched = false;
+            break;
+        }
+
+        /* Gate 4: hash-vs-byte audit — force a full compare even when hashes
+         * matched, proving the hash maintenance is faithful to the bytes. */
+        if (opt.audit_interval > 0 && (checkpoint_index % opt.audit_interval) == 0) {
+            char audit_msg[256] = {0};
+            if (!gb_diff_compare_contexts(ctx_a, ctx_b, true, audit_msg, sizeof(audit_msg))) {
+                fprintf(stderr,
+                        "[COSIM] AUDIT FAILURE at checkpoint %" PRIu64
+                        ": hashes matched but bytes differ (%s) — TOOL BUG\n",
+                        checkpoint_index, audit_msg);
+                if (result != NULL) {
+                    result->matched = false;
+                    result->mismatch_checkpoint = checkpoint_index;
+                    result->mismatch_cycles = ctx_a->cycles;
+                    result->chain_hash = chain_hash;
+                    snprintf(result->message, sizeof(result->message),
+                             "audit failure (hash/byte disagree): %s", audit_msg);
+                }
+                matched = false;
+                break;
+            }
+        }
+
+        if (opt.log_interval > 0 && (checkpoint_index % opt.log_interval) == 0) {
+            fprintf(stderr,
+                    "[COSIM] cp=%" PRIu64 " cyc=%u frames=%" PRIu64
+                    " chain=%016llX A@%03X:%04X\n",
+                    checkpoint_index, ctx_a->cycles, frames_completed,
+                    (unsigned long long)chain_hash,
+                    gb_diff_current_bank(ctx_a), ctx_a->pc);
+        }
+
+        checkpoint_index++;
+        if (opt.max_checkpoints > 0 && checkpoint_index >= opt.max_checkpoints) {
+            break;
+        }
+    }
+
+    if (matched) {
+        fprintf(stderr,
+                "[COSIM] MATCHED %" PRIu64 " checkpoints / %" PRIu64
+                " frames; chain=%016llX\n",
+                checkpoint_index, frames_completed, (unsigned long long)chain_hash);
+        if (result != NULL) {
+            result->matched = true;
+            result->checkpoints_completed = checkpoint_index;
+            result->frames_completed = frames_completed;
+            result->mismatch_checkpoint = 0;
+            result->chain_hash = chain_hash;
+            result->pc_a = ctx_a->pc;
+            result->pc_b = ctx_b->pc;
+            snprintf(result->message, sizeof(result->message), "matched");
+        }
+    }
+
+    ctx_a->joypad = saved_a_joypad;
+    ctx_b->joypad = saved_b_joypad;
+    gbrt_instruction_count = saved_instruction_count;
+    gbrt_instruction_limit = saved_instruction_limit;
+    return matched;
 }

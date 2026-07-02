@@ -741,6 +741,7 @@ static std::string make_android_jni_src_cmake(const fs::path& output_dir,
     ss << "add_library(gbrt STATIC\n";
     ss << "    ${GBRT_DIR}/src/gbrt.c\n";
     ss << "    ${GBRT_DIR}/src/differential.c\n";
+    ss << "    ${GBRT_DIR}/src/cosim_state.c\n";
     ss << "    ${GBRT_DIR}/src/ppu.c\n";
     ss << "    ${GBRT_DIR}/src/audio.c\n";
     ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
@@ -1306,6 +1307,7 @@ static std::string make_multi_rom_cmake(const std::string& project_name,
     ss << "add_library(gbrt STATIC\n";
     ss << "    ${GBRT_DIR}/src/gbrt.c\n";
     ss << "    ${GBRT_DIR}/src/differential.c\n";
+    ss << "    ${GBRT_DIR}/src/cosim_state.c\n";
     ss << "    ${GBRT_DIR}/src/ppu.c\n";
     ss << "    ${GBRT_DIR}/src/audio.c\n";
     ss << "    ${GBRT_DIR}/src/audio_stats.c\n";

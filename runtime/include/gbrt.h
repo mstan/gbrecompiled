@@ -746,6 +746,60 @@ bool gb_run_differential(GBContext* generated_ctx,
                          const GBDifferentialOptions* options,
                          GBDifferentialResult* result);
 
+/* ============================================================================
+ * Differential co-simulation (first-divergence decision procedure)
+ * See COSIM_ORACLE.md. Full-state canonical hash + per-subsystem sub-hashes,
+ * checkpointed on the shared guest T-cycle clock, halting at the first split.
+ * ========================================================================== */
+
+/* Gate-3 fault-injection target: after checkpoint `inject_at_checkpoint`, one
+ * field in context A is perturbed so the tool MUST halt at ~that checkpoint and
+ * name the owning subsystem. Proves the tool is not silently blind. */
+typedef enum {
+    GB_COSIM_INJECT_NONE = 0,
+    GB_COSIM_INJECT_WRAM = 1,  /* flip one WRAM byte */
+    GB_COSIM_INJECT_PPU  = 2,  /* bump PPU mode_cycles */
+    GB_COSIM_INJECT_APU  = 3,  /* flip ch4 LFSR bit */
+    GB_COSIM_INJECT_CPU  = 4,  /* flip a bit in register B */
+    GB_COSIM_INJECT_TIMER = 5, /* bump div_counter */
+} GBCosimInjectTarget;
+
+typedef struct {
+    GBExecutionMode mode_a;   /**< backend for context A (default GENERATED) */
+    GBExecutionMode mode_b;   /**< backend for context B (default INTERPRETER) */
+    uint32_t checkpoint_stride; /**< T-cycles between full-state checkpoints (0 => 456, one scanline) */
+    uint64_t max_frames;      /**< stop after this many completed frames (0 => use max_checkpoints) */
+    uint64_t max_checkpoints; /**< stop after this many checkpoints (0 => unbounded) */
+    uint64_t audit_interval;  /**< Gate 4: force a full byte/field compare every N checkpoints (0 => off) */
+    uint64_t log_interval;    /**< progress log cadence in checkpoints (0 => off) */
+    GBCosimInjectTarget inject_target; /**< Gate 3 fault-injection target (default NONE) */
+    uint64_t inject_at_checkpoint;     /**< checkpoint index at which to inject */
+    const char* input_script; /**< optional scripted input (same format as differential) */
+} GBCosimOptions;
+
+typedef struct {
+    bool matched;             /**< true if both backends stayed hash-identical the whole run */
+    uint64_t checkpoints_completed;
+    uint64_t frames_completed;
+    uint64_t mismatch_checkpoint; /**< checkpoint index of the first split (0 if matched) */
+    uint32_t mismatch_cycles;     /**< ctx->cycles at the first split */
+    int mismatch_subsystem;       /**< sub-hash index of the first split, or -1 */
+    uint64_t chain_hash;          /**< cumulative chain hash at the end (regression pin) */
+    uint16_t pc_a;                /**< PC of context A at the split (report only) */
+    uint16_t pc_b;                /**< PC of context B at the split (report only) */
+    char message[256];            /**< short description (named field from the exact-compare drill) */
+} GBCosimResult;
+
+/**
+ * @brief Run the full-state co-simulation decision procedure in lockstep.
+ * Both contexts must be freshly initialized with identical ROM/config. Returns
+ * true iff the two backends' full-state hash matched at every checkpoint.
+ */
+bool gb_run_cosim(GBContext* ctx_a,
+                  GBContext* ctx_b,
+                  const GBCosimOptions* options,
+                  GBCosimResult* result);
+
 /**
  * @brief Record a generated-dispatch fallback into the interpreter
  */

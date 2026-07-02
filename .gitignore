@@ -46,6 +46,9 @@ compile_commands.json
 *.dSYM/
 
 tetris_test/
+mmx2_test/
+# generated per-target recomp projects (build artifacts)
+*_test/
 *.log
 *.asm
 output/*

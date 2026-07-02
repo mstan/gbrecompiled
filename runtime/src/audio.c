@@ -542,6 +542,96 @@ bool gb_audio_load_state(void* apu, const void* data, size_t size) {
     return true;
 }
 
+/* ---- Co-simulation state hash (see cosim_state.h / COSIM_ORACLE.md) ----
+ * Hashes ONLY guest-architectural APU state. EXCLUDES host-only fields that the
+ * plain gb_audio_save_state blob would include: sample_timer/sample_period/
+ * sample_timer_fixed (host output-rate bookkeeping), hp_prev_* (host DC-blocker),
+ * last_output_* (host mixer output). Those count how the host samples audio, not
+ * guest-architectural state, and would cause a false recomp-vs-oracle split. */
+#define APU_FNV64_OFFSET 1469598103934665603ULL
+#define APU_FNV64_PRIME  1099511628211ULL
+static inline uint64_t apu_fnv_u8(uint64_t h, uint8_t v) {
+    return (h ^ (uint64_t)v) * APU_FNV64_PRIME;
+}
+static inline uint64_t apu_fnv_u32(uint64_t h, uint32_t v) {
+    for (int i = 0; i < 4; i++) h = apu_fnv_u8(h, (uint8_t)((v >> (8 * i)) & 0xFF));
+    return h;
+}
+static inline uint64_t apu_fnv_u16(uint64_t h, uint16_t v) {
+    h = apu_fnv_u8(h, (uint8_t)(v & 0xFF));
+    return apu_fnv_u8(h, (uint8_t)((v >> 8) & 0xFF));
+}
+static inline uint64_t apu_fnv_i32(uint64_t h, int v) { return apu_fnv_u32(h, (uint32_t)v); }
+static inline uint64_t apu_fnv_bool(uint64_t h, bool v) { return apu_fnv_u8(h, v ? 1u : 0u); }
+
+uint64_t gb_audio_cosim_hash(const void* audio) {
+    const GBAudio* a = (const GBAudio*)audio;
+    uint64_t h = APU_FNV64_OFFSET;
+    if (!a) return h;
+
+    /* Channel 1 */
+    h = apu_fnv_u8(h, a->ch1.nr10); h = apu_fnv_u8(h, a->ch1.nr11);
+    h = apu_fnv_u8(h, a->ch1.nr12); h = apu_fnv_u8(h, a->ch1.nr13);
+    h = apu_fnv_u8(h, a->ch1.nr14);
+    h = apu_fnv_u16(h, a->ch1.freq);
+    h = apu_fnv_i32(h, a->ch1.length_counter);
+    h = apu_fnv_bool(h, a->ch1.length_enabled);
+    h = apu_fnv_i32(h, a->ch1.volume);
+    h = apu_fnv_i32(h, a->ch1.env_timer);
+    h = apu_fnv_bool(h, a->ch1.enabled);
+    h = apu_fnv_i32(h, a->ch1.sweep_timer);
+    h = apu_fnv_u16(h, a->ch1.shadow_freq);
+    h = apu_fnv_bool(h, a->ch1.sweep_enabled);
+    h = apu_fnv_u32(h, a->ch1.timer);
+    h = apu_fnv_i32(h, a->ch1.wave_pos);
+
+    /* Channel 2 */
+    h = apu_fnv_u8(h, a->ch2.nr21); h = apu_fnv_u8(h, a->ch2.nr22);
+    h = apu_fnv_u8(h, a->ch2.nr23); h = apu_fnv_u8(h, a->ch2.nr24);
+    h = apu_fnv_u16(h, a->ch2.freq);
+    h = apu_fnv_i32(h, a->ch2.length_counter);
+    h = apu_fnv_bool(h, a->ch2.length_enabled);
+    h = apu_fnv_i32(h, a->ch2.volume);
+    h = apu_fnv_i32(h, a->ch2.env_timer);
+    h = apu_fnv_bool(h, a->ch2.enabled);
+    h = apu_fnv_u32(h, a->ch2.timer);
+    h = apu_fnv_i32(h, a->ch2.wave_pos);
+
+    /* Channel 3 */
+    h = apu_fnv_u8(h, a->ch3.nr30); h = apu_fnv_u8(h, a->ch3.nr31);
+    h = apu_fnv_u8(h, a->ch3.nr32); h = apu_fnv_u8(h, a->ch3.nr33);
+    h = apu_fnv_u8(h, a->ch3.nr34);
+    for (int i = 0; i < 16; i++) h = apu_fnv_u8(h, a->ch3.wave_ram[i]);
+    h = apu_fnv_u16(h, a->ch3.freq);
+    h = apu_fnv_i32(h, a->ch3.length_counter);
+    h = apu_fnv_bool(h, a->ch3.length_enabled);
+    h = apu_fnv_bool(h, a->ch3.enabled);
+    h = apu_fnv_i32(h, a->ch3.wave_pos);
+    h = apu_fnv_u32(h, a->ch3.timer);
+
+    /* Channel 4 */
+    h = apu_fnv_u8(h, a->ch4.nr41); h = apu_fnv_u8(h, a->ch4.nr42);
+    h = apu_fnv_u8(h, a->ch4.nr43); h = apu_fnv_u8(h, a->ch4.nr44);
+    h = apu_fnv_i32(h, a->ch4.length_counter);
+    h = apu_fnv_bool(h, a->ch4.length_enabled);
+    h = apu_fnv_i32(h, a->ch4.volume);
+    h = apu_fnv_i32(h, a->ch4.env_timer);
+    h = apu_fnv_u16(h, a->ch4.lfsr);
+    h = apu_fnv_bool(h, a->ch4.enabled);
+    h = apu_fnv_u32(h, a->ch4.accum);
+
+    /* Global control + frame sequencer (DIV-APU) */
+    h = apu_fnv_u8(h, a->nr50); h = apu_fnv_u8(h, a->nr51); h = apu_fnv_u8(h, a->nr52);
+    h = apu_fnv_u32(h, a->fs_timer);
+    h = apu_fnv_i32(h, a->fs_step);
+    return h;
+}
+
+void gb_audio_cosim_inject(void* audio) {
+    GBAudio* a = (GBAudio*)audio;
+    if (a) a->ch4.lfsr ^= 0x0001u;
+}
+
 uint8_t gb_audio_read(GBContext* ctx, uint16_t addr) {
     GBAudio* apu = (GBAudio*)ctx->apu;
     if (!apu) return 0xFF;

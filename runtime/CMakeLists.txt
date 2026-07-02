@@ -4,6 +4,7 @@
 add_library(gbrt STATIC
     src/gbrt.c
     src/differential.c
+    src/cosim_state.c
     src/interpreter.c
     src/ppu.c
     src/audio.c

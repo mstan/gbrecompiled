@@ -97,6 +97,19 @@ bool gb_audio_save_state(const void* apu, void* out_data, size_t size);
 bool gb_audio_load_state(void* apu, const void* data, size_t size);
 
 /**
+ * @brief Co-simulation state hash of guest-architectural APU state only.
+ * Excludes host sample timers, the DC-blocker, and last mixer output.
+ * See cosim_state.h / COSIM_ORACLE.md.
+ */
+uint64_t gb_audio_cosim_hash(const void* apu);
+
+/**
+ * @brief Gate-3 fault injection: perturb one guest-architectural APU field
+ * (flips channel-4 LFSR bit 0) so the co-sim halts and names the APU subsystem.
+ */
+void gb_audio_cosim_inject(void* apu);
+
+/**
  * @brief Enable/disable audio debug capture
  * @param enabled If true, capture audio to debug_audio.raw
  */

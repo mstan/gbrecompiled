@@ -103,6 +103,53 @@ move past 61348), then re-run the 8 pairing-1 gates (HLE chain must stay
 tests — [[project_cpu_subinstruction_timing]]) + the LLE-vs-HLE boot gate. Apply
 to BOTH the interpreter and `c_emitter.cpp` (production runs generated code).
 
+## Option-B prototype results (2026-07-02) — mechanism validated, plus a key architectural find
+
+Prototyped the T-cycle read split in the interpreter only (`GB_ACC_READ` ops:
+`gb_tick(cycles - N)`, read, `gb_tick(N)`), tuned `N` against the oracle:
+
+- **`N=1`**: NO change (divergence still 61348). The LY boundary lands ≤1 T-cycle
+  before the instruction end AND is not instruction-aligned, so a read at +11 of a
+  12-cycle op still catches it. → a *fixed* `N` is inherently fragile.
+- **`N=4`** (read at the last M-cycle's START): **divergence jumped 61348 →
+  2,266,273** — out of the shared BIOS entirely and into cart (Tetris) code. The
+  new split is `recomp pc=01FD vs SameBoy pc=0040` — **0x0040 is the VBlank vector**,
+  i.e. an interrupt-*dispatch* timing split, a different class. So the read-split
+  MECHANISM clearly works and is the right direction.
+
+**But two things the prototype revealed that change the plan:**
+1. **Must apply to BOTH backends together.** With only the interpreter changed, the
+   pairing-1 **A-vs-B** gate splits (`last_sync_cycles 98960 != 98956`, Δ=N) —
+   generated code still ticks-before-all. Correctness aside, the two backends must
+   move in lockstep. So B is a two-file change (interpreter + `c_emitter.cpp`),
+   landed atomically.
+2. **`gb_tick` does NOT sync the PPU (lazy sync).** The PPU only advances inside
+   `gb_read8`/`gb_write8`→`gb_sync`. So `gb_tick(N)` after the read advances
+   `ctx->cycles` (and DIV/TIMA) but leaves the PPU synced only to `start+cycles-N`
+   — the PPU is **N cycles behind at the instruction boundary**. That is the
+   `last_sync_cycles` mismatch, and it means a VBlank in an instruction's last N
+   cycles sets `IF` late → **this is almost certainly the 2,266,273 VBlank split**.
+   The baseline `tick-before-all` load avoids this because its read syncs to the
+   full `start+cycles`.
+
+**Consequence:** the *complete* correct fix is **B + a boundary sync** — after the
+split read, catch the PPU up to the full instruction cycle so interrupt checks at
+the boundary see current PPU/IF state. `gb_sync` is `static` in `gbrt.c`, so this
+needs a small public `gb_hw_sync(GBContext*)` (or equivalent) exposed and called by
+both backends. That boundary-sync is really the Option-C "sync-before-observe"
+insight arriving through the B prototype: precise interrupt timing needs the PPU
+synced before every interrupt-recognition point, not just at memory accesses (the
+baseline lazy-sync already approximates this for register-only instruction runs).
+
+**Revised recommendation:** implement B (read split, `N=4` = last-M-cycle-start,
+per-op-length aware if needed) in BOTH `interpreter.c` and `c_emitter.cpp`, PLUS a
+public boundary PPU sync, landed together; then re-check the oracle (expect the
+2,266,273 VBlank split to move or change class), the 8 gates (A-vs-B must
+re-converge), blargg `mem_timing`, and the boot gate. Treat the VBlank/interrupt
+timing as the next distinct axis once reads are clean. This is a bigger, more
+architectural change than a targeted PPU patch — it touches the shared tick/sync
+model used by every instruction in both backends.
+
 ## Out of scope / watch-outs
 
 - Do NOT tune the first-line-after-enable value to mask this (different bug).

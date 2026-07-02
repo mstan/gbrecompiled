@@ -43,11 +43,33 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
     return (ssize_t)pos;
 }
 
+#define SB_FIFO_CAP 8192
+typedef struct { uint16_t pc; uint8_t div; uint8_t ly; } SBTraceEntry;
+
 struct SBOracle {
-    GB_gameboy_t gb;
+    GB_gameboy_t gb;              /* MUST be first: the execution callback recovers
+                                   * the SBOracle by casting the gb pointer. */
     uint64_t ticks_8mhz;          /* accumulated GB_run() return (8 MHz units) */
+    uint64_t icount;              /* instructions executed (execution-callback count) */
+    SBTraceEntry fifo[SB_FIFO_CAP];
+    uint32_t fifo_head, fifo_tail;
+    uint8_t  fifo_overflow;
     uint32_t pixels[160 * 144];   /* headless pixel sink */
 };
+
+/* Per-instruction execution callback: push the fetch PC (+ DIV/LY sampled at the
+ * instruction boundary) into the FIFO. gb is the first member of SBOracle. */
+static void sb_exec_cb(GB_gameboy_t *gb, uint16_t address, uint8_t opcode) {
+    (void)opcode;
+    SBOracle *o = (SBOracle *)gb;
+    o->icount++;
+    uint32_t next = (o->fifo_tail + 1u) % SB_FIFO_CAP;
+    if (next == o->fifo_head) { o->fifo_overflow = 1; return; }
+    o->fifo[o->fifo_tail].pc  = address;
+    o->fifo[o->fifo_tail].div = GB_read_memory(gb, 0xFF04);
+    o->fifo[o->fifo_tail].ly  = GB_read_memory(gb, 0xFF44);
+    o->fifo_tail = next;
+}
 
 static void sb_vblank_cb(GB_gameboy_t *gb, GB_vblank_type_t type) {
     (void)gb; (void)type;   /* headless: no-op */
@@ -112,6 +134,31 @@ uint8_t sb_oracle_read(SBOracle* o, uint16_t addr) {
 
 bool sb_oracle_boot_done(const SBOracle* o) {
     return o->gb.boot_rom_finished;
+}
+
+void sb_oracle_enable_execution_trace(SBOracle* o) {
+    o->fifo_head = o->fifo_tail = 0;
+    o->fifo_overflow = 0;
+    GB_set_execution_callback(&o->gb, sb_exec_cb);
+}
+
+uint64_t sb_oracle_instruction_count(const SBOracle* o) {
+    return o->icount;
+}
+
+bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly) {
+    int guard = 0;
+    while (o->fifo_head == o->fifo_tail) {
+        if (o->fifo_overflow) return false;
+        o->ticks_8mhz += GB_run(&o->gb);   /* callback pushes entries */
+        if (++guard > 2000000) return false;
+    }
+    SBTraceEntry e = o->fifo[o->fifo_head];
+    o->fifo_head = (o->fifo_head + 1u) % SB_FIFO_CAP;
+    if (pc)  *pc  = e.pc;
+    if (div) *div = e.div;
+    if (ly)  *ly  = e.ly;
+    return true;
 }
 
 uint64_t sb_oracle_neutral_hash(SBOracle* o, GBNeutralSubHashes* sub) {

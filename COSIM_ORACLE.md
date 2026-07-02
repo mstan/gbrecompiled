@@ -376,14 +376,25 @@ HLE post-boot state was RIGHT.** (2) Boot durations differ by only **~88,492 cyc
 not a gross bug; the accumulated per-M-cycle timing imprecision (the known sub-instruction-timing
 gap, `project_cpu_subinstruction_timing`). The oracle is now the standing arbiter for that.
 
-**Known limitation (lockstep alignment):** `gb_run_sameboy_cosim` currently aligns forward on
-relative post-handoff cycles. Because the boot timing drifts ~0.4% AND each side's "handoff"
-lands at a different PC (recomp 0x0100 at the 0xFF50 write; SameBoy 0x0150 after boot_rom_finished),
-cycle-alignment is confounded — the first-divergence report is a near-miss (pc 0x0294 vs 0x0293),
-not exact. Clean first-divergence localization needs **instruction-retirement / PC-landmark
-alignment** (compare state after equal instruction counts, not equal cycles) — the timing drift
-makes pure cycle-lockstep ill-posed. That refinement is the next Phase-B step; the oracle +
-neutral extractors are the durable asset and already delivered the arbitration above.
+**Lockstep = INSTRUCTION-COUNT aligned (fixed 2026-07-01).** Cycle-alignment is ill-posed here
+(the very drift we hunt means the two are never at the same cycle+state), so `gb_run_sameboy_cosim`
+now aligns on the **PC stream**: both execute the same instruction sequence from power-on; at
+equal instruction counts they share PC+state until a timing-driven branch (a read of a cycle-
+derived value like LY) goes differently. Implemented via SameBoy's `GB_set_execution_callback`
+(fires per instruction) feeding a PC/DIV/LY FIFO (`sb_oracle_next_instruction`) that decouples
+SameBoy's chunky `GB_run` from recomp's per-instruction stepping; HALT idle-ticks are skipped on
+the recomp side to stay aligned. The first PC-stream mismatch is the first instruction where the
+drift changes control flow.
+
+**FIRST DIVERGENCE (Tetris/DMG, cycle-0 lockstep): instruction 30129 — recomp pc=006A vs
+SameBoy pc=0064**, at fetch recomp LY=0x90 vs SameBoy LY=0x1E (DIV=0x47 on both). 0x0064 is the
+BIOS frame-wait loop (`LD A,($FF44); CP $90; JR NZ`): recomp's LY already reached 0x90 and it
+exited; SameBoy's is only 0x1E and still looping. Same DIV but different LY ⇒ the boot-timing
+drift is **PPU scanline timing** (recomp's PPU runs ahead of SameBoy relative to the instruction
+stream), NOT CPU cycle-charging — consistent with the known LCD-on/LY soft spot. This is the
+oracle naming the first drifting instruction; the next step is to trace/fix the PPU LY-vs-cycle
+timing in `ppu.c` against this coordinate. (Note: DIV high-byte alone doesn't pin the exact cycle
+— capturing SameBoy's per-instruction cycle in the FIFO would sharpen the report further.)
 
 ### Phase B design notes + de-risk (2026-07-01)
 

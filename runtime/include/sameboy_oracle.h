@@ -47,6 +47,20 @@ bool     sb_oracle_boot_done(const SBOracle* o);     /* BIOS handed off? */
  * order as gb_cosim_neutral_hash on the recomp side). Returns the folded top hash. */
 uint64_t sb_oracle_neutral_hash(SBOracle* o, GBNeutralSubHashes* sub);
 
+/* ---- Instruction-stream stepping (for instruction-count-aligned lockstep) ----
+ * Arm SameBoy's per-instruction execution callback so every executed instruction
+ * pushes its fetch PC into an internal FIFO. Call once after create. */
+void sb_oracle_enable_execution_trace(SBOracle* o);
+
+/* Return the fetch PC of the NEXT instruction SameBoy executes, advancing it by
+ * exactly one instruction (running GB_run under the hood to refill the FIFO).
+ * `*div`/`*ly` (may be NULL) get DIV/LY sampled at that instruction boundary.
+ * Returns false only if it cannot make progress (safety cap). */
+bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly);
+
+/* Instructions executed so far (execution-callback count). */
+uint64_t sb_oracle_instruction_count(const SBOracle* o);
+
 #ifdef __cplusplus
 }
 #endif

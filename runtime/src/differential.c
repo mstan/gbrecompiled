@@ -1279,16 +1279,6 @@ bool gb_run_boot_gate(GBContext* lle_ctx,
 #include "sameboy_oracle.h"
 #include "cosim_neutral.h"
 
-/* Advance an LLE recomp context (interpreter — the BIOS is not compiled, and the
- * interpreter exercises the shared device/timing models the oracle judges) to
- * the BIOS handoff (boot_rom_active clears). Returns the handoff T-cycle. */
-static uint32_t gb_recomp_run_to_handoff(GBContext* ctx, uint64_t cap) {
-    while (ctx->boot_rom_active && ctx->cycles < cap) {
-        gb_debug_step(ctx, GB_EXECUTION_INTERPRETER);
-    }
-    return ctx->cycles;
-}
-
 void gb_sameboy_selfcheck(const uint8_t* boot_rom, size_t boot_rom_size,
                           const uint8_t* rom, size_t rom_size, int is_cgb) {
     SBOracle* o = sb_oracle_create(is_cgb ? SB_MODEL_CGB : SB_MODEL_DMG,
@@ -1334,77 +1324,84 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
     }
 
     bool saved_log = gbrt_interp_fallback_logging;
+    uint64_t saved_icount = gbrt_instruction_count, saved_ilimit = gbrt_instruction_limit;
     gbrt_interp_fallback_logging = false;
+    gbrt_instruction_count = 0;
+    gbrt_instruction_limit = 0;
 
-    /* Boot both through the real BIOS; report each side's handoff (the DIV/
-     * timing arbitration). */
-    uint32_t r_handoff = gb_recomp_run_to_handoff(recomp_lle_ctx, 60000000ull);
-    while (!sb_oracle_boot_done(o) && sb_oracle_tcycles(o) < 60000000ull) {
-        sb_oracle_run_to_tcycle(o, sb_oracle_tcycles(o) + 1024);
-    }
-    uint64_t o_handoff = sb_oracle_tcycles(o);
-    fprintf(stderr,
-            "[SBORACLE] boot handoff: recomp tcycle=%u DIV=%02X | SameBoy tcycle=%" PRIu64 " DIV=%02X%s\n",
-            r_handoff, (uint8_t)(recomp_lle_ctx->div_counter >> 8),
-            o_handoff, sb_oracle_read(o, 0xFF04),
-            (r_handoff == o_handoff) ? "" : "  <-- boot-timing divergence");
+    /* INSTRUCTION-COUNT-ALIGNED lockstep from power-on. Both execute the same
+     * instruction sequence (same BIOS+cart); at equal instruction counts they
+     * are at the same PC with the same architectural state UNTIL a timing-driven
+     * branch (a read of a cycle-derived value like LY/DIV/STAT) goes differently
+     * because of the accumulated per-M-cycle timing drift. That first PC-stream
+     * mismatch is the first place the drift changes control flow — exactly the
+     * instruction to investigate. This is robust to the drift itself (we align
+     * on instructions, not cycles). */
+    sb_oracle_enable_execution_trace(o);
 
-    /* Forward lockstep on RELATIVE post-handoff cycles (absorbs any boot-timing
-     * offset): compare the neutral architectural hash at each stride. */
-    uint64_t checkpoint = 0;
-    bool matched = true;
-    uint32_t next_rel = opt.checkpoint_stride;
-    while (opt.max_checkpoints == 0 || checkpoint < opt.max_checkpoints) {
-        /* advance recomp by stride (interpreter) */
-        uint32_t target_r = r_handoff + next_rel;
-        while (recomp_lle_ctx->cycles < target_r) {
-            gb_debug_step(recomp_lle_ctx, GB_EXECUTION_INTERPRETER);
+    /* max_checkpoints (if set) caps instructions; else a generous default. */
+    uint64_t max_instr = opt.max_checkpoints ? opt.max_checkpoints : 40000000ull;
+    uint64_t icount = 0;
+    bool matched = true, error = false;
+    GBPPU* rppu = (GBPPU*)recomp_lle_ctx->ppu;
+
+    while (icount < max_instr) {
+        /* Recomp: one interpreter instruction. Sample DIV/LY at the fetch
+         * boundary (matching SameBoy's callback capture point). */
+        uint16_t r_pc = recomp_lle_ctx->pc;
+        uint8_t r_div = (uint8_t)(recomp_lle_ctx->div_counter >> 8);
+        uint8_t r_ly = rppu ? rppu->ly : 0;
+        uint8_t was_halted = recomp_lle_ctx->halted;
+        gb_debug_step(recomp_lle_ctx, GB_EXECUTION_INTERPRETER);
+        /* Skip HALT/STOP idle ticks (no instruction fetched — SameBoy's callback
+         * doesn't fire on those either, so the streams stay aligned). */
+        if (was_halted && recomp_lle_ctx->halted && recomp_lle_ctx->pc == r_pc) continue;
+
+        uint16_t o_pc; uint8_t o_div, o_ly;
+        if (!sb_oracle_next_instruction(o, &o_pc, &o_div, &o_ly)) {
+            fprintf(stderr, "[SBORACLE] oracle stream stalled at instruction %" PRIu64 "\n", icount);
+            error = true; break;
         }
-        sb_oracle_run_to_tcycle(o, o_handoff + next_rel);
+        icount++;
 
-        GBNeutralSubHashes rs, os;
-        uint64_t rh = gb_cosim_neutral_hash(recomp_lle_ctx, &rs);
-        uint64_t oh = sb_oracle_neutral_hash(o, &os);
-        if (rh != oh) {
-            int sub = -1;
-            for (int i = 0; i < GB_NEUTRAL_SUBHASH_COUNT; i++) {
-                if (gb_neutral_subhash_by_index(&rs, i) != gb_neutral_subhash_by_index(&os, i)) { sub = i; break; }
-            }
+        if (r_pc != o_pc) {
             fprintf(stderr,
-                    "[SBORACLE] FIRST DIVERGENCE at rel-cycle %u (recomp cyc=%u, SameBoy cyc=%" PRIu64
-                    ") subsystem=%s\n[SBORACLE]  recomp pc=%04X DIV=%02X LY=%02X | SameBoy pc=%04X DIV=%02X LY=%02X\n",
-                    next_rel, recomp_lle_ctx->cycles, sb_oracle_tcycles(o),
-                    sub >= 0 ? gb_neutral_subhash_name(sub) : "?",
-                    recomp_lle_ctx->pc, (uint8_t)(recomp_lle_ctx->div_counter >> 8),
-                    ((GBPPU*)recomp_lle_ctx->ppu)->ly,
-                    sb_oracle_pc(o), sb_oracle_read(o, 0xFF04), sb_oracle_read(o, 0xFF44));
+                    "[SBORACLE] FIRST DIVERGENCE at instruction %" PRIu64
+                    ": recomp pc=%04X vs SameBoy pc=%04X\n"
+                    "[SBORACLE]   at fetch: recomp DIV=%02X LY=%02X (cyc=%u) | SameBoy DIV=%02X LY=%02X\n"
+                    "[SBORACLE]   => control flow first split here (timing-driven branch). "
+                    "recomp boot%s done.\n",
+                    icount, r_pc, o_pc, r_div, r_ly, recomp_lle_ctx->cycles, o_div, o_ly,
+                    recomp_lle_ctx->boot_rom_active ? " NOT" : "");
             if (result) {
                 result->matched = false;
-                result->mismatch_checkpoint = checkpoint;
+                result->mismatch_checkpoint = icount;
                 result->mismatch_cycles = recomp_lle_ctx->cycles;
-                result->mismatch_subsystem = sub;
+                result->pc_a = r_pc; result->pc_b = o_pc;
                 snprintf(result->message, sizeof(result->message),
-                         "neutral divergence in %s at rel-cycle %u",
-                         sub >= 0 ? gb_neutral_subhash_name(sub) : "?", next_rel);
+                         "PC-stream split at instr %" PRIu64 ": %04X vs %04X (recomp LY=%02X SB LY=%02X)",
+                         icount, r_pc, o_pc, r_ly, o_ly);
             }
             matched = false;
             break;
         }
-        checkpoint++;
-        next_rel += opt.checkpoint_stride;
-        if (opt.log_interval && (checkpoint % opt.log_interval) == 0) {
-            fprintf(stderr, "[SBORACLE] matched %" PRIu64 " checkpoints (rel-cycle %u)\n",
-                    checkpoint, next_rel);
+
+        if (opt.log_interval && (icount % opt.log_interval) == 0) {
+            fprintf(stderr, "[SBORACLE] matched %" PRIu64 " instructions (pc=%04X boot%s done)\n",
+                    icount, r_pc, recomp_lle_ctx->boot_rom_active ? " NOT" : "");
         }
     }
 
-    if (matched) {
-        fprintf(stderr, "[SBORACLE] MATCHED %" PRIu64 " checkpoints vs SameBoy\n", checkpoint);
-        if (result) { result->matched = true; result->checkpoints_completed = checkpoint;
-                      snprintf(result->message, sizeof(result->message), "matched vs SameBoy"); }
+    if (matched && !error) {
+        fprintf(stderr, "[SBORACLE] MATCHED %" PRIu64 " instructions vs SameBoy (PC stream)\n", icount);
+        if (result) { result->matched = true; result->checkpoints_completed = icount;
+                      snprintf(result->message, sizeof(result->message),
+                               "matched %" PRIu64 " instructions vs SameBoy", icount); }
     }
     gbrt_interp_fallback_logging = saved_log;
+    gbrt_instruction_count = saved_icount;
+    gbrt_instruction_limit = saved_ilimit;
     sb_oracle_destroy(o);
-    return matched;
+    return matched && !error;
 }
 #endif /* GBC_HAVE_SAMEBOY */

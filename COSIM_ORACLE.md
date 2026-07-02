@@ -396,6 +396,15 @@ oracle naming the first drifting instruction; the next step is to trace/fix the 
 timing in `ppu.c` against this coordinate. (Note: DIV high-byte alone doesn't pin the exact cycle
 — capturing SameBoy's per-instruction cycle in the FIFO would sharpen the report further.)
 
+**CGB CONFIRMATION (MMX2, cgb_boot.bin, 2026-07-01).** The oracle works on CGB: SameBoy boots
+MMX2 via the CGB BIOS (handoff tcycle=13,049,532 pc=0x0101 DIV=0x1E), and the instruction-aligned
+lockstep pins **instruction 76751 — recomp pc=021B vs SameBoy pc=0217, recomp LY=0x90 vs SameBoy
+LY=0x10 (DIV=0xB6 on both), still inside the CGB BIOS.** SAME signature as Tetris (same DIV,
+recomp LY ahead, in a BIOS wait loop) so the PPU LY-vs-cycle drift is **systematic across DMG and
+CGB**, not game/model-specific. The instruction-aligned lockstep is also robust to CGB
+double-speed (it aligns on instructions, not the 8MHz->T-cycle mapping). Rebuild a target with the
+oracle: `-DGBC_COSIM_SAMEBOY=ON -DSAMEBOY_DIR=...`, then `--cosim-oracle --boot-rom <dmg|cgb>_boot.bin`.
+
 ### Phase B design notes + de-risk (2026-07-01)
 
 **Build de-risk COMPLETE + POSITIVE.** All 21 SameBoy `Core/*.c` compile and archive into

@@ -340,6 +340,7 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
     ppu->mode_cycles = lle_boot ? 0 : 4;
     ppu->window_line = 0;
     ppu->window_triggered = false;
+    ppu->lcd_on_first_line = false;
     ppu->frame_ready = false;
 
     if (cgb_mode) {
@@ -827,11 +828,14 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
 
     for (;;) {
         switch (ppu->mode) {
-            case PPU_MODE_OAM:
-                if (ppu->mode_cycles < CYCLES_OAM_SCAN) {
+            case PPU_MODE_OAM: {
+                /* First line 0 after LCD-enable: mode 2 is 2 dots shorter (SameBoy
+                 * display.c:1679-1684 — MODE2_LENGTH-4 then +2). */
+                uint32_t oam_len = (uint32_t)CYCLES_OAM_SCAN - (ppu->lcd_on_first_line ? 2u : 0u);
+                if (ppu->mode_cycles < oam_len) {
                     return;
                 }
-                ppu->mode_cycles -= CYCLES_OAM_SCAN;
+                ppu->mode_cycles -= oam_len;
                 /* Latch scroll registers for this scanline */
                 ppu->latched_scx = ppu->scx;
                 ppu->latched_scy = ppu->scy;
@@ -863,6 +867,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 update_stat(ppu, ctx);
                 check_stat_interrupt(ppu, ctx, "oam->draw");
                 break;
+            }
 
             case PPU_MODE_DRAW: {
                 /* Incrementally render the BG/window as mode-3 cycles elapse, sampling
@@ -891,11 +896,21 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 break;
             }
 
-            case PPU_MODE_HBLANK:
-                if (ppu->mode_cycles < CYCLES_HBLANK) {
+            case PPU_MODE_HBLANK: {
+                /* First line 0 after LCD-enable: mode 0 is 8 dots shorter (SameBoy
+                 * display.c:1690). DMG adds a one-time +1 dot at enable (state 23,
+                 * DMG-only) which we fold in here as -7 instead of -8, so the whole
+                 * first line is 447 dots (DMG) / 446 (CGB) vs the normal 456. */
+                uint32_t hblank_len = (uint32_t)CYCLES_HBLANK;
+                if (ppu->lcd_on_first_line) {
+                    bool cgb_hw = ctx && ctx->config.model == GB_MODEL_CGB;
+                    hblank_len -= cgb_hw ? 8u : 7u;
+                }
+                if (ppu->mode_cycles < hblank_len) {
                     return;
                 }
-                ppu->mode_cycles -= CYCLES_HBLANK;
+                ppu->mode_cycles -= hblank_len;
+                ppu->lcd_on_first_line = false;   /* first line consumed */
                 ppu->ly++;
 
                 if (ppu->ly >= VISIBLE_SCANLINES) {
@@ -914,6 +929,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 update_stat(ppu, ctx);
                 check_stat_interrupt(ppu, ctx, "hblank->next");
                 break;
+            }
 
             case PPU_MODE_VBLANK:
                 if (ppu->mode_cycles < CYCLES_SCANLINE) {
@@ -987,6 +1003,7 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
                 ppu->ly = 0;
                 ppu->window_line = 0;
                 ppu->window_triggered = false;
+                ppu->lcd_on_first_line = false;
                 ppu->mode = PPU_MODE_HBLANK;
                 ppu->mode_cycles = 0;
                 ppu->frame_ready = false;
@@ -996,6 +1013,7 @@ void ppu_write_register(GBPPU* ppu, GBContext* ctx, uint16_t addr, uint8_t value
                 ppu->ly = 0;
                 ppu->window_line = 0;
                 ppu->window_triggered = false;
+                ppu->lcd_on_first_line = true;   /* line 0 after enable is shorter */
                 ppu->mode = PPU_MODE_OAM;
                 ppu->mode_cycles = 0;
                 ppu->frame_ready = false;

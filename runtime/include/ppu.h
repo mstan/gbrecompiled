@@ -147,6 +147,9 @@ typedef struct GBPPU {
     uint32_t mode_cycles;     /* Cycles in current mode */
     uint8_t window_line;      /* Current window internal line counter */
     bool window_triggered;    /* Window was triggered this frame */
+    bool lcd_on_first_line;   /* Line 0 immediately after LCD-enable: shorter mode 2
+                               * and mode 0 per hardware (SameBoy display.c:1664-1714).
+                               * Consumed at that line's HBLANK end. */
 
     /* Per-scanline timing (computed during OAM scan) */
     uint32_t scanline_draw_cycles;   /* Variable mode 3 duration */

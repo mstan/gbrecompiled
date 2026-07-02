@@ -454,10 +454,26 @@ delta (the old "+16" is really **+4** with fetch-aligned sampling). Findings, un
   the instruction-aligned lockstep stops at the first split (54755), so most of that +140k accrues in
   the UNOBSERVED post-split boot — a lighter continue-past-split or a per-LY-tick cycle log is needed to
   attribute it fully.
-- **Next (PPU timing refinement, touches the validated timing model):** log the exact cycle of each LY
-  increment on both sides (or read SameBoy `display.c`'s LCD-enable + per-line mode-3 timing) to pin the
-  sub-84-cycle offset, then refine `ppu.c` mode timing (first-frame-after-enable and/or variable mode-3)
-  against the MEASURED offset — do NOT guess the shortfall.
+- **FIRST-LINE-AFTER-ENABLE FIX (2026-07-02) — the seed, resolved.** Per-LY-tick tracing localized the
+  offset to the FIRST line 0 after LCD-enable: recomp ran a flat 456 while hardware (SameBoy
+  `display.c:1664-1714`) runs a SHORTER first line — mode 2 = `MODE2_LENGTH-4 (+2)` = 78 (−2), mode 0
+  "8 dots shorter" (line 1690, −8), and DMG a one-time `+1` (state 23, DMG-only). Net first line = 456
+  −2 −8 +1 = **447 (DMG)** / 446 (CGB), i.e. recomp's first line was **~9 dots too long**, seeding a
+  constant lag that only surfaced (via the LY-driven `wait for LY==144` loop) as the split. Implemented
+  in `ppu.c`: on the first line after enable, OAM −2 and HBLANK −7 (DMG) / −8 (CGB) (folding the DMG +1
+  into HBLANK), gated by a new `lcd_on_first_line` flag set at the 0→1 LCDC transition and consumed at
+  that line's HBLANK end. **Result:** per-LY-tick offset is now **+0 on every line** (observable
+  granularity); the frame-phase LY error is GONE; divergence moved **54755 → 61348**; all 8 pairing-1
+  gates pass with the HLE chain byte-identical (`1CB1...`), and the boot gate is still 0-diff.
+- **REMAINING DIVERGENCE (instr 61348) — a DIFFERENT, deeper root cause: per-M-cycle memory-read timing.**
+  At the new split both sides tick LY 8F→90 at the SAME cycle (`613020/613020`), but the `LDH A,($44)`
+  that reads LY does its memory access in its 3rd M-cycle (~+8-10 of a 12-cycle instr). SameBoy reads
+  mid-instruction and still sees 0x8F; recomp reads at the instruction boundary (coarse `gb_sync`), a few
+  cycles later, and catches the just-ticked 0x90 — so recomp exits the loop one iteration early (dcyc=−4).
+  This is the known `mem_timing` gap ([[project_cpu_subinstruction_timing]]): the recomp lacks per-M-cycle
+  memory-access timing. It is NOT a wrong first-line value — do NOT tune the first line to mask it.
+  Fixing it means reading cycle-derived I/O (FF44/FF04/STAT) at the correct sub-instruction M-cycle, a
+  larger architectural change (per-M-cycle memory timing) tracked separately from this PPU fix.
 
 ### Phase B design notes + de-risk (2026-07-01)
 

@@ -1357,8 +1357,8 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
          * doesn't fire on those either, so the streams stay aligned). */
         if (was_halted && recomp_lle_ctx->halted && recomp_lle_ctx->pc == r_pc) continue;
 
-        uint16_t o_pc; uint8_t o_div, o_ly;
-        if (!sb_oracle_next_instruction(o, &o_pc, &o_div, &o_ly)) {
+        uint16_t o_pc; uint8_t o_div, o_ly; uint32_t o_cyc = 0;
+        if (!sb_oracle_next_instruction(o, &o_pc, &o_div, &o_ly, &o_cyc)) {
             fprintf(stderr, "[SBORACLE] oracle stream stalled at instruction %" PRIu64 "\n", icount);
             error = true; break;
         }
@@ -1368,10 +1368,11 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
             fprintf(stderr,
                     "[SBORACLE] FIRST DIVERGENCE at instruction %" PRIu64
                     ": recomp pc=%04X vs SameBoy pc=%04X\n"
-                    "[SBORACLE]   at fetch: recomp DIV=%02X LY=%02X (cyc=%u) | SameBoy DIV=%02X LY=%02X\n"
+                    "[SBORACLE]   at fetch: recomp DIV=%02X LY=%02X cyc=%u | SameBoy DIV=%02X LY=%02X cyc=%u | dcyc=%ld\n"
                     "[SBORACLE]   => control flow first split here (timing-driven branch). "
                     "recomp boot%s done.\n",
-                    icount, r_pc, o_pc, r_div, r_ly, recomp_lle_ctx->cycles, o_div, o_ly,
+                    icount, r_pc, o_pc, r_div, r_ly, recomp_lle_ctx->cycles, o_div, o_ly, o_cyc,
+                    (long)recomp_lle_ctx->cycles - (long)o_cyc,
                     recomp_lle_ctx->boot_rom_active ? " NOT" : "");
             if (result) {
                 result->matched = false;

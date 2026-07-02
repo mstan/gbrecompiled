@@ -44,7 +44,7 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
 }
 
 #define SB_FIFO_CAP 8192
-typedef struct { uint16_t pc; uint8_t div; uint8_t ly; } SBTraceEntry;
+typedef struct { uint16_t pc; uint8_t div; uint8_t ly; uint32_t cyc; } SBTraceEntry;
 
 struct SBOracle {
     GB_gameboy_t gb;              /* MUST be first: the execution callback recovers
@@ -68,6 +68,7 @@ static void sb_exec_cb(GB_gameboy_t *gb, uint16_t address, uint8_t opcode) {
     o->fifo[o->fifo_tail].pc  = address;
     o->fifo[o->fifo_tail].div = GB_read_memory(gb, 0xFF04);
     o->fifo[o->fifo_tail].ly  = GB_read_memory(gb, 0xFF44);
+    o->fifo[o->fifo_tail].cyc = (uint32_t)(gb->absolute_debugger_ticks / 2);
     o->fifo_tail = next;
 }
 
@@ -146,7 +147,7 @@ uint64_t sb_oracle_instruction_count(const SBOracle* o) {
     return o->icount;
 }
 
-bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly) {
+bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly, uint32_t* cyc) {
     int guard = 0;
     while (o->fifo_head == o->fifo_tail) {
         if (o->fifo_overflow) return false;
@@ -158,6 +159,7 @@ bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t
     if (pc)  *pc  = e.pc;
     if (div) *div = e.div;
     if (ly)  *ly  = e.ly;
+    if (cyc) *cyc = e.cyc;
     return true;
 }
 

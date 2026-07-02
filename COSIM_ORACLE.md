@@ -311,14 +311,14 @@ Phase A (in-process pairing 1):  ✅ COMPLETE — all four gates pass on Tetris 
 - [~] Gate 5 fixture sweep — STARTED (2026-07-01). Each fixture must be recompiled (nature of a
       static recompiler). Demonstrated on `instr_timing` (Blargg): pairing-1 gate suite ALL PASS,
       recomp-vs-interp matched 120 frames, baseline `A7913A54909CC142` pinned in
-      `tools/cosim_baselines.tsv`. **KEY: oracle-level fixture testing is GATED behind the PPU
-      LY-timing fix** — recomp-vs-SameBoy runs from cycle 0 (LLE boot), so every DMG fixture hits
-      the SAME boot-PPU divergence at **instruction 30129** (identical pc 006A/0064, LY 0x90/0x1E
-      to Tetris — it's in the shared DMG BIOS, before the cart's own logic). So: pairing-1
-      baselines are cheap and work per-fixture now; the oracle sweep becomes meaningful only after
-      the PPU LY-vs-cycle timing is fixed. That fix (traced to the BIOS frame-wait loop by the
-      oracle) is the clear next priority — after it, re-run the oracle on the fixtures to test
-      each ROM's actual accuracy logic against SameBoy.
+      `tools/cosim_baselines.tsv`. **UPDATE (2026-07-02): the instr-30129 boot-PPU blocker is FIXED**
+      (LLE power-on LCD-OFF state; see "ROOT CAUSE + FIX" above). The shared-DMG-BIOS divergence moved
+      to instr 54755 with only a sub-scanline residual, so the oracle no longer trips every DMG fixture
+      in the same early-BIOS spot. Remaining before a clean full oracle sweep: the small per-M-cycle
+      residual (+16 CPU cyc + LCD-enable first-line phase lag, cumulatively +0.60% boot duration). The
+      sweep can proceed now for divergences that occur AFTER boot; a fully-clean cycle-0 lockstep needs
+      the residual fixed. Re-run the oracle on each fixture (recompile with `-DGBC_COSIM_SAMEBOY=ON`) to
+      test each ROM's accuracy logic against SameBoy.
 
 Meaning of the all-matched result: over the FULL Tetris attract (incl. demo gameplay) and
 deep into MMX2, the recomp and interpreter backends are byte-identical in complete
@@ -413,6 +413,36 @@ recomp LY ahead, in a BIOS wait loop) so the PPU LY-vs-cycle drift is **systemat
 CGB**, not game/model-specific. The instruction-aligned lockstep is also robust to CGB
 double-speed (it aligns on instructions, not the 8MHz->T-cycle mapping). Rebuild a target with the
 oracle: `-DGBC_COSIM_SAMEBOY=ON -DSAMEBOY_DIR=...`, then `--cosim-oracle --boot-rom <dmg|cgb>_boot.bin`.
+
+**ROOT CAUSE + FIX (2026-07-02) — SUPERSEDES the "recomp PPU runs ahead / not CPU" reading above.**
+The gross drift was **not** a PPU scanline-*rate* error; it was an **LLE power-on state bug**. `ppu_reset()`
+unconditionally initialized the PPU to the **HLE post-boot** state (`lcdc=0x91` LCD-ON, `ly=145`,
+mode=VBLANK) even on the LLE path, where the real BIOS runs from **power-on with the LCD OFF**
+(`LCDC.7=0`, `LY=0`). Consequences: (1) the PPU free-ran during the pre-enable boot code instead of
+staying frozen, and (2) the BIOS's LCD-enable write landed as `0x91→0x91` — a **no-op transition** —
+so the LY-reset-at-enable branch (`ppu.c` LCDC handler) never fired and the frame phase was never
+established from the BIOS enable. That is a **frame-phase offset**, not a rate drift (arithmetic check:
+the 114-scanline LY gap ≈ 52k T-cycles is impossible from the ~0.4% overall boot drift; the "wait for
+LY==144" loop then re-synchronizes both sides, which is why the *overall* boot drift stayed small).
+**Fix:** `ppu_reset()` now branches on `ctx->boot_rom_active` — LLE gets power-on `lcdc=0x00 / stat=0x00
+/ ly=0 / mode=HBLANK / mode_cycles=0`; HLE keeps the `0x91/0x81/145/VBLANK` post-boot state unchanged
+(so the validated HLE production path is byte-for-byte untouched; all 8 pairing-1 gates + the LLE-vs-HLE
+boot gate still pass). **Verified:** first divergence moved **30129 → 54755**, and the LY error
+collapsed from 114 scanlines (recomp 0x90 vs SB 0x1E) to a **sub-scanline** boundary (recomp LY=0x8F vs
+SB 0x90). The lockstep FIFO now also captures SameBoy's per-instruction T-cycle
+(`absolute_debugger_ticks/2`); the sharpened report prints `dcyc`.
+
+**RESIDUAL (now cleanly isolated, the genuine per-M-cycle frontier).** At the new split (instr 54755):
+`recomp cyc=542832 LY=0x8F | SameBoy cyc=542816 LY=0x90 | dcyc=+16`. Two small components: (a) a **+16
+T-cycle CPU-charging drift** over 54,755 instructions (~0.003%), and (b) a **PPU LCD-enable phase lag** —
+recomp reaches LY=144 at a *later* cycle than SameBoy despite having *more* cycles, i.e. recomp does not
+model the "first scanline after LCD-enable is a few cycles short" hardware quirk. Cumulatively the
+residual lag makes recomp's full boot **+140,140 cycles (+0.60%)** vs SameBoy (handoff: recomp
+23,580,484 / DIV=0xCF vs SameBoy 23,440,344 / DIV=0xAB / LY=0x00 / pc=0x0150). NOTE the total went
++88k→+140k: the old LCD-on bug made LY run *ahead* so the wait loops exited *early*, **partially masking**
+this lag; removing the gross bug unmasks it. Next: add a per-instruction cycle **ring-window dump** at the
+divergence to attribute the +16 CPU drift to specific opcode(s), and model the LCD-enable first-line
+timing in `ppu.c` against the measured offset (do NOT guess the shortfall — measure it via the oracle).
 
 ### Phase B design notes + de-risk (2026-07-01)
 

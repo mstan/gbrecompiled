@@ -55,8 +55,12 @@ void sb_oracle_enable_execution_trace(SBOracle* o);
 /* Return the fetch PC of the NEXT instruction SameBoy executes, advancing it by
  * exactly one instruction (running GB_run under the hood to refill the FIFO).
  * `*div`/`*ly` (may be NULL) get DIV/LY sampled at that instruction boundary.
+ * `*cyc` (may be NULL) gets SameBoy's absolute T-cycle count at that boundary
+ * (absolute_debugger_ticks / 2, matching sb_oracle_tcycles' single-speed unit),
+ * so lockstep can report the exact cycle offset at a divergence — DIV's high
+ * byte alone does not pin the cycle.
  * Returns false only if it cannot make progress (safety cap). */
-bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly);
+bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly, uint32_t* cyc);
 
 /* Instructions executed so far (execution-callback count). */
 uint64_t sb_oracle_instruction_count(const SBOracle* o);

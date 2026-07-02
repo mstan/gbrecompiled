@@ -302,6 +302,14 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
     bool cgb_mode = ppu_is_cgb_mode(ctx);
     bool cgb_compat_mode = ppu_is_cgb_compat_mode(ctx);
     uint16_t default_color = cgb_mode ? 0x7FFF : dmg_palette_rgb555[0];
+    /* LLE boot: the real BIOS runs from power-on, where the LCD is OFF (LCDC.7
+     * clear) and LY is frozen at 0. If we init to the HLE post-boot state
+     * (LCD ON, LY=145) instead, the PPU free-runs during the pre-enable boot
+     * code and the BIOS's LCD-enable write (0x91 over an already-0x91 LCDC)
+     * is a no-op transition — LY is never reset at enable, leaving the recomp
+     * frame phase-shifted vs cycle-accurate hardware. Gate on boot_rom_active
+     * so the HLE production default (below) is unchanged. */
+    bool lle_boot = (ctx && ctx->boot_rom_active);
 
     memset(ppu->framebuffer, 0, sizeof(ppu->framebuffer));
     for (size_t i = 0; i < GB_FRAMEBUFFER_SIZE; i++) {
@@ -309,11 +317,11 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
         ppu->rgb_framebuffer[i] = cgb_mode ? rgb555_to_rgba(default_color) : dmg_palette_rgba[0];
     }
 
-    ppu->lcdc = 0x91;
-    ppu->stat = 0x81;
+    ppu->lcdc = lle_boot ? 0x00 : 0x91;   /* power-on LCD OFF for LLE; HLE post-boot ON */
+    ppu->stat = lle_boot ? 0x00 : 0x81;   /* mode 0 at power-on */
     ppu->scy = 0x00;
     ppu->scx = 0x00;
-    ppu->ly = 145;
+    ppu->ly = lle_boot ? 0 : 145;
     ppu->lyc = 0x00;
     ppu->dma = (ctx && ctx->config.model == GB_MODEL_CGB) ? 0x00 : 0xFF;
     ppu->bgp = 0xFC;
@@ -328,8 +336,8 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
     latch_scanline_registers(ppu);
 
     ppu->stat_irq_state = false;
-    ppu->mode = PPU_MODE_VBLANK;
-    ppu->mode_cycles = 4;
+    ppu->mode = lle_boot ? PPU_MODE_HBLANK : PPU_MODE_VBLANK;
+    ppu->mode_cycles = lle_boot ? 0 : 4;
     ppu->window_line = 0;
     ppu->window_triggered = false;
     ppu->frame_ready = false;

@@ -1358,6 +1358,7 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
         uint8_t rdiv, odiv, rly, oly, rmode;
         uint8_t rime, oime, rif, oif, rie, oie; /* interrupt state, both sides */
         uint8_t rimep, rhalt;                   /* recomp EI-delay + halt latches */
+        uint16_t rdiv16, odiv16;                /* full 16-bit DIV, both sides */
     } win[SBWIN_CAP];
     memset(win, 0, sizeof(win));
     uint64_t win_count = 0;
@@ -1368,6 +1369,7 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
          * which fires at fetch before the instruction executes. */
         uint16_t r_pc = recomp_lle_ctx->pc;
         uint8_t r_div = (uint8_t)(recomp_lle_ctx->div_counter >> 8);
+        uint16_t r_div16 = (uint16_t)recomp_lle_ctx->div_counter;
         uint8_t r_ly = rppu ? rppu->ly : 0;
         uint32_t r_cyc = recomp_lle_ctx->cycles;
         uint8_t r_mode = rppu ? (uint8_t)rppu->mode : 0;
@@ -1398,6 +1400,7 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
          * returned (captured inside the exec callback, not read after-the-fact). */
         uint8_t o_ime = 0, o_if = 0, o_ie = 0;
         sb_oracle_last_intr(o, &o_ime, &o_if, &o_ie);
+        uint16_t o_div16 = sb_oracle_last_div16(o);
         icount++;
 
         /* Record this instruction (fetch-boundary state, both sides) into the ring. */
@@ -1411,6 +1414,7 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
             win[s].rif = r_if; win[s].oif = o_if;
             win[s].rie = r_ie; win[s].oie = o_ie;
             win[s].rimep = r_imep; win[s].rhalt = was_halted;
+            win[s].rdiv16 = r_div16; win[s].odiv16 = o_div16;
             win_count++;
         }
 
@@ -1436,13 +1440,15 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
                                  || (win[s].rime != win[s].oime);
                     fprintf(stderr,
                             "[SBWIN] %8" PRIu64 " | %04X/%04X | %10u/%10u d%+6ld | %02X/%02X%s | m%u | %02X/%02X"
-                            " | %02X/%02X | %02X/%02X | %u/%u | %u %u%s\n",
+                            " | %02X/%02X | %02X/%02X | %u/%u | %u %u | div16 %04X/%04X%s%s\n",
                             win[s].ic, win[s].rpc, win[s].opc,
                             win[s].rcyc, win[s].ocyc, (long)win[s].rcyc - (long)win[s].ocyc,
                             win[s].rly, win[s].oly, win[s].rly != win[s].oly ? "*" : " ",
                             win[s].rmode, win[s].rdiv, win[s].odiv,
                             win[s].rif, win[s].oif, win[s].rie, win[s].oie,
                             win[s].rime, win[s].oime, win[s].rimep, win[s].rhalt,
+                            win[s].rdiv16, win[s].odiv16,
+                            win[s].rdiv16 != win[s].odiv16 ? " D16" : "",
                             intr_diff ? " <INTR" : "");
                 }
             }

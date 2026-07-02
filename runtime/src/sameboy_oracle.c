@@ -49,6 +49,7 @@ typedef struct {
     uint8_t ime;   /* interrupt master enable (0/1) at the fetch boundary */
     uint8_t iflag; /* IF (0xFF0F) masked to bits 0-4 */
     uint8_t ie;    /* IE (0xFFFF) masked to bits 0-4 */
+    uint16_t div16;/* SameBoy internal 16-bit divider (gb->div_counter) */
 } SBTraceEntry;
 
 struct SBOracle {
@@ -78,6 +79,7 @@ static void sb_exec_cb(GB_gameboy_t *gb, uint16_t address, uint8_t opcode) {
     o->fifo[o->fifo_tail].ime = (uint8_t)(gb->ime ? 1 : 0);
     o->fifo[o->fifo_tail].iflag = (uint8_t)(GB_read_memory(gb, 0xFF0F) & 0x1F);
     o->fifo[o->fifo_tail].ie  = (uint8_t)(GB_read_memory(gb, 0xFFFF) & 0x1F);
+    o->fifo[o->fifo_tail].div16 = gb->div_counter;
     o->fifo_tail = next;
 }
 
@@ -160,6 +162,10 @@ void sb_oracle_last_intr(SBOracle* o, uint8_t* ime, uint8_t* iflag, uint8_t* ie)
     if (ime)   *ime   = o->last_popped.ime;
     if (iflag) *iflag = o->last_popped.iflag;
     if (ie)    *ie    = o->last_popped.ie;
+}
+
+uint16_t sb_oracle_last_div16(SBOracle* o) {
+    return o->last_popped.div16;
 }
 
 bool sb_oracle_next_instruction(SBOracle* o, uint16_t* pc, uint8_t* div, uint8_t* ly, uint32_t* cyc) {

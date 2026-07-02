@@ -73,6 +73,11 @@ uint64_t sb_oracle_instruction_count(const SBOracle* o);
  * one side but not the other at the same instruction boundary. Any out-ptr may be NULL. */
 void sb_oracle_last_intr(SBOracle* o, uint8_t* ime, uint8_t* iflag, uint8_t* ie);
 
+/* SameBoy's internal 16-bit divider (gb->div_counter) at the fetch boundary of the
+ * instruction most recently returned by sb_oracle_next_instruction — full precision,
+ * for diagnosing sub-256 DIV phase offsets vs the recomp's div_counter. */
+uint16_t sb_oracle_last_div16(SBOracle* o);
+
 #ifdef __cplusplus
 }
 #endif

@@ -115,6 +115,36 @@ the exact prior-failure signature.
   still applies to hot paths touching no timing-sensitive hardware; full
   regen/rebuild/gate sweep + re-pin all baselines.
 
+## Phase 0 findings (2026-07-02) — measured, plan refined
+
+Extended the SameBoy oracle to expose its internal 16-bit divider
+(`sb_oracle_last_div16`; SBWIN now prints `div16 r/o`). Ran the `mem_timing` ROM
+through the DMG oracle (LLE). First divergence: instr 2,492,083 (recomp pc=C2BA
+vs SameBoy C2C9, dcyc=+4), a WRAM test routine that reads DIV and branches.
+
+**Root: a constant +8 DIV-counter phase offset.** SameBoy's `div_counter` is
+exactly 8 ahead of recomp's at EVERY instruction in the window (D6C8/D6D0,
+D6FC/D704, …). At the split it straddles the 0x700 high-byte boundary → recomp
+DIV reg=D6, SameBoy=D7 → the read-DIV test branches differently. Not a race, not a
+read-M-cycle offset — a fixed divider phase error.
+
+**SameBoy arbitrates the boot-DIV signal.** The boot gate long flagged LLE
+`div_counter`=ABC4 vs HLE=ABCC (Δ8). SameBoy matches the HLE phase (ABCC), so the
+**LLE boot accumulates 8 too few DIV cycles** — an LLE-boot-timing bug, and the
+direct cause of this oracle divergence.
+
+**Consequences for the plan:**
+- The blanket read-M-cycle split (old Phase 1) is the WRONG tool for the
+  `mem_timing` oracle divergence — sampling reads earlier would worsen a phase
+  error. Reordered: fix DIV/timer phase FIRST.
+- **The oracle (LLE) and production (HLE) have DIFFERENT DIV phases** (ABC4 vs
+  ABCC). Production `mem_timing` 01/02 fails under HLE (the CORRECT phase), so its
+  cause is NOT this LLE +8 artifact — it needs measurement against the HLE path
+  (or fix the LLE boot DIV so the oracle matches production, then re-measure).
+- Revised Phase 1 = **DIV/timer phase calibration**: (a) find where LLE boot loses
+  8 DIV cycles (makes the oracle honest), then (b) re-measure production
+  `read_timing` against the now-aligned oracle to see the REAL read-timing gap.
+
 ## Risks / watch-outs
 
 - **A-vs-B determinism**: interpreter and emitter MUST move together each phase.

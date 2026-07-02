@@ -1167,7 +1167,14 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
         ctx->de = 0x0000;
         ctx->hl = 0x0000;
         gb_unpack_flags(ctx);
-        ctx->div_counter = 0x0000;
+        /* Power-on internal divider value at boot-ROM entry. The DMG divider has
+         * already advanced 8 T-cycles before the CPU begins executing the boot ROM
+         * (directly measured vs SameBoy DMG_B: div_counter=0x0008 at cycle 0). This
+         * is the entire source of the old LLE-vs-HLE DIV mismatch (LLE handoff
+         * ABC4 vs HLE constant ABCC = exactly this +8); with it, LLE boot DIV
+         * matches HLE + SameBoy. CGB power-on divider differs and is not yet
+         * measured — left at 0 pending a CGB cycle-0 oracle trace. */
+        ctx->div_counter = gb_is_cgb_hardware(ctx) ? 0x0000 : 0x0008;
         /* I/O stays at the power-on zero from the memset above; the boot ROM
          * programs it. Boot-logo VRAM is written by the boot ROM itself. */
     } else {

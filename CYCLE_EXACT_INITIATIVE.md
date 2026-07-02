@@ -145,6 +145,32 @@ direct cause of this oracle divergence.
   8 DIV cycles (makes the oracle honest), then (b) re-measure production
   `read_timing` against the now-aligned oracle to see the REAL read-timing gap.
 
+## Phase 1a DONE — DMG power-on divider = 8 (2026-07-02)
+
+Traced the +8 DIV offset to its origin: at instruction 1, cycle 0 (before any
+instruction executes), recomp `div16=0000` but SameBoy `div16=0008`. The entire
+offset is the **power-on internal divider value** — the divider has advanced 8
+T-cycles before the CPU begins the boot ROM. Every cycle after tracks perfectly.
+
+Fix (gbrt.c LLE power-on): `div_counter = cgb ? 0 : 8`. Verified on tetris (DMG):
+- Boot gate DIV **ABC4 → ABCC**, now == HLE == SameBoy: the long-standing
+  boot-gate DIV fidelity signal is RESOLVED.
+- A-vs-B chain unchanged (`E92927C083145FD7`); 8/8 pairing gates; HLE untouched
+  (production already used ABCC).
+- Tetris oracle still 2,266,364 (that split is the PPU sub-scanline axis, correctly
+  independent of DIV).
+
+**Open (Phase 1b): CGB power-on divider.** mem_timing has the CGB flag (0x143=0x80)
+so it runs in CGB mode; SameBoy's cycle-0 div there was also 8, but the CGB
+power-on value + mem_timing's CGB-vs-DMG model handling (it ran the DMG boot ROM in
+a CGB context) need a clean CGB cycle-0 trace before setting the CGB branch. Left
+at 0 (no regression) pending that.
+
+After Phase 1b the oracle (LLE) will share production's (HLE) DIV phase, making it
+honest for the REAL read/write-timing measurement (the mem_timing split at
+2,492,083 persisted with DIV matching — that residual is the genuine read-timing
+gap, the next target).
+
 ## Risks / watch-outs
 
 - **A-vs-B determinism**: interpreter and emitter MUST move together each phase.

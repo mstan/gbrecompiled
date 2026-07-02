@@ -1470,9 +1470,11 @@ bool gb_run_sameboy_cosim(GBContext* recomp_lle_ctx,
          * specific opcode) is visible rather than only its end state. */
         if (opt.log_interval && (icount % opt.log_interval) == 0) {
             fprintf(stderr,
-                    "[SBTRACE] i=%8" PRIu64 " pc=%04X cyc r=%u o=%u dcyc=%+ld ly r=%02X o=%02X%s rmode=%u boot%s done\n",
+                    "[SBTRACE] i=%8" PRIu64 " pc=%04X cyc r=%u o=%u dcyc=%+ld ly r=%02X o=%02X%s rmode=%u"
+                    " div16 r=%04X o=%04X dd=%+d boot%s done\n",
                     icount, r_pc, r_cyc, o_cyc, (long)r_cyc - (long)o_cyc,
                     r_ly, o_ly, r_ly != o_ly ? "*" : "", r_mode,
+                    r_div16, o_div16, (int)r_div16 - (int)o_div16,
                     recomp_lle_ctx->boot_rom_active ? " NOT" : "");
         }
     }

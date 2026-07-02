@@ -512,6 +512,27 @@ wait loop (`0xFFB6`), i.e. the per-M-cycle / DMA-wait timing family, not interru
 `E92927C083145FD7`, instr_timing `5D103AEB0D3F03DB`) — the chains changed only because IME-enable timing
 genuinely moved. megaman_xtreme2 baseline is stale pending its ROM.
 
+### CGB double-speed re-verify — MMX2 oracle (2026-07-02)
+
+First CGB/double-speed oracle run: Megaman Xtreme 2 (`.gbc`, MBC5, CGB double-
+speed) LLE from cycle 0 vs SameBoy CGB (`cgb_boot.bin`). Two outcomes:
+
+1. **LY/STAT read-race window fixed for double-speed.** The `+4` race window in
+   `gb_read8` is in SYSTEM-cycle units; a CPU read M-cycle is only 2 system cycles
+   under double-speed → the window was 2× too wide. Fixed to
+   `race_win = cgb_double_speed ? 2 : 4`. DMG byte-identical (oracle 2,266,364 +
+   chain `E92927C083145FD7` unchanged; gated on double-speed).
+2. **MMX2 first oracle divergence = instr 81603**, recomp pc=0217 vs SameBoy
+   pc=021B, dcyc=+4. At the split DIV matches (99/99) but LY differs (recomp 0x8F
+   vs SameBoy 0x90): recomp's PPU reaches the VBlank line (LY=144) ~4 system-cycles
+   late, so the VBlank-IF wait loop (0217↔0219) exits late. The race fix did NOT
+   move this (81603 before and after) — proving it is the PPU LY sub-scanline
+   phase axis (same family as the DMG 2,266,364 split), NOT the read-race. Next CGB
+   axis; tracked with the per-pixel/CPU-timing ceiling.
+
+A-vs-B re-pinned: `megaman_xtreme2` 1000f = `B02E9D35794D298E` (A==B, 156,918
+checkpoints) under double-speed.
+
 ### Phase B design notes + de-risk (2026-07-01)
 
 **Build de-risk COMPLETE + POSITIVE.** All 21 SameBoy `Core/*.c` compile and archive into

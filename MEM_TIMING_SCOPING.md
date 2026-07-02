@@ -196,9 +196,21 @@ wrong tool for the timer. This is a SEPARATE axis, not pointed to by the current
 oracle coordinate (which is now the VBlank interrupt-dispatch split at 2,266,273).
 Left for a focused follow-up gated on `mem_timing` read/write root-cause.
 
-**CGB caveat:** the edge-cycle math (`ctx->cycles - mode_cycles`, `+4` window) is
-in CPU-T-cycle units and exact for single-speed DMG. CGB double-speed re-verify
-(MMX2 + cgb_boot.bin) is still pending.
+**CGB caveat — RE-VERIFIED + FIXED (2026-07-02).** The race window was a literal
+`+4` compared against `ctx->cycles`, which is in SYSTEM-cycle units (`gb_tick`
+advances it by `cpu_cycles/2` under CGB double-speed). One CPU read M-cycle is 4
+system cycles at single speed but only **2** under double-speed, so the window was
+2× too wide for CGB. Fixed: `race_win = ctx->cgb_double_speed ? 2 : 4` (gbrt.c
+`gb_read8`, the `0xFF40-0xFF4B` block). Gated on double-speed → DMG is byte-
+identical (tetris oracle still first-diverges at 2,266,364; A-vs-B chain
+`E92927C083145FD7` unchanged). Verified against MMX2 + cgb_boot.bin: the fix did
+NOT move MMX2's first oracle divergence (still instr 81603), which proves that
+divergence is NOT the read-race — it is a separate CGB PPU LY-phase drift (recomp
+reaches LY=0x90/VBlank ~4 system-cycles late at the VBlank-entry wait loop; DIV
+matches 99/99, only LY differs). That is the same PPU sub-scanline timing family
+as the DMG 2,266,364 split, surfacing under CGB — the next CGB axis, tracked with
+the per-pixel/CPU-timing ceiling ([[project_ppu_mealybug_scorecard]],
+[[project_cpu_subinstruction_timing]]), not the race.
 
 ## Timer root-cause LOCALIZED via mooneye timer suite (2026-07-02)
 

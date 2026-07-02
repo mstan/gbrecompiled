@@ -1959,11 +1959,16 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
             /* Read-before-increment race (Gekkio "read wins"): a read whose read
              * M-cycle (last 4 T) coincides with the LY edge samples the pre-edge
              * value on hardware. PPU-scoped, so the timer is untouched. This is
-             * what the SameBoy oracle pins at the boot LY==0x90 wait loop. */
-            if (addr == 0xFF44 && p->ly_change_cycle + 4 > ctx->cycles) {
+             * what the SameBoy oracle pins at the boot LY==0x90 wait loop.
+             * The window is one CPU read M-cycle. change_cycle and ctx->cycles are
+             * in SYSTEM-cycle units (gb_tick advances ctx->cycles by cpu_cycles/2
+             * in CGB double-speed), so a CPU M-cycle spans 2 system cycles under
+             * double-speed and 4 otherwise. */
+            uint32_t race_win = ctx->cgb_double_speed ? 2u : 4u;
+            if (addr == 0xFF44 && p->ly_change_cycle + race_win > ctx->cycles) {
                 return p->ly_prev;
             }
-            if (addr == 0xFF41 && p->stat_change_cycle + 4 > ctx->cycles) {
+            if (addr == 0xFF41 && p->stat_change_cycle + race_win > ctx->cycles) {
                 return (uint8_t)(p->stat_prev | 0x80);
             }
             return ppu_read_register(p, addr);

@@ -95,6 +95,13 @@ Mirrors `nesrecomp/runner/src/runtime.c:1184-1301`:
 - Context published by the game module from inside the game's own
   "object screen X" computation (via layer-4 hooks):
   `g_gbws_obj_true_rel` (int16), `g_gbws_obj_rel8`, `g_gbws_obj_ctx_valid`.
+- A game module must publish only a coherent multi-byte coordinate. MMX2 has
+  both full `CB80`/`CB81` draw paths and native-only paths that update `CB80`
+  alone. Its binding invalidates on the low-byte write and publishes only when
+  the following high-byte write completes the pair; otherwise the sidecar
+  falls back to the vanilla X byte. Publishing after either write can combine
+  a new low byte with another object's stale `00`/`01`/`FF` high byte and move
+  an entire metasprite by 256 pixels.
 - Unwrap on write: `wide = true_rel + (int8)(byte - rel8)` with plausibility
   window (layout offsets span a few tiles) and fallback to the plain byte.
   GB nuance: OAM X is stored **+8 biased**; the sidecar stores unbiased

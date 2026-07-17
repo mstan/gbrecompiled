@@ -14,3 +14,12 @@ void game_extended_view_init(struct GBContext *ctx,
                              uint32_t extra_left, uint32_t extra_right) {
     (void)ctx; (void)extra_left; (void)extra_right;
 }
+
+void game_extended_view_update(struct GBContext *ctx) { (void)ctx; }
+
+int game_extended_view_bg_tile(struct GBContext *ctx, int screen_x,
+                               uint8_t scanline, uint8_t *tile,
+                               uint8_t *attr) {
+    (void)ctx; (void)screen_x; (void)scanline; (void)tile; (void)attr;
+    return 0;
+}

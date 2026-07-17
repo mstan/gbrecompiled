@@ -72,6 +72,19 @@ uint16_t game_max_view_width(void);
 void game_extended_view_init(struct GBContext *ctx,
                              uint32_t extra_left, uint32_t extra_right);
 
+/* Called once at the start of each armed frame's margin render. A game may
+ * refresh presentation-only backing data and must fail closed if its scene or
+ * validation contract is not satisfied. Part of the opt-in hook group. */
+void game_extended_view_update(struct GBContext *ctx);
+
+/* Optional margin BG source. Return 1 with tile/attr filled to replace the
+ * wrapping hardware-map cell, 0 to use normal VRAM, or -1 for finite-map
+ * void (black). Called only for margin pixels after the game has opened its
+ * pillarbox gate. Part of the opt-in hook group. */
+int game_extended_view_bg_tile(struct GBContext *ctx, int screen_x,
+                               uint8_t scanline, uint8_t *tile,
+                               uint8_t *attr);
+
 /* ---- Info ---- */
 
 /* Return the game name for the window title. */

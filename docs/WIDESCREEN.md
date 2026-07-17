@@ -168,14 +168,54 @@ caps will be measured, SMB-style (`right ≤ streamer lead`, `left ≤ map wrap`
 and clamped in the module, with the MMZ synthetic-streamer trick held in
 reserve only if the natural caps prove too tight.
 
+### Streaming-ring lead widening
+
+Live tracing resolved the apparent corner wrap: MMX2 treats the 32-column BG
+map as a streaming ring and refreshes one 16-pixel strip at camera crossings.
+During the observed horizontal scroll, accepted writes came from the paired
+tilemap writers at `00:0b55/0b57` and `00:0b65/0b67`; only ring columns
+`0..7` and `24..31` were refreshed. A 256-pixel render exposes all 32 columns,
+including cells beyond the native streamer lead.
+
+The analogous Mega Man X6 work first tried clearing/masking revealed columns.
+That hid valid authored layers and produced moving black trim. Its durable fix
+was to refill the tile ring so the population window matches the render
+window. MMX2 now follows that same policy through the armed-only per-frame
+extended-view update hook:
+
+- `func_1923 -> func_0b07` reads the 16-bit camera X at `0xCA08/09` and
+  converts it to the metatile coordinates consumed by the four strip writers;
+- horizontal direction 1 natively streams at camera + 11 metatiles, while
+  direction 2 streams at camera - 1 metatile;
+- `func_0ab1` resolves a world metatile through the bank-5 `DA00` page table;
+  the selected page points into the active level-data ROM bank;
+- `func_0b4d` expands that metatile through ROM tables `40xx..43xx` (tiles)
+  and `44xx..47xx` (CGB attributes) into a 2x2 block at `9800`;
+- the MMX2 module clones those two routines byte-for-byte as a synthetic
+  margin tile source, selecting the correct 8x8 quadrant from full 16-bit
+  world coordinates;
+- before the cache is trusted, it searches for a ROM bank whose two native
+  streamer-edge columns match the live tilemap with zero mismatches. Menus,
+  transitions, an unsupported layer, or a bad reverse-engineering assumption
+  therefore remain pillarboxed;
+- the cache keeps the two extreme partial metatiles independent when an
+  unaligned 256-pixel view spans 17 metatiles but the hardware ring has only
+  16 slots;
+- negative world X is finite-map void and returns black instead of wrapping
+  to the far end of the level.
+
+The generic `game_extended_view_update()` hook is a no-op by default and is
+called only from the already-armed margin path. The tile-source hook is queried
+only for margin pixels and never mutates guest VRAM; the native framebuffer and
+default game behavior are unchanged.
+
 ## Phases
 
-1. **Engine framework** (layers 1-3, 5): wide render + sidecar + config,
-   `GBCRECOMP_WS_WIP=1` proves the generic path on MMX2 (BG margins visible,
-   sprites vanilla-pinned, pillarbox working). Regen nothing; runtime-only.
-2. **Hook contract** (layer 4): runtime-side `ram_read_hook` table +
-   interpreter parity; TOML plumbing.
-3. **MMX2 module**: bindings from the RE report; measure streamer lead; ship
-   tiers that survive `ws_check` + live play.
-4. **Verification + docs**: probe, README (opt-in instructions, caveats),
-   ENHANCEMENTS.md entry.
+1. **Engine framework**: shipped wide render, sidecar, capability gate,
+   per-frame update hook, and width-aware presentation.
+2. **Reviewed generated hook**: shipped `[[imm_override]]` for the shared MMX2
+   cull bounds; no generated C edits.
+3. **MMX2 module**: local opt-in module now includes a validated synthetic
+   margin cache plus sprite sidecar and wider culling.
+4. **Remaining validation**: broader live play (enemies, shots, bosses,
+   savestates) and optional full-width dialogue/window work.

@@ -375,11 +375,12 @@ static void gbrt_log_vram_write(GBContext* ctx,
     }
 
     fprintf((FILE*)ctx->ppu_trace_file,
-            "[VRAM-WRITE] frame=%llu cyc=%u pc=%04X bank=%u ly=%u mode=%u addr=%04X val=%02X accepted=%u reason=%s\n",
+            "[VRAM-WRITE] frame=%llu cyc=%u pc=%04X bank=%u rom=%u ly=%u mode=%u addr=%04X val=%02X accepted=%u reason=%s\n",
             (unsigned long long)frame_index,
             ctx->frame_cycles,
             ctx->pc,
             (ctx->pc < 0x4000) ? 0u : (unsigned)ctx->rom_bank,
+            (unsigned)ctx->rom_bank,
             ctx->io[0x44],
             ctx->io[0x41] & 0x03,
             addr,

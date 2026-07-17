@@ -7,6 +7,7 @@
 #include "gbrt.h"
 #include "gbrt_debug.h"
 #include "gb_widescreen.h"
+#include "game_extras.h"
 #include "sgb.h"
 
 #include <string.h>
@@ -496,6 +497,7 @@ static void render_bg_segment(GBPPU* ppu,
         uint8_t tile_y;
         uint8_t tile_idx;
         uint8_t attr = 0;
+        int wide_bg_source = 0;
         int pixel_x;
         int pixel_y;
         uint16_t tile_addr;
@@ -529,9 +531,26 @@ static void render_bg_segment(GBPPU* ppu,
             pixel_y = bg_y % 8;
         }
 
-        tile_idx = vram_read_bank(ctx, 0, (uint16_t)(tilemap_addr + tile_y * 32 + tile_x));
+        if (!in_window && (x < 0 || x >= GB_SCREEN_WIDTH)) {
+            wide_bg_source = game_extended_view_bg_tile(ctx, x, scanline,
+                                                        &tile_idx, &attr);
+            if (wide_bg_source < 0) {
+                ppu->framebuffer[row + x] = 0;
+                ppu->color_framebuffer[row + x] = 0;
+                bg_raw[x] = 0;
+                bg_priority[x] = 0;
+                continue;
+            }
+        }
+        if (wide_bg_source == 0) {
+            tile_idx = vram_read_bank(ctx, 0,
+                                     (uint16_t)(tilemap_addr + tile_y * 32 + tile_x));
+        }
         if (cgb_mode) {
-            attr = vram_read_bank(ctx, 1, (uint16_t)(tilemap_addr + tile_y * 32 + tile_x));
+            if (wide_bg_source == 0) {
+                attr = vram_read_bank(ctx, 1,
+                                     (uint16_t)(tilemap_addr + tile_y * 32 + tile_x));
+            }
             palette_number = attr & 0x07;
             tile_bank = (attr & 0x08) ? 1 : 0;
             priority = (attr & 0x80) != 0;
@@ -777,16 +796,23 @@ static void blank_margin_span(GBPPU* ppu, int x_start, int x_end) {
 static void render_view_margins(GBPPU* ppu, GBContext* ctx) {
     const int l = ppu->view_extra_left;
     const int r = ppu->view_extra_right;
-    bool lcd_on = (ppu->lcdc & LCDC_LCD_ENABLE) != 0;
+    bool lcd_on;
     /* A window that spans the whole native line (typical HUD bar) means the
      * margins would sit beside HUD content while sampling world BG — fail
      * closed to black for that scanline. */
-    bool window_full_line = (ppu->lcdc & LCDC_WINDOW_ENABLE) &&
-                            (ppu->wx <= 7) && (ppu->wy <= ppu->ly);
-    bool blank_left = !lcd_on || window_full_line ||
-                      g_gbws_pillarbox || g_gbws_pillarbox_left;
-    bool blank_right = !lcd_on || window_full_line ||
-                       g_gbws_pillarbox || g_gbws_pillarbox_right;
+    bool window_full_line;
+    bool blank_left;
+    bool blank_right;
+
+    if (ppu->ly == 0) game_extended_view_update(ctx);
+
+    lcd_on = (ppu->lcdc & LCDC_LCD_ENABLE) != 0;
+    window_full_line = (ppu->lcdc & LCDC_WINDOW_ENABLE) &&
+                       (ppu->wx <= 7) && (ppu->wy <= ppu->ly);
+    blank_left = !lcd_on || window_full_line ||
+                 g_gbws_pillarbox || g_gbws_pillarbox_left;
+    blank_right = !lcd_on || window_full_line ||
+                  g_gbws_pillarbox || g_gbws_pillarbox_right;
 
     if (l > 0) {
         if (blank_left) {

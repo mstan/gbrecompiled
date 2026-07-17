@@ -147,9 +147,10 @@ Mirrors `nesrecomp/runner/src/runtime.c:1184-1301`:
 
 ## MMX2 game module (`Megaman Xtreme 2/extras.c`)
 
-Policy is **vanilla spawns + vanilla culling**, sidecar for sprites,
-fail-closed gameplay-mode gate, HUD pinned. MMX2's stock horizontal object
-window already encloses the complete 256-pixel presentation window.
+Policy is **vanilla spawns + vanilla main-object culling**, sidecar for
+sprites, fail-closed gameplay-mode gate, HUD pinned. MMX2's stock horizontal
+main-object window already encloses the complete 256-pixel presentation
+window; its separate projectile/effect viewport test is extended precisely.
 
 Game-specific bindings (from the generated-C RE pass; verify live before
 shipping):
@@ -160,14 +161,14 @@ shipping):
 | Camera Y world (16-bit) | `0xCA05/06`; SCY shadow `0xCADF` |
 | Shadow OAM | page `0xC2` (DMA write `01:4a34`); OAM cursor `0xCAD5`, overflow flag `0xCAD6` |
 | Sidecar context | **`0xCB80/0xCB81` = current draw object's 16-bit screen X** (lo/hi), `0xCB82` = screen Y — published by the game itself before the metasprite writer `func_1320 @ 00:1323` adds per-tile offsets to the low byte. Context publish = read hook on `0xCB80` (or entry of the OAM-build dispatcher `00:12db`). |
-| On-screen cull (shared by draw-skip, despawn, AND buster shots) | `func_34d6 @ 00:34d6`: on-screen iff `(relX+0x40) < 0x138` → relX ∈ [−64, +248) (and `(relY+0x40) < 0x12C`). The 256-pixel view is [−48,+208), leaving 16 pixels of native guard on the left and 40 on the right. The reviewed `[[imm_override]]` sites are deliberately not enabled: widening to [−112,+296) only increases active-object/OAM pressure. |
+| Main-object on-screen cull | `func_34d6 @ 00:34d6`: on-screen iff `(relX+0x40) < 0x138` → relX ∈ [−64, +248) (and `(relY+0x40) < 0x12C`). The 256-pixel view is [−48,+208), leaving 16 pixels of native guard on the left and 40 on the right. The reviewed `[[imm_override]]` sites are deliberately not enabled: widening to [−112,+296) only increases active-object/OAM pressure. |
+| Projectile/effect viewport | `func_278c @ 00:278c` accepts relative X `[0,160)` and Y `[0,144)`. Normal buster update `20:7ada` calls it and retires a rejected shot at `20:7b12`; charged shots use another path. Armed gameplay intercepts the `00:278c` entry only for coordinates in `[-extra_left,160+extra_right)` outside the native X range, retaining the native Y bound and reproducing the successful registers/timing. Effect objects can live in enabled cartridge-RAM pages (X-buster uses page `B0`) as well as WRAM. Native-width execution never intercepts it. |
 | HUD | Window layer: `WY←0xCAE1 @ 00:0420`, `WX←0xCAE2 @ 00:0425`. Pinned native by construction (engine renders window only in native columns). |
 | Spawns | Column-streaming driven (`func_22af @ 00:22af` camera-crossing detector → `func_1779` loaders). Left vanilla; margin enemies appear once their column streams. |
 | Object fields | X `+8/+9`, Y `+5/+6`, active `+0`, flags `+0x0F`, sprite slot `+0x44` (entity page in HRAM `0xFFA2`) |
 
 Unconfirmed (flagged by RE, verify in-emulator): no standalone spawn-list
-scan against `camX±width` was found (believed streaming-driven); no
-buster-specific cull tighter than `func_34d6`.
+scan against `camX±width` was found (believed streaming-driven).
 
 Known constraint to respect: MMX2's right-margin content depends on how far
 ahead of the camera its column streamer writes the BG map (256-wide map −

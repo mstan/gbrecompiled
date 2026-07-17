@@ -22,6 +22,17 @@ struct DataRegionConfig {
     uint16_t end;       // exclusive
 };
 
+// Reviewed ALU-immediate override site: the generator routes this one
+// instruction's immediate operand through gbrt_imm_override8(ctx, bank, pc,
+// orig) at runtime instead of baking the literal. Used by opt-in enhancement
+// layers (e.g. widescreen cull-bound widening); with no runtime hook
+// installed the original immediate is returned, so behavior is unchanged.
+struct ImmOverrideConfig {
+    uint8_t bank;
+    uint16_t addr;      // guest PC of the ALU-immediate instruction
+    std::string note;
+};
+
 struct GameConfig {
     // ROM
     std::string rom_path;
@@ -47,6 +58,9 @@ struct GameConfig {
 
     // Data regions (excluded from code analysis)
     std::vector<DataRegionConfig> data_regions;
+
+    // ALU-immediate override sites (runtime-hookable immediates)
+    std::vector<ImmOverrideConfig> imm_overrides;
 
     // Valid CRC32s (for multi-version ROM support, e.g. Red + Blue)
     std::vector<uint32_t> valid_crcs;

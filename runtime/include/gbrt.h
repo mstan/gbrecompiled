@@ -904,6 +904,16 @@ void gb_platform_set_dump_frames(const char* frames);
  * game capability at gb_platform_register_context. See gb_widescreen.h. */
 void gb_ws_set_cli_request(int width);
 
+/* Runtime chokepoint for config-declared [[imm_override]] ALU-immediate
+ * sites: the generator emits gbrt_imm_override8(ctx, bank, pc, orig) instead
+ * of the literal at reviewed instructions. With no hook installed the
+ * original immediate is returned (behavior unchanged). An opt-in game module
+ * (e.g. widescreen) installs the hook to widen specific bounds. */
+typedef uint8_t (*GBImmOverrideHook)(GBContext* ctx, uint8_t bank,
+                                     uint16_t pc, uint8_t orig);
+extern GBImmOverrideHook gbrt_imm_override_hook;
+uint8_t gbrt_imm_override8(GBContext* ctx, uint8_t bank, uint16_t pc, uint8_t orig);
+
 /**
  * @brief Set guest-frame numbers to dump by elapsed guest CYCLES (frame N = N*70224
  * T-cycles), independent of rendered/VBlank frames. Robust for ROMs that keep the LCD

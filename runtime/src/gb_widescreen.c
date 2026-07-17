@@ -166,6 +166,23 @@ int gb_ws_sidecar_dma_match(uint8_t src_page) {
     return 0;
 }
 
+/* WRAM write tap (called from gb_write8 only while the view is armed):
+ * shadow-OAM X tracking plus the game module's watch-range hook (used for
+ * context publish from the game's own screen-X computation globals). */
+void (*g_gbws_wram_write_hook)(struct GBContext* ctx, uint16_t addr, uint8_t val) = 0;
+uint16_t g_gbws_watch_lo = 1;   /* empty range by default */
+uint16_t g_gbws_watch_hi = 0;
+
+void gb_ws_wram_write_tap(struct GBContext* ctx, uint16_t addr, uint8_t val) {
+    if (g_gbws_oam_sidecar && (addr >> 8) == g_gbws_shadow_oam_page &&
+        (addr & 3) == 1 && (addr & 0xFF) < 0xA0) {
+        gb_ws_sidecar_track((addr & 0xFF) >> 2, val);
+    }
+    if (g_gbws_wram_write_hook && addr >= g_gbws_watch_lo && addr <= g_gbws_watch_hi) {
+        g_gbws_wram_write_hook(ctx, addr, val);
+    }
+}
+
 /* Direct CPU write into OAM (no DMA): vanilla placement for that slot. */
 void gb_ws_sidecar_direct_oam(int slot, uint8_t val) {
     if (!g_gbws_oam_sidecar) return;

@@ -1177,6 +1177,24 @@ static std::vector<EmittedBody> build_emitted_bodies(
     return bodies;
 }
 
+/* Operand expression for an ALU-immediate instruction: normally the literal,
+ * but at a config-declared [[imm_override]] site route it through the runtime
+ * hook so an opt-in layer (e.g. widescreen) can widen the value. */
+static std::string alu_imm_operand(const GeneratorOptions& options,
+                                   const ir::IRInstruction& instr) {
+    char buf[64];
+    uint32_t key = (static_cast<uint32_t>(instr.source_bank) << 16) |
+                   instr.source_address;
+    if (options.imm_override_sites.count(key)) {
+        snprintf(buf, sizeof(buf), "gbrt_imm_override8(ctx, 0x%02x, 0x%04x, 0x%02x)",
+                 instr.source_bank, instr.source_address,
+                 (unsigned)instr.src.value.imm8);
+    } else {
+        snprintf(buf, sizeof(buf), "0x%02x", (unsigned)instr.src.value.imm8);
+    }
+    return std::string(buf);
+}
+
 static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& instr, 
                                 const ir::Program& program, int indent, 
                                 const GeneratorOptions& options,
@@ -1360,8 +1378,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::ADD8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_add8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_add8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_add8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1371,8 +1388,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::ADC8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_adc8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_adc8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_adc8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1382,8 +1398,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SUB8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_sub8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_sub8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_sub8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1393,8 +1408,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SBC8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_sbc8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_sbc8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_sbc8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1404,8 +1418,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::AND8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_and8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_and8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_and8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1415,8 +1428,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::OR8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_or8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_or8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_or8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1426,8 +1438,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::XOR8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_xor8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_xor8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_xor8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1437,8 +1448,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::CP8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_cp8(ctx, 0x" << std::hex << std::setfill('0') 
-                    << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                out << "gb_cp8(ctx, " << alu_imm_operand(options, instr) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_cp8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {

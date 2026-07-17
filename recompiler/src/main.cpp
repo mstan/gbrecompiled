@@ -2063,6 +2063,13 @@ int main(int argc, char* argv[]) {
     }
     gen_opts.runtime_dir = game_config.runtime_dir;
     gen_opts.valid_crcs = game_config.valid_crcs;
+    for (const auto& io : game_config.imm_overrides) {
+        gen_opts.imm_override_sites.insert(
+            (static_cast<uint32_t>(io.bank) << 16) | io.addr);
+        std::cout << "Imm override site: Bank " << (int)io.bank << " Address 0x"
+                  << std::hex << io.addr << std::dec
+                  << (io.note.empty() ? "" : (" (" + io.note + ")")) << "\n";
+    }
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
 

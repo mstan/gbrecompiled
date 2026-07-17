@@ -84,6 +84,13 @@ void gb_ws_sidecar_track(int slot, uint8_t val);
 int  gb_ws_sidecar_dma_match(uint8_t src_page);
 void gb_ws_sidecar_direct_oam(int slot, uint8_t val);
 
+/* WRAM write tap (gb_write8 calls this only while the view is armed): sidecar
+ * tracking + the game module's watch-range hook, invoked AFTER the store. */
+void gb_ws_wram_write_tap(struct GBContext* ctx, uint16_t addr, uint8_t val);
+extern void (*g_gbws_wram_write_hook)(struct GBContext* ctx, uint16_t addr, uint8_t val);
+extern uint16_t g_gbws_watch_lo;    /* inclusive; empty when lo > hi */
+extern uint16_t g_gbws_watch_hi;
+
 /* Current render width (native 160 when off). */
 int gb_ws_render_width(void);
 

@@ -133,6 +133,24 @@ std::optional<GameConfig> load_config(const std::string& path) {
         }
     }
 
+    // [[imm_override]] — reviewed ALU-immediate sites routed through
+    // gbrt_imm_override8() at runtime (opt-in enhancement chokepoints).
+    if (auto overrides = tbl["imm_override"].as_array()) {
+        for (auto& elem : *overrides) {
+            if (auto t = elem.as_table()) {
+                ImmOverrideConfig io{};
+                io.bank = static_cast<uint8_t>((*t)["bank"].value_or(int64_t{0}));
+                io.addr = static_cast<uint16_t>((*t)["addr"].value_or(int64_t{0}));
+                io.note = (*t)["note"].value_or(std::string{});
+                if (io.addr != 0) {
+                    config.imm_overrides.push_back(io);
+                } else {
+                    std::cerr << "Warning: skipping incomplete imm_override entry\n";
+                }
+            }
+        }
+    }
+
     // [[data_region]]
     if (auto regions = tbl["data_region"].as_array()) {
         for (auto& elem : *regions) {

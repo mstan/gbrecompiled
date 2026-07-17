@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,12 @@ struct GeneratorOptions {
 
     // Valid CRC32s for multi-version ROM support
     std::vector<uint32_t> valid_crcs;
+
+    // Reviewed ALU-immediate override sites (key = bank<<16 | guest PC).
+    // The emitter routes these instructions' immediate operands through
+    // gbrt_imm_override8() so an opt-in runtime layer can widen them;
+    // with no hook installed the original immediate is returned.
+    std::set<uint32_t> imm_override_sites;
 };
 
 /**

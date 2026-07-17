@@ -898,6 +898,14 @@ static void gbrt_restore_core_state(GBContext* ctx, const GBSavestateCoreState* 
     ctx->completed_frames = state->completed_frames;
 }
 
+/* [[imm_override]] runtime chokepoint (see gbrt.h). Emitted by the generator
+ * only at config-reviewed ALU-immediate sites; identity without a hook. */
+GBImmOverrideHook gbrt_imm_override_hook = NULL;
+
+uint8_t gbrt_imm_override8(GBContext* ctx, uint8_t bank, uint16_t pc, uint8_t orig) {
+    return gbrt_imm_override_hook ? gbrt_imm_override_hook(ctx, bank, pc, orig) : orig;
+}
+
 GBContext* gb_context_create(const GBConfig* config) {
     gbrt_load_ppu_trace_config();
 
@@ -2252,21 +2260,16 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         return;
     }
     if (addr < 0xD000) {
-        /* Widescreen OAM X16 sidecar: unwrap X-byte writes into the game's
-         * shadow OAM page as they happen (zero cost when the sidecar is off). */
-        if (g_gbws_oam_sidecar && (addr >> 8) == g_gbws_shadow_oam_page &&
-            (addr & 3) == 1 && (addr & 0xFF) < 0xA0) {
-            gb_ws_sidecar_track((addr & 0xFF) >> 2, value);
-        }
         ctx->wram[addr - 0xC000] = value;
+        /* Widescreen (opt-in): sidecar tracking + WRAM write watch, after the
+         * store so the hook can read a consistent RAM state. One predictable
+         * branch when the view is off. */
+        if (g_gbws_active) gb_ws_wram_write_tap(ctx, addr, value);
         return;
     }
     if (addr < 0xE000) {
-        if (g_gbws_oam_sidecar && (addr >> 8) == g_gbws_shadow_oam_page &&
-            (addr & 3) == 1 && (addr & 0xFF) < 0xA0) {
-            gb_ws_sidecar_track((addr & 0xFF) >> 2, value);
-        }
         ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)] = value;
+        if (g_gbws_active) gb_ws_wram_write_tap(ctx, addr, value);
         return;
     }
     if (addr < 0xFE00) { gb_write8(ctx, addr - 0x2000, value); return; }

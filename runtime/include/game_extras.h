@@ -90,6 +90,14 @@ int game_extended_view_bg_tile(struct GBContext *ctx, int screen_x,
 /* Return the game name for the window title. */
 const char *game_get_name(void);
 
+/* Return the launcher console identity for this game: "gb" (original Game Boy /
+ * DMG branding) or "gbc" (Game Boy Color branding). Consumed by the recomp-ui
+ * pre-boot launcher (launcher_ui_seam.c) to pick the platform label, theme, and
+ * controller/logo art. Default: "gbc" (the ecosystem is Game Boy Color; every
+ * color-capable and colorizable cart uses it). DMG-only titles (Tetris, Super
+ * Mario Land) override this to "gb" in their extras.c. */
+const char *game_get_platform(void);
+
 /* Handle a CLI argument. Return 1 if consumed, 0 to ignore. */
 int game_handle_arg(const char *arg, const char *next_arg);
 

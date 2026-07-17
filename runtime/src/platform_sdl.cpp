@@ -21,6 +21,9 @@
 #include "color_lut.h"  /* present-time screen-color LUT (opt-in, default raw) */
 extern "C" {
 #include "keybinds.h"
+#ifdef RECOMP_LAUNCHER
+#include "launcher_ui_seam.h"   /* gb_launcher_preboot() — recomp-ui pre-boot seam */
+#endif
 }
 
 /* Forward declaration for debug server context setter */
@@ -1213,6 +1216,10 @@ static std::string runtime_preferences_path(void) {
     return fs::path("runtime_prefs.ini").lexically_normal().string();
 }
 
+// recomp-ui launcher "Widescreen (experimental)" toggle, mirrored to the
+// video.widescreen pref. Drives the opt-in extended view via gb_ws_set_cli_request.
+static int g_pref_widescreen = 0;
+
 static void load_runtime_preferences(void) {
     set_default_audio_preferences();
     set_default_input_bindings();
@@ -1269,6 +1276,44 @@ static void load_runtime_preferences(void) {
                 }
                 if (strcmp(key, "audio.device_name") == 0) {
                     g_audio_target_device_name = value;
+                    continue;
+                }
+                /* recomp-ui launcher-controlled display settings (written by
+                 * the pre-boot seam; see launcher_ui_seam.c). Parsed here so a
+                 * launcher choice is applied on the very next boot — this runs
+                 * before the window is created below in gb_platform_init. */
+                if (strcmp(key, "window.scale") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 1 && parsed <= 8) {
+                        g_scale = (int)parsed;
+                        g_windowed_width = GB_SCREEN_WIDTH * g_scale;
+                        g_windowed_height = GB_SCREEN_HEIGHT * g_scale;
+                        g_game_viewport = {0, 0, g_windowed_width, g_windowed_height};
+                    }
+                    continue;
+                }
+                if (strcmp(key, "video.fullscreen") == 0) {
+                    g_fullscreen = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "video.linear_filter") == 0) {
+                    g_render_filter_mode = (strcmp(value, "0") != 0)
+                        ? GB_RENDER_FILTER_LINEAR : GB_RENDER_FILTER_NEAREST;
+                    continue;
+                }
+                if (strcmp(key, "video.palette") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0 && parsed < (int)IM_ARRAYSIZE(g_palette_names)) {
+                        g_palette_idx = (int)parsed;
+                    }
+                    continue;
+                }
+                if (strcmp(key, "video.widescreen") == 0) {
+                    g_pref_widescreen = (strcmp(value, "0") != 0);
+                    // Feed the opt-in extended-view request; gb_ws_arm() later
+                    // resolves it against the game's game_max_view_width(). Games
+                    // that haven't opted in stay native regardless.
+                    gb_ws_set_cli_request(g_pref_widescreen ? GB_WS_MAX_VIEW_WIDTH : 0);
                     continue;
                 }
                 if (strcmp(key, "ui.theme") == 0) {
@@ -1465,6 +1510,14 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.latency_ms=%u\n", g_audio_latency_ms);
     fprintf(file, "audio.volume_percent=%u\n", g_audio_volume_percent);
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
+    /* recomp-ui launcher-controlled display settings (round-trip with the
+     * pre-boot seam; see launcher_ui_seam.c). */
+    fprintf(file, "window.scale=%d\n", g_scale);
+    fprintf(file, "video.fullscreen=%d\n", g_fullscreen ? 1 : 0);
+    fprintf(file, "video.linear_filter=%d\n",
+            g_render_filter_mode == GB_RENDER_FILTER_LINEAR ? 1 : 0);
+    fprintf(file, "video.palette=%d\n", g_palette_idx);
+    fprintf(file, "video.widescreen=%d\n", g_pref_widescreen ? 1 : 0);
     fprintf(file, "ui.theme=%d\n", g_imgui_theme);
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
@@ -4509,6 +4562,23 @@ bool gb_platform_init(int scale) {
     g_last_guest_framebuffer_valid = false;
     g_present_count = 0;
     g_last_timing = {};
+
+#ifdef RECOMP_LAUNCHER
+    /* Pre-boot launcher (recomp-ui). Interactive runs only: skip benchmark,
+     * scripted replay, and any frame-dump/headless mode. Runs BEFORE the
+     * SDL_Init + load_runtime_preferences + window creation below, so the
+     * settings + keybinds it writes to runtime_prefs.ini are read moments
+     * later, and the ROM it writes to rom.cfg is picked up in game init. */
+    if (!g_benchmark_mode &&
+        g_script_count == 0 && g_dump_count == 0 &&
+        g_dump_present_count == 0 && g_dump_cycle_count == 0 &&
+        !env_flag_enabled("GBRECOMP_NO_LAUNCHER")) {
+        if (gb_launcher_preboot() == GB_LAUNCHER_QUIT) {
+            /* user closed the launcher window: clean exit, no game boot */
+            exit(0);
+        }
+    }
+#endif
 
     /* Load configurable keybinds */
     keybinds_init(NULL);

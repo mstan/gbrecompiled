@@ -69,3 +69,4 @@ SameBoy/
 testroms/
 boot_roms/
 # boot ROMs are copyrighted Nintendo BIOS — user-provided, never committed
+build-wt/

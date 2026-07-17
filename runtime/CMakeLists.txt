@@ -135,10 +135,12 @@ target_compile_features(gbrt PUBLIC c_std_11 cxx_std_17)
 # ---------------------------------------------------------------------------
 option(GBRECOMP_RECOMP_UI "Build the recomp-ui pre-boot launcher" ON)
 # Default assumes recomp-ui is a sibling of the gbcrecomp tree
-# (…/Projects/recomp-ui-wt-gbc), i.e. three levels up from this runtime dir
+# (…/Projects/recomp-ui), i.e. three levels up from this runtime dir
 # (runtime → gb-recompiled → gbcrecomp → Projects). Override with
-# -DRECOMP_UI_ROOT=… for other layouts (e.g. a git-worktree runtime).
-set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../recomp-ui-wt-gbc" CACHE PATH
+# -DRECOMP_UI_ROOT=… for other layouts (e.g. a git-worktree checkout). When a
+# generated game project sets RECOMP_UI_ROOT before add_subdirectory(GBRT_DIR),
+# that value wins (cache set is idempotent), keeping game + runtime on one root.
+set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../recomp-ui" CACHE PATH
     "Root of the recomp-ui launcher checkout")
 if(GBRECOMP_RECOMP_UI AND SDL2_FOUND AND EXISTS "${RECOMP_UI_ROOT}/src/recomp_launcher.h")
     set(RUI "${RECOMP_UI_ROOT}/src")

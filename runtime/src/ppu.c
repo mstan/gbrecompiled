@@ -6,6 +6,7 @@
 #include "ppu.h"
 #include "gbrt.h"
 #include "gbrt_debug.h"
+#include "gb_widescreen.h"
 #include "sgb.h"
 
 #include <string.h>
@@ -294,8 +295,26 @@ static void latch_scanline_registers(GBPPU* ppu) {
 
 void ppu_init(GBPPU* ppu) {
     memset(ppu, 0, sizeof(*ppu));
+    ppu->view_stride = GB_SCREEN_WIDTH;   /* native view until explicitly armed */
     ppu_reset(ppu, NULL);
     DBG_PPU("PPU initialized");
+}
+
+void ppu_set_view_margins(GBPPU* ppu, int extra_left, int extra_right) {
+    if (!ppu) return;
+    if (extra_left < 0) extra_left = 0;
+    if (extra_right < 0) extra_right = 0;
+    if (extra_left > GB_MAX_EXTRA_X) extra_left = GB_MAX_EXTRA_X;
+    if (extra_right > GB_MAX_EXTRA_X) extra_right = GB_MAX_EXTRA_X;
+    ppu->view_extra_left = extra_left;
+    ppu->view_extra_right = extra_right;
+    ppu->view_stride = GB_SCREEN_WIDTH + extra_left + extra_right;
+    /* Layout changed: clear everything to black until redrawn. */
+    memset(ppu->framebuffer, 0, sizeof(ppu->framebuffer));
+    memset(ppu->color_framebuffer, 0, sizeof(ppu->color_framebuffer));
+    for (size_t i = 0; i < GB_MAX_FRAMEBUFFER_SIZE; i++) {
+        ppu->rgb_framebuffer[i] = 0xFF000000u;
+    }
 }
 
 void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
@@ -312,7 +331,7 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
     bool lle_boot = (ctx && ctx->boot_rom_active);
 
     memset(ppu->framebuffer, 0, sizeof(ppu->framebuffer));
-    for (size_t i = 0; i < GB_FRAMEBUFFER_SIZE; i++) {
+    for (size_t i = 0; i < GB_MAX_FRAMEBUFFER_SIZE; i++) {
         ppu->color_framebuffer[i] = default_color;
         ppu->rgb_framebuffer[i] = cgb_mode ? rgb555_to_rgba(default_color) : dmg_palette_rgba[0];
     }
@@ -429,8 +448,10 @@ static void render_bg_segment(GBPPU* ppu,
                               int x_end) {
     uint8_t scanline = ppu->ly;
     uint8_t lcdc = ppu->lcdc;
-    uint8_t* bg_raw = ppu->bg_raw_line;
-    uint8_t* bg_priority = ppu->bg_priority_line;
+    const int xoff = ppu->view_extra_left;
+    const int row = (int)scanline * ppu->view_stride + xoff;
+    uint8_t* bg_raw = ppu->bg_raw_line + xoff;
+    uint8_t* bg_priority = ppu->bg_priority_line + xoff;
     bool cgb_mode = ppu_is_cgb_mode(ctx);
     bool cgb_compat_mode = ppu_is_cgb_compat_mode(ctx);
     bool bg_visible = cgb_mode ? true : ((lcdc & LCDC_BG_ENABLE) != 0);
@@ -439,14 +460,16 @@ static void render_bg_segment(GBPPU* ppu,
                          (ppu->wy <= scanline) &&
                          (cgb_mode || bg_visible);
 
-    if (x_start < 0) x_start = 0;
-    if (x_end > GB_SCREEN_WIDTH) x_end = GB_SCREEN_WIDTH;
+    if (x_start < -xoff) x_start = -xoff;
+    if (x_end > GB_SCREEN_WIDTH + ppu->view_extra_right) {
+        x_end = GB_SCREEN_WIDTH + ppu->view_extra_right;
+    }
     if (x_start >= x_end) return;
 
     if (!(lcdc & LCDC_LCD_ENABLE)) {
         for (int x = x_start; x < x_end; x++) {
-            ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = 0;
-            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_palette_rgb555[0];
+            ppu->framebuffer[row + x] = 0;
+            ppu->color_framebuffer[row + x] = dmg_palette_rgb555[0];
             bg_raw[x] = 0;
             bg_priority[x] = 0;
         }
@@ -462,7 +485,11 @@ static void render_bg_segment(GBPPU* ppu,
         uint8_t palette_number = 0;
         uint8_t tile_bank = 0;
         bool priority = false;
-        bool in_window = window_enable && (x >= (int)ppu->wx - 7);
+        /* The window is native-only presentation: WX is 8-bit (<=166) so it
+         * can never start in a margin, and extending it rightward would show
+         * unauthored window-map tiles. Margin columns always sample the BG. */
+        bool in_window = window_enable && (x >= (int)ppu->wx - 7) &&
+                         (x >= 0 && x < GB_SCREEN_WIDTH);
         if (in_window) ppu->win_rendered_line = true;
         uint16_t tilemap_addr;
         uint8_t tile_x;
@@ -477,8 +504,8 @@ static void render_bg_segment(GBPPU* ppu,
         int bit;
 
         if (!bg_visible && !in_window) {
-            ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = 0;
-            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_palette_rgb555[0];
+            ppu->framebuffer[row + x] = 0;
+            ppu->color_framebuffer[row + x] = dmg_palette_rgb555[0];
             bg_raw[x] = 0;
             bg_priority[x] = 0;
             continue;
@@ -518,10 +545,10 @@ static void render_bg_segment(GBPPU* ppu,
         bit = 7 - pixel_x;
         raw_color = (uint8_t)(((lo >> bit) & 1) | (((hi >> bit) & 1) << 1));
 
-        ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = cgb_mode
+        ppu->framebuffer[row + x] = cgb_mode
             ? raw_color
             : apply_palette(raw_color, ppu->bgp);
-        ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] =
+        ppu->color_framebuffer[row + x] =
             resolve_bg_color(ppu, ctx, palette_number, raw_color, ppu->bgp);
         bg_raw[x] = raw_color;
         bg_priority[x] = priority ? 1 : 0;
@@ -594,7 +621,13 @@ static void build_scanline_sprite_list(GBPPU* ppu, GBContext* ctx) {
             }
 
             sprites[sprite_count].oam_index = i;
-            sprites[sprite_count].screen_x = (int)sprite->x - 8;
+            /* Widescreen OAM X16 sidecar: consume the unwrapped 16-bit raw X
+             * (raw OAM domain) instead of the 8-bit byte, so sprites the game
+             * placed beyond the native edge land in the margins instead of
+             * wrapping. Vanilla decode when the sidecar is off. */
+            sprites[sprite_count].screen_x = g_gbws_oam_sidecar
+                ? (int)g_gbws_oam_x16[i] - 8
+                : (int)sprite->x - 8;
             sprites[sprite_count].x_pos = sprite->x;
             sprites[sprite_count].flags = sprite->flags;
             sprites[sprite_count].palette = cgb_mode
@@ -624,11 +657,23 @@ static void render_sprites_segment(GBPPU* ppu, GBContext* ctx, int x_start, int 
     uint8_t scanline = ppu->ly;
     const ScanlineSprite* sprites = ppu->scanline_sprites;
     int sprite_count = ppu->scanline_sprite_list_count;
-    const uint8_t* bg_raw = ppu->bg_raw_line;
-    const uint8_t* bg_priority = ppu->bg_priority_line;
+    const int xoff = ppu->view_extra_left;
+    const int row = (int)scanline * ppu->view_stride + xoff;
+    const uint8_t* bg_raw = ppu->bg_raw_line + xoff;
+    const uint8_t* bg_priority = ppu->bg_priority_line + xoff;
 
-    if (x_start < 0) x_start = 0;
-    if (x_end > GB_SCREEN_WIDTH) x_end = GB_SCREEN_WIDTH;
+    /* Sprites only reach the margins through the X16 sidecar. Without it a
+     * wrapped 8-bit X (e.g. an object just off-left stored as 0xE0) would
+     * ghost into the right margin, so clamp composite to the native span. */
+    if (g_gbws_oam_sidecar) {
+        if (x_start < -xoff) x_start = -xoff;
+        if (x_end > GB_SCREEN_WIDTH + ppu->view_extra_right) {
+            x_end = GB_SCREEN_WIDTH + ppu->view_extra_right;
+        }
+    } else {
+        if (x_start < 0) x_start = 0;
+        if (x_end > GB_SCREEN_WIDTH) x_end = GB_SCREEN_WIDTH;
+    }
     if (x_start >= x_end) return;
 
     /* OBJ enable sampled LIVE: dots drawn while OBJ is disabled show no sprite. */
@@ -677,8 +722,8 @@ static void render_sprites_segment(GBPPU* ppu, GBContext* ctx, int x_start, int 
                 }
             }
 
-            ppu->framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] = chosen_color;
-            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] =
+            ppu->framebuffer[row + screen_x] = chosen_color;
+            ppu->color_framebuffer[row + screen_x] =
                 resolve_obj_color(ppu, ctx, chosen_sprite->palette, chosen_color,
                                   chosen_sprite->palette ? ppu->obp1 : ppu->obp0);
         } else {
@@ -690,8 +735,8 @@ static void render_sprites_segment(GBPPU* ppu, GBContext* ctx, int x_start, int 
                 continue;
             }
 
-            ppu->framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] = shade;
-            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + screen_x] =
+            ppu->framebuffer[row + screen_x] = shade;
+            ppu->color_framebuffer[row + screen_x] =
                 resolve_obj_color(ppu, ctx, chosen_sprite->palette, chosen_color, dmg_palette_reg);
         }
     }
@@ -712,12 +757,65 @@ static void render_segment(GBPPU* ppu, GBContext* ctx, int x_end) {
     ppu->render_x = x_end;
 }
 
+/* Blank one margin span of the current scanline to black (fail-closed
+ * pillarbox / LCD-off / full-width-window lines). Range in output coords. */
+static void blank_margin_span(GBPPU* ppu, int x_start, int x_end) {
+    const int xoff = ppu->view_extra_left;
+    const int row = (int)ppu->ly * ppu->view_stride + xoff;
+    for (int x = x_start; x < x_end; x++) {
+        ppu->framebuffer[row + x] = 0;
+        ppu->color_framebuffer[row + x] = 0;   /* RGB555 black */
+        ppu->bg_raw_line[xoff + x] = 0;
+        ppu->bg_priority_line[xoff + x] = 0;
+    }
+}
+
+/* Widescreen: draw the margin columns of the current scanline. Margins have
+ * no hardware dot clock, so they render once per scanline with the end-of-
+ * mode-3 register state (a documented approximation). BG only, plus sidecar
+ * sprites; the window never extends here. Fail-closed cases go black. */
+static void render_view_margins(GBPPU* ppu, GBContext* ctx) {
+    const int l = ppu->view_extra_left;
+    const int r = ppu->view_extra_right;
+    bool lcd_on = (ppu->lcdc & LCDC_LCD_ENABLE) != 0;
+    /* A window that spans the whole native line (typical HUD bar) means the
+     * margins would sit beside HUD content while sampling world BG — fail
+     * closed to black for that scanline. */
+    bool window_full_line = (ppu->lcdc & LCDC_WINDOW_ENABLE) &&
+                            (ppu->wx <= 7) && (ppu->wy <= ppu->ly);
+    bool blank_left = !lcd_on || window_full_line ||
+                      g_gbws_pillarbox || g_gbws_pillarbox_left;
+    bool blank_right = !lcd_on || window_full_line ||
+                       g_gbws_pillarbox || g_gbws_pillarbox_right;
+
+    if (l > 0) {
+        if (blank_left) {
+            blank_margin_span(ppu, -l, 0);
+        } else {
+            render_bg_segment(ppu, ctx, -l, 0);
+            render_sprites_segment(ppu, ctx, -l, 0);
+        }
+    }
+    if (r > 0) {
+        if (blank_right) {
+            blank_margin_span(ppu, GB_SCREEN_WIDTH, GB_SCREEN_WIDTH + r);
+        } else {
+            render_bg_segment(ppu, ctx, GB_SCREEN_WIDTH, GB_SCREEN_WIDTH + r);
+            render_sprites_segment(ppu, ctx, GB_SCREEN_WIDTH, GB_SCREEN_WIDTH + r);
+        }
+    }
+}
+
 /* Finish the current scanline at mode-3 end: draw any BG/window + sprite pixels
  * not yet covered by the incremental segments, then advance the window line
  * counter once. */
 void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
     if (ppu->render_x < GB_SCREEN_WIDTH) {
         render_segment(ppu, ctx, GB_SCREEN_WIDTH);
+    }
+
+    if (ppu->view_extra_left > 0 || ppu->view_extra_right > 0) {
+        render_view_margins(ppu, ctx);
     }
 
     if (ppu->ly == 0) {
@@ -746,16 +844,17 @@ void ppu_render_scanline(GBPPU* ppu, GBContext* ctx) {
 
 static void convert_to_rgb(GBPPU* ppu) {
     static int convert_count = 0;
-    bool has_content = dbg_has_nonzero_pixels(ppu->framebuffer, GB_FRAMEBUFFER_SIZE);
+    int fb_size = ppu->view_stride * GB_SCREEN_HEIGHT;
+    bool has_content = dbg_has_nonzero_pixels(ppu->framebuffer, fb_size);
 
-    for (int i = 0; i < GB_FRAMEBUFFER_SIZE; i++) {
+    for (int i = 0; i < fb_size; i++) {
         ppu->rgb_framebuffer[i] = rgb555_to_rgba(ppu->color_framebuffer[i]);
     }
 
     convert_count++;
     if (convert_count <= 5 || (convert_count % 60 == 0)) {
         DBG_FRAME("Frame %d converted to RGB - has_content=%d", convert_count, has_content);
-        dbg_dump_framebuffer(ppu->framebuffer, GB_SCREEN_WIDTH);
+        dbg_dump_framebuffer(ppu->framebuffer, ppu->view_stride);
     }
 }
 

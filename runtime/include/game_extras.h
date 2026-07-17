@@ -59,6 +59,19 @@ int game_handle_debug_cmd(const char *cmd, int id, const char *json);
  * Return 1 if the game handled it (e.g., SRAM code), 0 to fall through. */
 int game_dispatch_override(struct GBContext *ctx, uint16_t addr);
 
+/* ---- Extended view (widescreen) capability ---- */
+
+/* Maximum view width this game supports (opt-in widescreen). Default 160 =
+ * not opted in; a game that supports the extended view returns up to
+ * GB_WS_MAX_VIEW_WIDTH (256). See gb_widescreen.h / docs/WIDESCREEN.md. */
+uint16_t game_max_view_width(void);
+
+/* Called exactly once, only after a non-native view width is authorized.
+ * The game installs its widescreen hooks here (sidecar arming, bound
+ * overrides, pillarbox policy). Default: no-op. */
+void game_extended_view_init(struct GBContext *ctx,
+                             uint32_t extra_left, uint32_t extra_right);
+
 /* ---- Info ---- */
 
 /* Return the game name for the window title. */

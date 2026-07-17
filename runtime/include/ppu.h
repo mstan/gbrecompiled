@@ -21,6 +21,15 @@ extern "C" {
 #define GB_SCREEN_HEIGHT   144
 #define GB_FRAMEBUFFER_SIZE (GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT)
 
+/* Opt-in extended horizontal view (widescreen): framebuffers are sized for
+ * the engine-max width so arming never reallocates. Native path keeps stride
+ * = GB_SCREEN_WIDTH and margins 0, so pixel offsets (and differential.c
+ * whole-array compares) stay byte-identical to the pre-widescreen layout.
+ * 48/side -> 256 total = 16:9 at 144 and exactly the BG map width. */
+#define GB_MAX_EXTRA_X          48
+#define GB_MAX_RENDER_WIDTH     (GB_SCREEN_WIDTH + 2 * GB_MAX_EXTRA_X)
+#define GB_MAX_FRAMEBUFFER_SIZE (GB_MAX_RENDER_WIDTH * GB_SCREEN_HEIGHT)
+
 /* Scanline timing (in cycles) */
 #define CYCLES_OAM_SCAN    80   /* Mode 2: OAM search */
 #define CYCLES_PIXEL_DRAW  172  /* Mode 3: Pixel transfer (variable) */
@@ -175,8 +184,9 @@ typedef struct GBPPU {
      * segment, so mid-mode-3 register writes (Mealybug m3_*) affect later dots. */
     int      render_x;               /* Next BG pixel to draw this scanline (0..160) */
     bool     win_rendered_line;      /* Window drawn on this scanline (window_line++) */
-    uint8_t  bg_raw_line[GB_SCREEN_WIDTH];      /* Persistent across segments */
-    uint8_t  bg_priority_line[GB_SCREEN_WIDTH];
+    uint8_t  bg_raw_line[GB_MAX_RENDER_WIDTH];  /* Persistent across segments;
+                                                 * indexed [view_extra_left + x] */
+    uint8_t  bg_priority_line[GB_MAX_RENDER_WIDTH];
 
     /* Sprite list for the current scanline: built once (OAM scan, latched OBJ
      * size), then composited per mode-3 segment with LIVE obj-enable + OBP0/OBP1.
@@ -185,14 +195,24 @@ typedef struct GBPPU {
     int      scanline_sprite_list_count;
     bool     sprite_list_built;      /* List built for this scanline yet? */
     
+    /* Extended-view geometry (host presentation state; margins 0 and stride
+     * GB_SCREEN_WIDTH when off = layout byte-identical to pre-widescreen).
+     * Row layout: [margin-left | native 0..159 | margin-right], index =
+     * scanline * view_stride + view_extra_left + x, x in [-left, 160+right).
+     * Serialized inside the whole-struct savestate dump but re-applied from
+     * host state after load (gb_ws_reapply). */
+    int view_extra_left;
+    int view_extra_right;
+    int view_stride;                 /* GB_SCREEN_WIDTH + left + right */
+
     /* Framebuffer (2-bit color indices) */
-    uint8_t framebuffer[GB_FRAMEBUFFER_SIZE];
+    uint8_t framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 
     /* 15-bit color framebuffer for CGB palettes */
-    uint16_t color_framebuffer[GB_FRAMEBUFFER_SIZE];
+    uint16_t color_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 
     /* RGB framebuffer for display (32-bit RGBA) */
-    uint32_t rgb_framebuffer[GB_FRAMEBUFFER_SIZE];
+    uint32_t rgb_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 
     /* CGB palette RAM */
     uint8_t bg_palette_ram[0x40];
@@ -255,6 +275,12 @@ void ppu_clear_frame_ready(GBPPU* ppu);
  * @brief Get the RGB framebuffer
  */
 const uint32_t* ppu_get_framebuffer(GBPPU* ppu);
+
+/**
+ * Set the extended-view margins (opt-in widescreen). Recomputes the stride
+ * and clears all framebuffers (the layout changes). 0/0 = native.
+ */
+void ppu_set_view_margins(GBPPU* ppu, int extra_left, int extra_right);
 
 /**
  * @brief Render a scanline

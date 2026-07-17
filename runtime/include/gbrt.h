@@ -900,6 +900,10 @@ void gb_platform_set_input_record_file(const char* path);
  */
 void gb_platform_set_dump_frames(const char* frames);
 
+/* Opt-in extended view (widescreen): CLI width request, resolved against the
+ * game capability at gb_platform_register_context. See gb_widescreen.h. */
+void gb_ws_set_cli_request(int width);
+
 /**
  * @brief Set guest-frame numbers to dump by elapsed guest CYCLES (frame N = N*70224
  * T-cycles), independent of rendered/VBlank frames. Robust for ROMs that keep the LCD

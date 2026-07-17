@@ -1,5 +1,6 @@
 #include "gbrt.h"
 #include "ppu.h"
+#include "gb_widescreen.h"
 #include "audio.h"
 #include "audio_stats.h"
 #include "platform_sdl.h"
@@ -1647,6 +1648,10 @@ bool gb_context_load_state_file(GBContext* ctx, const char* path) {
         return false;
     }
     gbrt_restore_core_state(ctx, &core_state);
+    /* Widescreen margins are host presentation state: the whole-struct PPU
+     * restore above overwrote them with whatever was saved, so re-apply the
+     * live geometry (and reset the sidecar; it repopulates at the next DMA). */
+    gb_ws_reapply(ctx);
 
     free(eram_data);
     free(wram_data);
@@ -2246,8 +2251,24 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         }
         return;
     }
-    if (addr < 0xD000) { ctx->wram[addr - 0xC000] = value; return; }
-    if (addr < 0xE000) { ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)] = value; return; }
+    if (addr < 0xD000) {
+        /* Widescreen OAM X16 sidecar: unwrap X-byte writes into the game's
+         * shadow OAM page as they happen (zero cost when the sidecar is off). */
+        if (g_gbws_oam_sidecar && (addr >> 8) == g_gbws_shadow_oam_page &&
+            (addr & 3) == 1 && (addr & 0xFF) < 0xA0) {
+            gb_ws_sidecar_track((addr & 0xFF) >> 2, value);
+        }
+        ctx->wram[addr - 0xC000] = value;
+        return;
+    }
+    if (addr < 0xE000) {
+        if (g_gbws_oam_sidecar && (addr >> 8) == g_gbws_shadow_oam_page &&
+            (addr & 3) == 1 && (addr & 0xFF) < 0xA0) {
+            gb_ws_sidecar_track((addr & 0xFF) >> 2, value);
+        }
+        ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)] = value;
+        return;
+    }
     if (addr < 0xFE00) { gb_write8(ctx, addr - 0x2000, value); return; }
     if (addr < 0xFEA0) {
         gb_sync(ctx);
@@ -2260,6 +2281,10 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
 
         ctx->oam[addr - 0xFE00] = value;
         gbrt_log_oam_write(ctx, addr, value, 1, "cpu");
+        /* Direct OAM poke bypasses DMA: vanilla sidecar placement for the slot. */
+        if (g_gbws_oam_sidecar && (addr & 3) == 1) {
+            gb_ws_sidecar_direct_oam((addr - 0xFE00) >> 2, value);
+        }
         return;
     }
     if (addr < 0xFF00) return;
@@ -2286,6 +2311,14 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
             ctx->dma.startup_delay = 8;  /* 2 M-cycles before bus blocking starts */
             ctx->dma.pending = 1;
             ctx->dma.active = 0;  /* not yet blocking the bus */
+            /* Widescreen sidecar: pair the render-side X16 array with the OAM
+             * this DMA delivers. Foreign-page DMA -> raw source X bytes. */
+            if (g_gbws_oam_sidecar && !gb_ws_sidecar_dma_match(value)) {
+                for (int ws_i = 0; ws_i < 40; ws_i++) {
+                    g_gbws_oam_x16[ws_i] = gb_direct_read_dma_source(
+                        ctx, (uint16_t)(((uint16_t)value << 8) + ws_i * 4 + 1));
+                }
+            }
             return;
         }
         if (addr == 0xFF02) {

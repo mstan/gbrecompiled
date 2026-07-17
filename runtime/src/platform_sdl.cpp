@@ -43,6 +43,7 @@ extern "C" void gb_debug_server_set_context(GBContext *ctx);
 
 #include "shader_pipeline.h"
 #include "game_extras.h"  /* game_draw_overlay() hook (no-op default in gbrt) */
+#include "gb_widescreen.h" /* opt-in extended view: render width + arming */
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -324,8 +325,8 @@ static const uint32_t g_palettes[][4] = {
     { 0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000 }, // B&W
     { 0xFFFFB000, 0xFFCB4F0E, 0xFF800000, 0xFF330000 }, // Amber (Phosphor)
 };
-static uint32_t g_lcd_off_framebuffer[GB_FRAMEBUFFER_SIZE];
-static uint32_t g_last_guest_framebuffer[GB_FRAMEBUFFER_SIZE];
+static uint32_t g_lcd_off_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
+static uint32_t g_last_guest_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 static bool g_lcd_off_framebuffer_initialized = false;
 static bool g_last_guest_framebuffer_valid = false;
 static uint64_t g_present_count = 0;
@@ -1967,7 +1968,7 @@ void gb_platform_check_cycle_dump(GBContext* ctx) {
                 char filename[160];
                 snprintf(filename, sizeof(filename), "%s_%05u.ppm",
                          g_screenshot_prefix, g_dump_cycle_framenums[i]);
-                save_ppm(filename, fb, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
+                save_ppm(filename, fb, gb_ws_render_width(), GB_SCREEN_HEIGHT,
                          (int)g_dump_cycle_framenums[i]);
             }
             g_dump_cycle_done[i] = true;
@@ -2038,7 +2039,7 @@ static int border_content_width(void) {
     if ((g_border_enabled && g_border_texture) || sgb_cart_border_active()) {
         return GB_BORDER_FULL_W;
     }
-    return GB_SCREEN_WIDTH;
+    return gb_ws_render_width();   /* 160 unless the extended view is armed */
 }
 
 static int border_content_height(void) {
@@ -2445,7 +2446,7 @@ static bool recreate_streaming_texture(void) {
      * set sane defaults so even pre-shader code paths see a usable
      * texture. */
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                 GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, 0,
+                 gb_ws_render_width(), GB_SCREEN_HEIGHT, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -2639,7 +2640,7 @@ static void ensure_lcd_off_framebuffer(void) {
         return;
     }
 
-    for (int i = 0; i < GB_FRAMEBUFFER_SIZE; i++) {
+    for (int i = 0; i < GB_MAX_FRAMEBUFFER_SIZE; i++) {
         g_lcd_off_framebuffer[i] = 0xFFE0F8D0;
     }
 
@@ -2665,7 +2666,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (frame_is_selected_for_dump(g_dump_frames, g_dump_count, (uint32_t)g_frame_count)) {
             char filename[128];
             snprintf(filename, sizeof(filename), "%s_%05d.ppm", g_screenshot_prefix, g_frame_count);
-            save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
+            save_ppm(filename, framebuffer, gb_ws_render_width(), GB_SCREEN_HEIGHT, g_frame_count);
         }
     }
 
@@ -2677,7 +2678,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                  g_screenshot_prefix,
                  g_frame_count,
                  (unsigned long long)g_present_count);
-        save_ppm(filename, framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, g_frame_count);
+        save_ppm(filename, framebuffer, gb_ws_render_width(), GB_SCREEN_HEIGHT, g_frame_count);
     }
 
     if (g_benchmark_mode || g_app_suspended || !g_gl_context) {
@@ -2705,7 +2706,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     if (count_guest_frame && g_frame_count <= 3) {
         bool has_content = false;
         uint32_t white = 0xFFE0F8D0;
-        for (int i = 0; i < GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT; i++) {
+        for (int i = 0; i < gb_ws_render_width() * GB_SCREEN_HEIGHT; i++) {
             if (framebuffer[i] != white) {
                 has_content = true;
                 break;
@@ -2738,7 +2739,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
      * override (Original / Pocket / Plasma) is applied during the same
      * pass since we're touching every pixel anyway. */
     double upload_start_ms = sdl_now_ms();
-    static uint32_t s_upload_buf[GB_FRAMEBUFFER_SIZE];
+    static uint32_t s_upload_buf[GB_MAX_FRAMEBUFFER_SIZE];
     {
         const uint32_t* src = framebuffer;
         /* Present-time screen-color LUT (opt-in via GBCRECOMP_SCREEN; default
@@ -2750,9 +2751,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             g_color_lut_resolved = true;
         }
         if (g_color_lut && !color_lut_is_passthrough(g_color_lut)) {
-            static uint32_t s_lut_buf[GB_FRAMEBUFFER_SIZE];
+            static uint32_t s_lut_buf[GB_MAX_FRAMEBUFFER_SIZE];
             color_lut_map_argb8888(g_color_lut, framebuffer, s_lut_buf,
-                                   GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
+                                   gb_ws_render_width(), GB_SCREEN_HEIGHT);
             src = s_lut_buf;
         }
         /* Match the actual post-conversion DMG-green values produced by
@@ -2790,7 +2791,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         const int16_t* cc = (g_color_correction == 1) ? cc_gbc :
                             (g_color_correction == 2) ? cc_gba : NULL;
 
-        for (int i = 0; i < GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT; i++) {
+        for (int i = 0; i < gb_ws_render_width() * GB_SCREEN_HEIGHT; i++) {
             uint32_t c = src[i];
             if (pal) {
                 if      (c == orig[0]) c = pal[0];
@@ -2817,7 +2818,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     }
     glBindTexture(GL_TEXTURE_2D, g_game_tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                    GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
+                    gb_ws_render_width(), GB_SCREEN_HEIGHT,
                     GL_RGBA, GL_UNSIGNED_BYTE, s_upload_buf);
     glBindTexture(GL_TEXTURE_2D, 0);
     g_last_timing.upload_ms = sdl_now_ms() - upload_start_ms;
@@ -2881,7 +2882,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         } else {
             gb_shader_pipeline_draw(g_shader_pipeline,
                                     g_game_tex,
-                                    GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
+                                    gb_ws_render_width(), GB_SCREEN_HEIGHT,
                                     vp_x, vp_y, vp_w, vp_h,
                                     draw_w, draw_h);
         }
@@ -5602,6 +5603,15 @@ void gb_platform_register_context(GBContext* ctx) {
     /* Initialize TCP debug server */
     gb_debug_server_set_context(ctx);
     gb_debug_server_init(0); /* default port 4370 */
+
+    /* Opt-in extended view (widescreen): resolve the width request against
+     * the game capability. SDL path only — differential/cosim runs never
+     * arm, so verify output stays native and byte-identical. */
+    gb_ws_arm(ctx);
+    if (g_gbws_active) {
+        recreate_streaming_texture();
+        apply_window_scale_preset();
+    }
 }
 
 #else  /* !GB_HAS_SDL2 */

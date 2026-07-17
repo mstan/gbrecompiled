@@ -31,6 +31,23 @@ color-correction matrices (`cc_gbc`/`cc_gba`, gated by the in-app
 compound. The LUT alone is the intended path — leave color-correction off when
 using `GBCRECOMP_SCREEN`.
 
+## Shipped framework (in master @ 4b28d39) — extended horizontal view
+
+Merged 2026-07-16. The engine and recompiler now contain a game-gated
+widescreen layer, but no checked-in game enables it. Normal builds therefore
+remain 160×144, and a width request is rejected unless a game supplies both
+extended-view hooks. The `GBCRECOMP_WS_WIP=1` escape hatch is explicitly a
+developer diagnostics mode, not a supported game opt-in.
+
+| Enhancement | Gate | What it does | Perceived value |
+|---|---|---|---|
+| **Extended horizontal view** | Game capability plus `--view-width` or `GBCRECOMP_VIEW_WIDTH`; default OFF | Expands the renderer to at most 256×144, samples the existing wrapping BG tilemap in the margins, keeps the window native, and carries unwrapped 16-bit sprite X positions through an OAM sidecar. Reviewed ALU-immediate sites can be routed through a game hook for wider object culling without patching generated C. Unsupported or unsafe scenes fail closed to pillarbox. | **High potential, experimental.** MMX2 already renders authored level art at 16:9 in a local game module. Remaining blockers are stale tilemap columns beyond the game streamer lead, scene gating, and live-play validation of enemies, shots, bosses, and savestates. |
+
+The layer is presentation-only when armed and absent from differential/cosim.
+At native width its framebuffer stride, generated behavior, and dumps remain
+byte-identical. See `docs/WIDESCREEN.md` for the invariants, MMX2 reverse-
+engineering bindings, and validation matrix.
+
 ## Follow-up enhancement work (not started) — with perceived value
 
 1. **Per-voice float PSG re-render** — re-render each of the 4 voices from the

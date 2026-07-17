@@ -221,3 +221,13 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for the full recompilation test report.
 | EXCEPTION | 7 | 0.44% |
 
 > **Note:** Recompilation success means the ROM was successfully translated to C. It does not guarantee the game is fully playable — runtime correctness depends on entry point coverage and runtime accuracy.
+
+---
+
+<p align="center">
+  <sub><b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp</sub>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+</p>

@@ -217,6 +217,17 @@ typedef struct GBPPU {
     /* CGB palette RAM */
     uint8_t bg_palette_ram[0x40];
     uint8_t obj_palette_ram[0x40];
+
+    /* Widescreen margins are rendered after the native dot stream. Games may
+     * update palettes during a frame, so sampling the then-current palette on
+     * every synthetic scanline can turn otherwise solid margin tiles into
+     * flickering horizontal bands. Armed views take one frame-stable palette
+     * snapshot at line 0; native pixels continue to use cycle-live state. */
+    uint8_t ws_margin_bg_palette_ram[0x40];
+    uint8_t ws_margin_obj_palette_ram[0x40];
+    uint8_t ws_margin_bgp;
+    uint8_t ws_margin_obp0;
+    uint8_t ws_margin_obp1;
     
     /* Frame complete flag */
     bool frame_ready;

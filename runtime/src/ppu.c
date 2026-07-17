@@ -404,35 +404,35 @@ void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
  * Rendering
  * ========================================================================== */
 
-static uint16_t resolve_bg_color(const GBPPU* ppu,
-                                 const GBContext* ctx,
+static uint16_t resolve_bg_color(const GBContext* ctx,
+                                 const uint8_t* palette_ram,
                                  uint8_t palette_number,
                                  uint8_t raw_color,
                                  uint8_t dmg_palette_reg) {
     if (ppu_is_cgb_mode(ctx)) {
-        return read_palette_color(ppu->bg_palette_ram, palette_number, raw_color);
+        return read_palette_color(palette_ram, palette_number, raw_color);
     }
 
     if (ppu_is_cgb_compat_mode(ctx)) {
         uint8_t shade = apply_palette(raw_color, dmg_palette_reg);
-        return read_palette_color(ppu->bg_palette_ram, 0, shade);
+        return read_palette_color(palette_ram, 0, shade);
     }
 
     return dmg_palette_rgb555[apply_palette(raw_color, dmg_palette_reg)];
 }
 
-static uint16_t resolve_obj_color(const GBPPU* ppu,
-                                  const GBContext* ctx,
+static uint16_t resolve_obj_color(const GBContext* ctx,
+                                  const uint8_t* palette_ram,
                                   uint8_t palette_number,
                                   uint8_t raw_color,
                                   uint8_t dmg_palette_reg) {
     if (ppu_is_cgb_mode(ctx)) {
-        return read_palette_color(ppu->obj_palette_ram, palette_number, raw_color);
+        return read_palette_color(palette_ram, palette_number, raw_color);
     }
 
     if (ppu_is_cgb_compat_mode(ctx)) {
         uint8_t shade = apply_palette(raw_color, dmg_palette_reg);
-        return read_palette_color(ppu->obj_palette_ram, palette_number, shade);
+        return read_palette_color(palette_ram, palette_number, shade);
     }
 
     return dmg_palette_rgb555[apply_palette(raw_color, dmg_palette_reg)];
@@ -482,6 +482,11 @@ static void render_bg_segment(GBPPU* ppu,
     }
 
     for (int x = x_start; x < x_end; x++) {
+        bool in_margin = x < 0 || x >= GB_SCREEN_WIDTH;
+        const uint8_t* bg_palette_ram = in_margin
+            ? ppu->ws_margin_bg_palette_ram
+            : ppu->bg_palette_ram;
+        uint8_t bgp = in_margin ? ppu->ws_margin_bgp : ppu->bgp;
         uint8_t raw_color = 0;
         uint8_t palette_number = 0;
         uint8_t tile_bank = 0;
@@ -566,9 +571,10 @@ static void render_bg_segment(GBPPU* ppu,
 
         ppu->framebuffer[row + x] = cgb_mode
             ? raw_color
-            : apply_palette(raw_color, ppu->bgp);
+            : apply_palette(raw_color, bgp);
         ppu->color_framebuffer[row + x] =
-            resolve_bg_color(ppu, ctx, palette_number, raw_color, ppu->bgp);
+            resolve_bg_color(ctx, bg_palette_ram, palette_number,
+                             raw_color, bgp);
         bg_raw[x] = raw_color;
         bg_priority[x] = priority ? 1 : 0;
     }
@@ -701,6 +707,10 @@ static void render_sprites_segment(GBPPU* ppu, GBContext* ctx, int x_start, int 
     }
 
     for (int screen_x = x_start; screen_x < x_end; screen_x++) {
+        bool in_margin = screen_x < 0 || screen_x >= GB_SCREEN_WIDTH;
+        const uint8_t* obj_palette_ram = in_margin
+            ? ppu->ws_margin_obj_palette_ram
+            : ppu->obj_palette_ram;
         const ScanlineSprite* chosen_sprite = NULL;
         uint8_t chosen_color = 0;
 
@@ -743,11 +753,16 @@ static void render_sprites_segment(GBPPU* ppu, GBContext* ctx, int x_start, int 
 
             ppu->framebuffer[row + screen_x] = chosen_color;
             ppu->color_framebuffer[row + screen_x] =
-                resolve_obj_color(ppu, ctx, chosen_sprite->palette, chosen_color,
-                                  chosen_sprite->palette ? ppu->obp1 : ppu->obp0);
+                resolve_obj_color(ctx, obj_palette_ram,
+                                  chosen_sprite->palette, chosen_color,
+                                  chosen_sprite->palette
+                                      ? (in_margin ? ppu->ws_margin_obp1 : ppu->obp1)
+                                      : (in_margin ? ppu->ws_margin_obp0 : ppu->obp0));
         } else {
             uint8_t bg_color = bg_raw[screen_x];
-            uint8_t dmg_palette_reg = chosen_sprite->palette ? ppu->obp1 : ppu->obp0;
+            uint8_t dmg_palette_reg = chosen_sprite->palette
+                ? (in_margin ? ppu->ws_margin_obp1 : ppu->obp1)
+                : (in_margin ? ppu->ws_margin_obp0 : ppu->obp0);
             uint8_t shade = apply_palette(chosen_color, dmg_palette_reg);
 
             if (chosen_sprite->behind_bg && bg_color != 0) {
@@ -756,7 +771,9 @@ static void render_sprites_segment(GBPPU* ppu, GBContext* ctx, int x_start, int 
 
             ppu->framebuffer[row + screen_x] = shade;
             ppu->color_framebuffer[row + screen_x] =
-                resolve_obj_color(ppu, ctx, chosen_sprite->palette, chosen_color, dmg_palette_reg);
+                resolve_obj_color(ctx, obj_palette_ram,
+                                  chosen_sprite->palette, chosen_color,
+                                  dmg_palette_reg);
         }
     }
 }
@@ -804,7 +821,16 @@ static void render_view_margins(GBPPU* ppu, GBContext* ctx) {
     bool blank_left;
     bool blank_right;
 
-    if (ppu->ly == 0) game_extended_view_update(ctx);
+    if (ppu->ly == 0) {
+        game_extended_view_update(ctx);
+        memcpy(ppu->ws_margin_bg_palette_ram, ppu->bg_palette_ram,
+               sizeof(ppu->ws_margin_bg_palette_ram));
+        memcpy(ppu->ws_margin_obj_palette_ram, ppu->obj_palette_ram,
+               sizeof(ppu->ws_margin_obj_palette_ram));
+        ppu->ws_margin_bgp = ppu->bgp;
+        ppu->ws_margin_obp0 = ppu->obp0;
+        ppu->ws_margin_obp1 = ppu->obp1;
+    }
 
     lcd_on = (ppu->lcdc & LCDC_LCD_ENABLE) != 0;
     window_full_line = (ppu->lcdc & LCDC_WINDOW_ENABLE) &&

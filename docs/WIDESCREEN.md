@@ -140,8 +140,9 @@ Mirrors `nesrecomp/runner/src/runtime.c:1184-1301`:
 
 ## MMX2 game module (`Megaman Xtreme 2/extras.c`)
 
-Policy mirrors SMB's classification: **vanilla spawns + widened culling**,
-sidecar for sprites, fail-closed gameplay-mode gate, HUD pinned.
+Policy is **vanilla spawns + vanilla culling**, sidecar for sprites,
+fail-closed gameplay-mode gate, HUD pinned. MMX2's stock horizontal object
+window already encloses the complete 256-pixel presentation window.
 
 Game-specific bindings (from the generated-C RE pass; verify live before
 shipping):
@@ -152,9 +153,9 @@ shipping):
 | Camera Y world (16-bit) | `0xCA05/06`; SCY shadow `0xCADF` |
 | Shadow OAM | page `0xC2` (DMA write `01:4a34`); OAM cursor `0xCAD5`, overflow flag `0xCAD6` |
 | Sidecar context | **`0xCB80/0xCB81` = current draw object's 16-bit screen X** (lo/hi), `0xCB82` = screen Y — published by the game itself before the metasprite writer `func_1320 @ 00:1323` adds per-tile offsets to the low byte. Context publish = read hook on `0xCB80` (or entry of the OAM-build dispatcher `00:12db`). |
-| On-screen cull (shared by draw-skip, despawn, AND buster shots) | `func_34d6 @ 00:34d6`: on-screen iff `(relX+0x40) < 0x138` → relX ∈ [−64, +248) (and `(relY+0x40) < 0x12C`). Widen via `[[imm_override]]`: `ADD A,$40 @ 00:34e9` → `0x40+extra_left`; `SUB $38 @ 00:34f2` (low byte of 0x138) → `0x38+extra_left+extra_right` (no carry for extras ≤ 96, high-byte `SBC $01` untouched). |
+| On-screen cull (shared by draw-skip, despawn, AND buster shots) | `func_34d6 @ 00:34d6`: on-screen iff `(relX+0x40) < 0x138` → relX ∈ [−64, +248) (and `(relY+0x40) < 0x12C`). The 256-pixel view is [−48,+208), leaving 16 pixels of native guard on the left and 40 on the right. The reviewed `[[imm_override]]` sites are deliberately not enabled: widening to [−112,+296) only increases active-object/OAM pressure. |
 | HUD | Window layer: `WY←0xCAE1 @ 00:0420`, `WX←0xCAE2 @ 00:0425`. Pinned native by construction (engine renders window only in native columns). |
-| Spawns | Column-streaming driven (`func_22af @ 00:22af` camera-crossing detector → `func_1779` loaders). **Left vanilla** (SMB policy: native spawns + wide culling); margin enemies appear once their column streams — accepted pop-in at the streaming edge. |
+| Spawns | Column-streaming driven (`func_22af @ 00:22af` camera-crossing detector → `func_1779` loaders). Left vanilla; margin enemies appear once their column streams. |
 | Object fields | X `+8/+9`, Y `+5/+6`, active `+0`, flags `+0x0F`, sprite slot `+0x44` (entity page in HRAM `0xFFA2`) |
 
 Unconfirmed (flagged by RE, verify in-emulator): no standalone spawn-list
@@ -209,13 +210,26 @@ called only from the already-armed margin path. The tile-source hook is queried
 only for margin pixels and never mutates guest VRAM; the native framebuffer and
 default game behavior are unchanged.
 
+### Frame-stable margin palettes
+
+Synthetic columns do not have hardware dot timing. Sampling CGB palette RAM at
+each scanline's mode-3 end exposed MMX2's within-frame palette changes as
+flickering horizontal bands in otherwise solid margin tiles. Armed views now
+snapshot BG/OBJ palette RAM plus the DMG palette registers on line 0 and use
+that stable copy only for synthetic margin pixels. Native pixels retain their
+cycle-live palette behavior, and the snapshot is untouched at native width.
+The MMX2 module likewise snapshots its 16-bit camera X/Y on line 0; consulting
+live guest camera fields in every later scanline had torn scrolling margins
+into intermittent vertical slivers.
+
 ## Phases
 
 1. **Engine framework**: shipped wide render, sidecar, capability gate,
    per-frame update hook, and width-aware presentation.
-2. **Reviewed generated hook**: shipped `[[imm_override]]` for the shared MMX2
-   cull bounds; no generated C edits.
+2. **Reviewed generated hook**: the `[[imm_override]]` contract remains
+   available, but MMX2 does not enable it because its native cull already
+   covers 256 pixels; no generated C edits.
 3. **MMX2 module**: local opt-in module now includes a validated synthetic
-   margin cache plus sprite sidecar and wider culling.
+   margin cache plus sprite sidecar and native-pressure culling.
 4. **Remaining validation**: broader live play (enemies, shots, bosses,
    savestates) and optional full-width dialogue/window work.

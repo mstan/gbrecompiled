@@ -5575,22 +5575,13 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
                                                      sha->second.c_str());
             }
         }
-        auto sc = prefs.find("sgb_colors");
-        if (sc != prefs.end()) {
-            g_sgb_colors_pref = (sc->second != "0");
-            if (ctx && ctx->sgb) {
-                gb_sgb_set_display_palettes((GBSgbState*)ctx->sgb,
-                                            g_sgb_colors_pref);
-            }
-        }
-        auto sb = prefs.find("sgb_border");
-        if (sb != prefs.end()) {
-            g_sgb_cart_border_enabled = (sb->second != "0");
-            if (ctx && ctx->sgb) {
-                gb_sgb_set_display_border((GBSgbState*)ctx->sgb,
-                                          g_sgb_cart_border_enabled);
-            }
-        }
+        /* SGB colors / cart border are NOT restored from the per-game pref here:
+         * the launcher's "Screen model" choice (written to runtime_prefs.ini as
+         * sgb.colors / sgb.cart_border and applied by load_runtime_preferences)
+         * is authoritative at launch. An in-game SGB toggle still takes effect
+         * live and persists to runtime_prefs.ini, so it is respected during the
+         * session and reflected the next time the launcher opens — but it never
+         * shadows a fresh launcher choice at boot. */
 #ifdef GBRT_HAVE_GBCAM
         /* Per-game camera device preference. Gets bridged into the gbcam
          * backend by setting GBCAM_DEVICE so the cart's lazy first-open

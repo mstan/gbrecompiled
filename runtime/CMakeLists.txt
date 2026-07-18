@@ -164,6 +164,7 @@ if(GBRECOMP_RECOMP_UI AND SDL2_FOUND AND EXISTS "${RECOMP_UI_ROOT}/src/recomp_la
         ${RUI}/consoles/psx/memcard_format.c
         ${RUI}/consoles/psx/psx_binds.c
         ${RUI}/consoles/genesis/genesis_binds.c
+        ${RUI}/consoles/nes/nes_binds.c
         ${RUI}/consoles/gb/gb_binds.c
         # recomp-ui's ImGui backend glue (reuses gbrt's vendored ImGui)
         ${RUI}/common/backends/imgui/launcher_imgui.cpp

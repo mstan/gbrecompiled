@@ -144,7 +144,15 @@ int gb_launcher_preboot(void) {
     ls.window_scale  = seam_read_int(prefs_path, "window.scale", 5);
     ls.fullscreen    = seam_read_int(prefs_path, "video.fullscreen", 0);
     ls.linear_filter = seam_read_int(prefs_path, "video.linear_filter", 0);
-    ls.screen_kind   = seam_read_int(prefs_path, "video.palette", 0);
+    /* Screen model folds the DMG palette (0..4) and the Super Game Boy models
+     * (5 = colors+border, 6 = colors, no border) into one cycle. Reconstruct the
+     * unified index from the split runtime prefs. Keep the SGB indices in sync
+     * with kGbScreenKindNames / LNG_GB_SCREEN_KIND_SGB* in recomp-ui gb_profile.h. */
+    if (seam_read_int(prefs_path, "sgb.colors", 0)) {
+        ls.screen_kind = seam_read_int(prefs_path, "sgb.cart_border", 1) ? 5 : 6;
+    } else {
+        ls.screen_kind = seam_read_int(prefs_path, "video.palette", 0);
+    }
     ls.enable_audio  = 1;
     ls.audio_freq    = 32768;
     ls.volume        = seam_read_int(prefs_path, "audio.volume_percent", 100);
@@ -224,7 +232,21 @@ int gb_launcher_preboot(void) {
     seam_upsert_int(prefs_path, "window.scale",         ls.window_scale > 0 ? ls.window_scale : 5);
     seam_upsert_int(prefs_path, "video.fullscreen",     ls.fullscreen ? 1 : 0);
     seam_upsert_int(prefs_path, "video.linear_filter",  ls.linear_filter ? 1 : 0);
-    seam_upsert_int(prefs_path, "video.palette",        ls.screen_kind);
+    /* Screen model -> split runtime prefs. Models 0..4 are DMG palettes (SGB
+     * colorization off); 5/6 are the Super Game Boy models (colors on, border
+     * on/off). Keep the DMG palette index stable across an SGB round-trip so
+     * switching back to a DMG model restores the previous palette. */
+    if (ls.screen_kind >= 5) {
+        seam_upsert_int(prefs_path, "sgb.colors",      1);
+        seam_upsert_int(prefs_path, "sgb.cart_border", ls.screen_kind == 5 ? 1 : 0);
+    } else {
+        seam_upsert_int(prefs_path, "video.palette",   ls.screen_kind);
+        seam_upsert_int(prefs_path, "sgb.colors",      0);
+        /* A DMG model is the plain Game Boy look: no SGB colorization AND no SGB
+         * cart border (otherwise the runtime default / a prior SGB choice leaves
+         * the border on over a DMG-green screen). */
+        seam_upsert_int(prefs_path, "sgb.cart_border", 0);
+    }
     seam_upsert_int(prefs_path, "audio.volume_percent", ls.volume);
     seam_upsert_int(prefs_path, "video.widescreen",     ls.widescreen ? 1 : 0);
     seam_upsert_int(prefs_path, "launcher.skip",        ls.skip_launcher ? 1 : 0);

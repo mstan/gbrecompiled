@@ -230,7 +230,17 @@ int gb_launcher_preboot(void) {
      * moments later in gb_platform_init) picks them up. Keybinds were written
      * live by the gb bridge during the session. */
     seam_upsert_int(prefs_path, "window.scale",         ls.window_scale > 0 ? ls.window_scale : 5);
-    seam_upsert_int(prefs_path, "video.fullscreen",     ls.fullscreen ? 1 : 0);
+    /* Tri-state (0 off / 1 borderless / 2 exclusive) — persist the value as
+     * chosen in recomp-ui verbatim. Clamp defensively so a future ABI change
+     * or stray value can't write something the runtime's own clamp (in
+     * platform_sdl.cpp's video.fullscreen pref load) would otherwise have to
+     * silently correct. Previously this collapsed to a bool (`? 1 : 0`),
+     * which downgraded "Exclusive" (2) back to "Borderless" (1) on every
+     * launcher round-trip. */
+    int fullscreen_mode = ls.fullscreen;
+    if (fullscreen_mode < 0) fullscreen_mode = 0;
+    if (fullscreen_mode > 2) fullscreen_mode = 2;
+    seam_upsert_int(prefs_path, "video.fullscreen",     fullscreen_mode);
     seam_upsert_int(prefs_path, "video.linear_filter",  ls.linear_filter ? 1 : 0);
     /* Screen model -> split runtime prefs. Models 0..4 are DMG palettes (SGB
      * colorization off); 5/6 are the Super Game Boy models (colors on, border

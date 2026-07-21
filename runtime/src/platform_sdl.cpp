@@ -115,7 +115,14 @@ static int g_color_correction = 0;
 static bool g_smooth_lcd_transitions = true;
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
-static bool g_fullscreen = false;
+/* Tri-state fullscreen: 0 off (windowed), 1 borderless
+ * (SDL_WINDOW_FULLSCREEN_DESKTOP), 2 exclusive (SDL_WINDOW_FULLSCREEN, real
+ * display-mode change). Mirrors recomp-ui's universal "video.fullscreen"
+ * pref and the SNES/Genesis runtimes' g_config.fullscreen /
+ * g_app_config.fullscreen. Boolean "is fullscreen active" checks below use
+ * `g_fullscreen_mode != 0` rather than a separate bool so there's a single
+ * source of truth. */
+static int g_fullscreen_mode = 0;
 static bool g_app_suspended = false;
 static bool g_renderer_reset_pending = false;
 
@@ -315,6 +322,11 @@ static const char* g_render_scaling_mode_names[] = {
 static const char* g_render_filter_names[] = {
     "Nearest",
     "Linear",
+};
+static const char* g_fullscreen_mode_names[] = {
+    "Off",
+    "Borderless",
+    "Exclusive",
 };
 static const uint32_t g_palettes[][4] = {
     { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 }, // DMG
@@ -571,11 +583,15 @@ static bool env_flag_enabled(const char* name) {
            strcmp(value, "ON") == 0;
 }
 
-static bool platform_default_fullscreen(void) {
+/* Default fullscreen mode for a fresh install / "Reset to Defaults".
+ * Android has no meaningful windowed mode, so it defaults to borderless
+ * (matches the pre-tri-state behavior, which always used
+ * SDL_WINDOW_FULLSCREEN_DESKTOP there). Desktop defaults to windowed. */
+static int platform_default_fullscreen_mode(void) {
 #if defined(__ANDROID__)
-    return true;
+    return 1;
 #else
-    return false;
+    return 0;
 #endif
 }
 
@@ -1293,7 +1309,15 @@ static void load_runtime_preferences(void) {
                     continue;
                 }
                 if (strcmp(key, "video.fullscreen") == 0) {
-                    g_fullscreen = (strcmp(value, "0") != 0);
+                    /* Tri-state (0 off / 1 borderless / 2 exclusive). Clamp
+                     * so a stray/garbled value can't slip a bad SDL flag
+                     * combo past set_fullscreen_mode()'s own clamp. Accepts
+                     * legacy "0"/"1" bool values from pre-tri-state prefs
+                     * files unchanged (0 stays off, 1 stays borderless). */
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed < 0) parsed = 0;
+                    if (parsed > 2) parsed = 2;
+                    g_fullscreen_mode = (int)parsed;
                     continue;
                 }
                 if (strcmp(key, "video.linear_filter") == 0) {
@@ -1513,7 +1537,7 @@ static void save_runtime_preferences(void) {
     /* recomp-ui launcher-controlled display settings (round-trip with the
      * pre-boot seam; see launcher_ui_seam.c). */
     fprintf(file, "window.scale=%d\n", g_scale);
-    fprintf(file, "video.fullscreen=%d\n", g_fullscreen ? 1 : 0);
+    fprintf(file, "video.fullscreen=%d\n", g_fullscreen_mode);
     fprintf(file, "video.linear_filter=%d\n",
             g_render_filter_mode == GB_RENDER_FILTER_LINEAR ? 1 : 0);
     fprintf(file, "video.palette=%d\n", g_palette_idx);
@@ -2425,7 +2449,7 @@ static void apply_window_scale_preset(void) {
     g_windowed_width = border_content_width() * g_scale;
     g_windowed_height = border_content_height() * g_scale;
 
-    if (g_window && !g_fullscreen) {
+    if (g_window && g_fullscreen_mode == 0) {
         SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
         SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
@@ -2461,21 +2485,35 @@ static void apply_border_change(void) {
     apply_window_scale_preset();
 }
 
-static void set_fullscreen_enabled(bool enabled) {
-    if (!g_window || g_fullscreen == enabled) {
+/* Apply a fullscreen mode (0 off / 1 borderless / 2 exclusive). Handles all
+ * three transition directions, including switching directly between the two
+ * fullscreen modes (borderless <-> exclusive) without passing back through
+ * windowed. */
+static void set_fullscreen_mode(int mode) {
+    if (mode < 0 || mode > 2) {
+        mode = 0;
+    }
+    if (!g_window || g_fullscreen_mode == mode) {
         return;
     }
 
-    if (enabled) {
-        SDL_GetWindowSize(g_window, &g_windowed_width, &g_windowed_height);
-        if (SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) {
-            g_fullscreen = true;
-        }
-    } else {
+    if (mode == 0) {
         if (SDL_SetWindowFullscreen(g_window, 0) == 0) {
-            g_fullscreen = false;
+            g_fullscreen_mode = 0;
             SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
             SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        }
+    } else {
+        if (g_fullscreen_mode == 0) {
+            /* Leaving windowed mode: remember the windowed size so turning
+             * fullscreen back off (or switching to a smaller display) can
+             * restore it. Only capture on the windowed->fullscreen edge —
+             * not when hopping between the two fullscreen modes. */
+            SDL_GetWindowSize(g_window, &g_windowed_width, &g_windowed_height);
+        }
+        Uint32 flag = (mode == 2) ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_FULLSCREEN_DESKTOP;
+        if (SDL_SetWindowFullscreen(g_window, flag) == 0) {
+            g_fullscreen_mode = mode;
         }
     }
 
@@ -2544,18 +2582,18 @@ static void reset_runtime_display_defaults(void) {
         SDL_GL_SetSwapInterval(0);
     }
 
-    const bool want_fullscreen = platform_default_fullscreen();
+    const int want_fullscreen_mode = platform_default_fullscreen_mode();
     if (g_window) {
-        if (g_fullscreen != want_fullscreen) {
-            set_fullscreen_enabled(want_fullscreen);
+        if (g_fullscreen_mode != want_fullscreen_mode) {
+            set_fullscreen_mode(want_fullscreen_mode);
         }
-        if (!g_fullscreen) {
+        if (g_fullscreen_mode == 0) {
             apply_window_scale_preset();
         } else {
             update_game_viewport();
         }
     } else {
-        g_fullscreen = want_fullscreen;
+        g_fullscreen_mode = want_fullscreen_mode;
     }
 
     reset_audio_output_buffer(true);
@@ -3833,9 +3871,12 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             SDL_GetWindowSize(g_window, &window_w, &window_h);
 
             ImGui::TextDisabled("Display");
-            bool fullscreen = g_fullscreen;
-            if (ImGui::Checkbox("Fullscreen", &fullscreen)) {
-                set_fullscreen_enabled(fullscreen);
+            int fullscreen_mode = g_fullscreen_mode;
+            if (ImGui::Combo("Fullscreen",
+                             &fullscreen_mode,
+                             g_fullscreen_mode_names,
+                             IM_ARRAYSIZE(g_fullscreen_mode_names))) {
+                set_fullscreen_mode(fullscreen_mode);
             }
             int scaling_mode = (int)g_render_scaling_mode;
             if (ImGui::Combo("Scaling Mode",
@@ -3854,7 +3895,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 update_render_filter();
             }
 
-            if (!g_fullscreen) {
+            if (g_fullscreen_mode == 0) {
                 int scale_idx = g_scale - 1;
                 if (ImGui::Combo("Window Size",
                                  &scale_idx,
@@ -4551,7 +4592,7 @@ bool gb_platform_init(int scale) {
     g_manual_joypad_dpad = 0xFF;
     g_script_joypad_buttons = 0xFF;
     g_script_joypad_dpad = 0xFF;
-    g_fullscreen = platform_default_fullscreen();
+    g_fullscreen_mode = platform_default_fullscreen_mode();
     g_app_suspended = false;
     g_renderer_reset_pending = false;
     g_show_overlay = false;
@@ -4649,7 +4690,9 @@ bool gb_platform_init(int scale) {
         g_windowed_width,
         g_windowed_height,
         SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL |
-        (g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE)
+        (g_fullscreen_mode == 2 ? SDL_WINDOW_FULLSCREEN :
+         g_fullscreen_mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP :
+                                   SDL_WINDOW_RESIZABLE)
     );
 
     if (!g_window) {
@@ -4984,7 +5027,7 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
         case SDL_WINDOWEVENT:
             if (event->window.event == SDL_WINDOWEVENT_RESIZED ||
                 event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                if (!g_fullscreen) {
+                if (g_fullscreen_mode == 0) {
                     g_windowed_width = event->window.data1;
                     g_windowed_height = event->window.data2;
                 }

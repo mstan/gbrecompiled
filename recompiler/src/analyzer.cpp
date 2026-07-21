@@ -726,8 +726,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     
     std::queue<AnalysisState> work_queue;
     std::set<uint32_t> visited;
-    // Pointer scanning pass
-    find_pointer_entry_points(rom, result, work_queue, annotations);
+    // Pointer scanning discovers unreferenced code heuristically, so it belongs
+    // to the aggressive scan.  --no-scan must remain strict recursive descent
+    // from known/annotated/runtime-confirmed entry points.
+    if (options.aggressive_scan) {
+        find_pointer_entry_points(rom, result, work_queue, annotations);
+    }
     
     // Entry point is always a function (bank 0)
     result.call_targets.insert(make_address(0, 0x100));
@@ -776,7 +780,8 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     }
     
     // For MBC games
-    if (rom.header().mbc_type != MBCType::NONE && options.analyze_all_banks) {
+    if (rom.header().mbc_type != MBCType::NONE && options.analyze_all_banks &&
+        options.aggressive_scan) {
         std::cerr << "Analyzing all " << known_banks.size() << " banks\n";
         for (uint8_t bank : known_banks) {
             if (bank == 0) continue;

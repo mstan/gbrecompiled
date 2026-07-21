@@ -456,10 +456,17 @@ static void render_bg_segment(GBPPU* ppu,
     bool cgb_mode = ppu_is_cgb_mode(ctx);
     bool cgb_compat_mode = ppu_is_cgb_compat_mode(ctx);
     bool bg_visible = cgb_mode ? true : ((lcdc & LCDC_BG_ENABLE) != 0);
-    bool window_enable = (lcdc & LCDC_WINDOW_ENABLE) &&
-                         (ppu->wx <= 166) &&
-                         (ppu->wy <= scanline) &&
-                         (cgb_mode || bg_visible);
+    /* The window latches active only on the scanline where LY == WY. Once it
+     * has triggered, it remains triggered until the next frame/LCD reset.
+     * Testing WY <= LY every segment would let a mid-frame WY decrease
+     * retroactively enable the window on later scanlines. */
+    bool window_hw_enable = (lcdc & LCDC_WINDOW_ENABLE) &&
+                            (ppu->wx <= 166) &&
+                            (cgb_mode || bg_visible);
+    if (window_hw_enable && !ppu->window_triggered && ppu->wy == scanline) {
+        ppu->window_triggered = true;
+    }
+    bool window_enable = window_hw_enable && ppu->window_triggered;
 
     if (x_start < -xoff) x_start = -xoff;
     if (x_end > GB_SCREEN_WIDTH + ppu->view_extra_right) {
@@ -475,10 +482,6 @@ static void render_bg_segment(GBPPU* ppu,
             bg_priority[x] = 0;
         }
         return;
-    }
-
-    if (window_enable && !ppu->window_triggered) {
-        ppu->window_triggered = true;
     }
 
     for (int x = x_start; x < x_end; x++) {

@@ -158,6 +158,8 @@ if(GBRECOMP_RECOMP_UI AND SDL2_FOUND AND EXISTS "${RECOMP_UI_ROOT}/src/recomp_la
         ${RUI}/common/sha256.c
         ${RUI}/common/sha1.c
         ${RUI}/common/keybinds.c                     # recompui_keybinds_* (namespaced)
+        ${RUI}/common/recomp_runtime_ui.c
+        ${RUI}/common/recomp_runtime_settings.c
         ${RUI}/common/ips_patch.c
         ${RUI}/third_party/tinyfiledialogs.c
         # per-console helpers (only reached when the active profile opts in)
@@ -169,6 +171,7 @@ if(GBRECOMP_RECOMP_UI AND SDL2_FOUND AND EXISTS "${RECOMP_UI_ROOT}/src/recomp_la
         ${RUI}/consoles/gb/gb_binds.c
         # recomp-ui's ImGui backend glue (reuses gbrt's vendored ImGui)
         ${RUI}/common/backends/imgui/launcher_imgui.cpp
+        ${RUI}/common/backends/imgui/runtime_ui_imgui.cpp
     )
     target_sources(gbrt PRIVATE
         src/launcher_ui_seam.c                       # the gb ↔ recomp-ui seam

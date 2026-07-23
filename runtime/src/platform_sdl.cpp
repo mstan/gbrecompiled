@@ -22,6 +22,7 @@
 extern "C" {
 #include "keybinds.h"
 #ifdef RECOMP_LAUNCHER
+#include "recomp_runtime_ui.h"
 #include "launcher_ui_seam.h"   /* gb_launcher_preboot() — recomp-ui pre-boot seam */
 #endif
 }
@@ -103,6 +104,9 @@ static GBPlatformTimingInfo g_last_timing = {};
 /* Menu State */
 static bool g_show_menu = false;
 static bool g_show_overlay = false;
+#ifdef RECOMP_LAUNCHER
+static RecompRuntimeUi* g_runtime_ui = NULL;
+#endif
 
 static int g_speed_percent = 100;
 static int g_palette_idx = 0;
@@ -2612,6 +2616,127 @@ static void reset_runtime_control_defaults(void) {
     save_runtime_preferences();
 }
 
+#ifdef RECOMP_LAUNCHER
+static const char* const g_runtime_scaling_choices[] = {
+    "Pixel Perfect", "Aspect Fit", "Aspect Fill", "Stretch",
+};
+static const char* const g_runtime_color_choices[] = { "Off", "GBC", "GBA" };
+static const RecompRuntimeUiItem g_runtime_extra_items[] = {
+    { "gbc.scaling_mode", "Graphics", "Scaling mode",
+      "Choose integer pixels, preserve/fill aspect, or stretch.",
+      RECOMP_RUNTIME_UI_CHOICE, 0, 3, 1,
+      g_runtime_scaling_choices, 4, NULL },
+    { "gbc.color_correction", "Graphics", "Color correction",
+      "Match raw output, the Game Boy Color LCD, or the GBA LCD.",
+      RECOMP_RUNTIME_UI_CHOICE, 0, 2, 1,
+      g_runtime_color_choices, 3, NULL },
+    { RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING, "Graphics", "LCD shader",
+      "Simulate the response and subpixels of the original LCD.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "gbc.advanced", "System", "Advanced settings",
+      "Open Game Boy-specific palettes, borders, link, cheats, and controls.",
+      RECOMP_RUNTIME_UI_ACTION, 0, 0, 0, NULL, 0, NULL },
+};
+
+static int runtime_ui_get(void*, const RecompRuntimeUiItem* item, int* out) {
+    if (!item || !out) return 0;
+    if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) *out = g_fullscreen_mode;
+    else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0) *out = g_scale;
+    else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = g_render_filter_mode == GB_RENDER_FILTER_LINEAR;
+    else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = !g_audio_muted;
+    else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = (int)std::min(g_audio_volume_percent, 100u);
+    else if (strcmp(item->key, "gbc.scaling_mode") == 0) *out = (int)g_render_scaling_mode;
+    else if (strcmp(item->key, "gbc.color_correction") == 0) *out = g_color_correction;
+    else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING) == 0) {
+        const int active = g_shader_pipeline ? gb_shader_pipeline_active(g_shader_pipeline) : -1;
+        const char* name = active >= 0 ? gb_shader_pipeline_name(g_shader_pipeline, active) : NULL;
+        *out = name && strcmp(name, "lcd") == 0;
+    } else return 0;
+    return 1;
+}
+
+static int runtime_ui_set(void*, const RecompRuntimeUiItem* item, int value) {
+    if (!item) return 0;
+    if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) set_fullscreen_mode(value);
+    else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0) {
+        g_scale = std::max(1, std::min(value, 8));
+        apply_window_scale_preset();
+    } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) {
+        g_render_filter_mode = value ? GB_RENDER_FILTER_LINEAR : GB_RENDER_FILTER_NEAREST;
+        update_render_filter();
+    } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) {
+        g_audio_muted = !value;
+        reset_audio_output_buffer(true);
+    } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) {
+        g_audio_volume_percent = (uint32_t)std::max(0, std::min(value, 100));
+    } else if (strcmp(item->key, "gbc.scaling_mode") == 0) {
+        g_render_scaling_mode = (GBRenderScalingMode)std::max(0, std::min(value, 3));
+        update_game_viewport();
+    } else if (strcmp(item->key, "gbc.color_correction") == 0) {
+        g_color_correction = std::max(0, std::min(value, 2));
+        set_active_game_pref_int("color_correction", g_color_correction);
+    } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING) == 0) {
+        if (!g_shader_pipeline || !gb_shader_pipeline_set_active_by_name(
+                g_shader_pipeline, value ? "lcd" : "sharp")) return 0;
+        g_active_shader_pref = value ? "lcd" : "sharp";
+        set_active_game_pref("shader", g_active_shader_pref);
+    } else return 0;
+    return 1;
+}
+
+static int runtime_ui_action(void*, const RecompRuntimeUiItem* item) {
+    if (!item) return 0;
+    if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME) == 0) {
+        recomp_runtime_ui_close(g_runtime_ui);
+    } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_SAVE_STATE) == 0) {
+        return save_savestate_slot(g_registered_ctx, g_savestate_slot);
+    } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LOAD_STATE) == 0) {
+        return load_savestate_slot(g_registered_ctx, g_savestate_slot);
+    } else if (strcmp(item->key, "gbc.advanced") == 0) {
+        recomp_runtime_ui_close(g_runtime_ui);
+        g_show_menu = true;
+    } else return 0;
+    return 1;
+}
+
+static int runtime_ui_enabled(void*, const RecompRuntimeUiItem* item) {
+    if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0)
+        return g_fullscreen_mode == 0;
+    if (strcmp(item->key, "gbc.color_correction") == 0)
+        return g_active_hardware_mode_pref == GB_HARDWARE_MODE_CGB ||
+               g_active_hardware_mode_pref == GB_HARDWARE_MODE_GBA;
+    if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING) == 0)
+        return g_shader_pipeline != NULL;
+    return 1;
+}
+
+static void runtime_ui_save(void*) { save_runtime_preferences(); }
+
+static void create_runtime_ui(void) {
+    RecompRuntimeUiStandardConfig config = {};
+    config.menu.title = "Game Boy Recompiled";
+    config.menu.subtitle = "Runtime settings";
+    config.menu.theme = "gbc";
+    config.menu.accept_label = "A / Enter";
+    config.menu.back_label = "B / Esc";
+    config.menu.callbacks = { NULL, runtime_ui_get, runtime_ui_set,
+                              runtime_ui_action, runtime_ui_enabled,
+                              runtime_ui_save, NULL };
+    config.features = RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
+                      RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
+                      RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
+                      RECOMP_RUNTIME_UI_STANDARD_AUDIO |
+                      RECOMP_RUNTIME_UI_STANDARD_VOLUME |
+                      RECOMP_RUNTIME_UI_STANDARD_RESUME |
+                      RECOMP_RUNTIME_UI_STANDARD_SAVE_STATE |
+                      RECOMP_RUNTIME_UI_STANDARD_LOAD_STATE;
+    config.window_scale_max = 8;
+    config.extra_items = g_runtime_extra_items;
+    config.extra_item_count = sizeof(g_runtime_extra_items) / sizeof(g_runtime_extra_items[0]);
+    g_runtime_ui = recomp_runtime_ui_create_standard(&config);
+}
+#endif
+
 static void update_controller_axis_binding_state(void) {
     for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
         for (int slot = 0; slot < 2; slot++) {
@@ -4181,6 +4306,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::End();
     }
 
+#ifdef RECOMP_LAUNCHER
+    recomp_runtime_ui_render_imgui(g_runtime_ui);
+#endif
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     g_last_timing.compose_ms = sdl_now_ms() - compose_start_ms;
@@ -4209,6 +4337,10 @@ void gb_platform_shutdown(void) {
     g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
     
     if (ImGui::GetCurrentContext() != NULL) {
+#ifdef RECOMP_LAUNCHER
+        recomp_runtime_ui_destroy(g_runtime_ui);
+        g_runtime_ui = NULL;
+#endif
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplSDL2_Shutdown();
         ImGui::DestroyContext();
@@ -4755,6 +4887,10 @@ bool gb_platform_init(int scale) {
     ImGui_ImplSDL2_InitForOpenGL(g_window, g_gl_context);
     ImGui_ImplOpenGL3_Init("#version 100");
 
+#ifdef RECOMP_LAUNCHER
+    create_runtime_ui();
+#endif
+
     /* Build the post-process shader pipeline now that GL is current. */
     g_shader_pipeline = gb_shader_pipeline_create();
     if (g_shader_pipeline) {
@@ -4854,6 +4990,75 @@ static bool handle_binding_capture_event(const SDL_Event* event) {
     }
 }
 
+#ifdef RECOMP_LAUNCHER
+static bool handle_shared_runtime_ui_event(const SDL_Event* event) {
+    if (!g_runtime_ui || !event) return false;
+
+    if (event->type == SDL_CONTROLLERBUTTONDOWN &&
+        event->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
+        if (recomp_runtime_ui_is_open(g_runtime_ui))
+            recomp_runtime_ui_close(g_runtime_ui);
+        else {
+            g_show_menu = false;
+            recomp_runtime_ui_open(g_runtime_ui);
+        }
+        return true;
+    }
+
+    if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP)) {
+        const int pressed = event->type == SDL_KEYDOWN;
+        const int repeat = pressed ? event->key.repeat : 0;
+        RecompRuntimeUiInput input;
+        bool mapped = true;
+        switch (event->key.keysym.scancode) {
+            case SDL_SCANCODE_ESCAPE:
+            case SDL_SCANCODE_AC_BACK: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
+            case SDL_SCANCODE_UP: input = RECOMP_RUNTIME_UI_INPUT_UP; break;
+            case SDL_SCANCODE_DOWN: input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+            case SDL_SCANCODE_LEFT: input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+            case SDL_SCANCODE_RIGHT: input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+            case SDL_SCANCODE_RETURN:
+            case SDL_SCANCODE_SPACE: input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+            default: mapped = false; break;
+        }
+        if (mapped) {
+            if (!recomp_runtime_ui_is_open(g_runtime_ui) &&
+                input == RECOMP_RUNTIME_UI_INPUT_BACK && pressed && !repeat) {
+                g_show_menu = false;
+                recomp_runtime_ui_open(g_runtime_ui);
+            } else if (recomp_runtime_ui_is_open(g_runtime_ui)) {
+                recomp_runtime_ui_handle_input(g_runtime_ui, input, pressed, repeat);
+            }
+            return true;
+        }
+        return recomp_runtime_ui_is_open(g_runtime_ui) != 0;
+    }
+
+    if (event->type == SDL_CONTROLLERBUTTONDOWN ||
+        event->type == SDL_CONTROLLERBUTTONUP) {
+        const int pressed = event->type == SDL_CONTROLLERBUTTONDOWN;
+        RecompRuntimeUiInput input;
+        bool mapped = true;
+        switch (event->cbutton.button) {
+            case SDL_CONTROLLER_BUTTON_DPAD_UP: input = RECOMP_RUNTIME_UI_INPUT_UP; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN: input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT: input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+            case SDL_CONTROLLER_BUTTON_A: input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+            case SDL_CONTROLLER_BUTTON_B: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
+            default: mapped = false; break;
+        }
+        if (mapped && recomp_runtime_ui_is_open(g_runtime_ui)) {
+            recomp_runtime_ui_handle_input(g_runtime_ui, input, pressed, 0);
+            return true;
+        }
+        return recomp_runtime_ui_is_open(g_runtime_ui) != 0;
+    }
+
+    return false;
+}
+#endif
+
 static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
     if (!event) {
         return true;
@@ -4874,6 +5079,11 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
     if (handle_binding_capture_event(event)) {
         return true;
     }
+#ifdef RECOMP_LAUNCHER
+    if (handle_shared_runtime_ui_event(event)) {
+        return true;
+    }
+#endif
 
     switch (event->type) {
         case SDL_APP_WILLENTERBACKGROUND:

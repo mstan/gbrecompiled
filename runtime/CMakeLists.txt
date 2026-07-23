@@ -153,6 +153,7 @@ if(GBRECOMP_RECOMP_UI AND SDL2_FOUND AND EXISTS "${RECOMP_UI_ROOT}/src/recomp_la
         ${RUI}/common/launcher_files.c
         ${RUI}/common/launcher_debug.c
         ${RUI}/common/launcher_binds.c
+        ${RUI}/common/launcher_udp_port.c
         ${RUI}/common/launcher_ng_capi.c             # recomp_launcher_run_window()
         ${RUI}/common/crc32.c
         ${RUI}/common/sha256.c

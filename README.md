@@ -37,6 +37,23 @@ Everything below is built on top of upstream `arcanite24/gb-recompiled`. Most ar
 - **GLES 2.0 rendering backend** with a built-in post-process shader pipeline. One binary covers desktop Mesa, Mali, Adreno — same shaders run everywhere.
 - **Shipped shader presets** (sharp / scanlines / CRT-like effects) selectable from the Esc menu's Look section. Per-game shader preference stays sticky once set.
 
+### Experimental custom game views
+
+`runtime/include/gb_custom_view.h` provides an opt-in host compositor independent
+of the hardware PPU buffer and save-state format. A game installs its renderer,
+scanline-zero snapshot, save-load reset, and optional read taps in `game_on_init`.
+The SDL presenter resolves Fit from the actual window aspect, with a 160–4096
+pixel width at 144 pixels high; unsupported scenes get centered native output.
+Legacy widescreen remains available to games that do not install this compositor.
+
+Optional midpoint presentation supplies alpha 0 and 0.5 without guest ticks,
+input polling or audio generation. It yields to audio recovery and missed
+deadlines, and is disabled by default. The paired Mega Man Xtreme 2 experiment
+implements world/sprite interpolation and exposes its view controls.
+
+For isolated test instances, `GBRECOMP_DEBUG_PORT` chooses a TCP debug port
+(1–65535) when no explicit port was supplied. The default remains 4370.
+
 ### Per-game UX
 - **Per-game preferences** — palette, shader, SGB toggles, custom border, hardware mode (DMG/SGB/CGB/AUTO). Globals act as defaults; overrides save per game ID.
 - **Custom SGB borders** — drop 256x224 PNGs into `borders/` next to the binary; cycle from the Esc menu.

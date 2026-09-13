@@ -731,6 +731,11 @@ static void process_command(const char *line)
 
 void gb_debug_server_init(int port)
 {
+    const char *configured_port = getenv("GBRECOMP_DEBUG_PORT");
+    if (port <= 0 && configured_port) {
+        long value = strtol(configured_port, NULL, 10);
+        if (value > 0 && value <= 65535) port = (int)value;
+    }
     if (port > 0) s_port = port;
 
     gb_net_global_init();

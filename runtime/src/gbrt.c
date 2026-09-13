@@ -1,6 +1,7 @@
 #include "gbrt.h"
 #include "ppu.h"
 #include "gb_widescreen.h"
+#include "gb_custom_view.h"
 #include "audio.h"
 #include "audio_stats.h"
 #include "platform_sdl.h"
@@ -1661,6 +1662,7 @@ bool gb_context_load_state_file(GBContext* ctx, const char* path) {
      * restore above overwrote them with whatever was saved, so re-apply the
      * live geometry (and reset the sidecar; it repopulates at the next DMA). */
     gb_ws_reapply(ctx);
+    if (gb_custom_reset) gb_custom_reset(ctx);
 
     free(eram_data);
     free(wram_data);
@@ -1806,6 +1808,7 @@ static void gb_hdma_start(GBContext* ctx, uint8_t value) {
  * ========================================================================== */
 
 uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
+    if (gb_custom_read_tap) gb_custom_read_tap(ctx, addr);
     /* During OAM DMA, CPU can only access HRAM (0xFF80-0xFFFE) and I/O registers
      * (0xFF00-0xFF7F, 0xFFFF). All other memory returns 0xFF. */
     if (ctx->dma.active && !(addr >= 0xFF00)) {
@@ -1842,7 +1845,7 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
     if (addr < 0x8000) {
         uint32_t rom_addr = ((uint32_t)ctx->rom_bank * 0x4000) + (addr - 0x4000);
         if (rom_addr < ctx->rom_size) {
-            return ctx->rom[rom_addr];
+            return gb_custom_read_override ? gb_custom_read_override(ctx, addr, ctx->rom[rom_addr]) : ctx->rom[rom_addr];
         }
         return 0xFF;
     }
@@ -1903,7 +1906,10 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
         }
         return 0xFF;
     }
-    if (addr < 0xD000) return ctx->wram[addr - 0xC000];
+    if (addr < 0xD000) {
+        uint8_t value=ctx->wram[addr - 0xC000];
+        return gb_custom_read_override ? gb_custom_read_override(ctx, addr, value) : value;
+    }
     if (addr < 0xE000) return ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)];
     if (addr < 0xFE00) return gb_read8(ctx, addr - 0x2000);
     if (addr < 0xFEA0) {

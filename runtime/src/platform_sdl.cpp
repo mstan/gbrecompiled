@@ -2875,7 +2875,6 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         return;
     }
     g_present_count++;
-    if (count_guest_frame) gb_custom_alpha = gb_custom_interpolation ? 0.0 : 1.0;
     if (count_guest_frame) {
         g_frame_count++;
         update_guest_fps();
@@ -5451,22 +5450,6 @@ void gb_platform_vsync(uint32_t frame_cycles) {
     uint64_t target_frame_time = next_frame_time;
     uint32_t audio_fill = audio_ring_fill_samples();
     bool audio_starved = audio_output_should_run() && g_audio_started && audio_fill < g_audio_low_watermark;
-
-    /* Presentation-only midpoint: no input poll, guest tick, audio generation,
-     * or frame callback. Keep the original accumulated simulation deadline. */
-    if (gb_custom_interpolation && gb_custom_render && g_last_guest_framebuffer_valid && !audio_starved && speed_percent == 100) {
-        uint64_t midpoint = target_frame_time - frame_ticks / 2;
-        while (now < midpoint) {
-            uint64_t remaining = midpoint - now;
-            if (remaining > freq / 500) SDL_Delay(1);
-            now = SDL_GetPerformanceCounter();
-        }
-        if (now < target_frame_time) {
-            gb_custom_alpha = 0.5;
-            render_frame_internal(g_last_guest_framebuffer, false);
-            now = SDL_GetPerformanceCounter();
-        }
-    }
 
     if (!audio_starved && now < target_frame_time) {
         for (;;) {

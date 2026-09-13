@@ -19,9 +19,6 @@ extern GBCustomReadOverride gb_custom_read_override;
 /* 0 = disabled; -1 = fit window; positive = fixed game-pixel width. */
 extern int gb_custom_requested_width;
 extern int gb_custom_width;
-extern int gb_custom_interpolation;
-/* 0 at the start of a guest frame, 0.5 at its intermediate presentation. */
-extern double gb_custom_alpha;
 int gb_custom_resolve_width(int window_width, int window_height);
 #ifdef __cplusplus
 }

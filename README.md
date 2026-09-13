@@ -46,10 +46,8 @@ The SDL presenter resolves Fit from the actual window aspect, with a 160–4096
 pixel width at 144 pixels high; unsupported scenes get centered native output.
 Legacy widescreen remains available to games that do not install this compositor.
 
-Optional midpoint presentation supplies alpha 0 and 0.5 without guest ticks,
-input polling or audio generation. It yields to audio recovery and missed
-deadlines, and is disabled by default. The paired Mega Man Xtreme 2 experiment
-implements world/sprite interpolation and exposes its view controls.
+The paired Mega Man Xtreme 2 experiment exposes adaptive widescreen through
+the launcher's Mods checkbox and renders at the original game cadence.
 
 For isolated test instances, `GBRECOMP_DEBUG_PORT` chooses a TCP debug port
 (1–65535) when no explicit port was supplied. The default remains 4370.

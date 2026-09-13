@@ -6,8 +6,6 @@ GBCustomReadTap gb_custom_read_tap;
 GBCustomReadOverride gb_custom_read_override;
 int gb_custom_requested_width;
 int gb_custom_width = 160;
-int gb_custom_interpolation;
-double gb_custom_alpha = 1.0;
 int gb_custom_resolve_width(int w, int h) {
     int64_t width = gb_custom_requested_width;
     if (!gb_custom_render || !width) return 160;

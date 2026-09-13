@@ -19,6 +19,7 @@ add_library(gbrt STATIC
     src/game_defaults/game_default_on_frame.c
     src/game_defaults/game_default_post_frame.c
     src/game_defaults/game_default_draw_overlay.c
+    src/game_defaults/game_default_get_mods.c
     src/game_defaults/game_default_fill_frame_record.c
     src/game_defaults/game_default_handle_debug_cmd.c
     src/game_defaults/game_default_dispatch_override.c
@@ -91,115 +92,60 @@ if(GBRT_ENABLE_GBCAM)
     endif()
 endif()
 
-# Dear ImGui sources (if using SDL2)
+# A launcher-enabled build shares the pinned UI's ImGui with the runtime.
+# This keeps one core/backend copy and avoids drifting header/API versions.
+option(GBRECOMP_RECOMP_UI "Build the recomp-ui pre-boot launcher" ON)
+option(RECOMP_UI_ENABLE_MODS "Enable game-owned Mods in recomp-ui" OFF)
+set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../recomp-ui" CACHE PATH
+    "Root of the recomp-ui launcher checkout")
+set(GBRECOMP_LAUNCHER_CONSOLE "gbc" CACHE STRING "Launcher asset family: gb or gbc")
+set(GBRT_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui")
+if(GBRECOMP_RECOMP_UI AND EXISTS "${RECOMP_UI_ROOT}/src/third_party/imgui/imgui.h")
+    set(GBRT_IMGUI_DIR "${RECOMP_UI_ROOT}/src/third_party/imgui")
+endif()
 find_package(SDL2 QUIET)
 if(SDL2_FOUND)
     target_sources(gbrt PRIVATE
-        vendor/imgui/imgui.cpp
-        vendor/imgui/imgui_draw.cpp
-        vendor/imgui/imgui_tables.cpp
-        vendor/imgui/imgui_widgets.cpp
-        vendor/imgui/backends/imgui_impl_sdl2.cpp
-        vendor/imgui/backends/imgui_impl_opengl3.cpp
-    )
-    # imgui_impl_opengl3 is dialect-selected at compile time. Force the
-    # GLES 2.0 path so one binary covers desktop Mesa, Mali, Adreno,
-    # everything we care about.
-    set_source_files_properties(
-        vendor/imgui/backends/imgui_impl_opengl3.cpp
-        PROPERTIES COMPILE_DEFINITIONS "IMGUI_IMPL_OPENGL_ES2"
-    )
-    target_include_directories(gbrt PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui
-    )
+        ${GBRT_IMGUI_DIR}/imgui.cpp
+        ${GBRT_IMGUI_DIR}/imgui_draw.cpp
+        ${GBRT_IMGUI_DIR}/imgui_tables.cpp
+        ${GBRT_IMGUI_DIR}/imgui_widgets.cpp
+        ${GBRT_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
+        ${GBRT_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
+    set_source_files_properties(${GBRT_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+        PROPERTIES COMPILE_DEFINITIONS "IMGUI_IMPL_OPENGL_ES2")
+    target_include_directories(gbrt PUBLIC ${GBRT_IMGUI_DIR})
+    target_include_directories(gbrt PRIVATE ${GBRT_IMGUI_DIR}/backends)
 endif()
-
 target_include_directories(gbrt PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/vendor
-)
-
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 target_compile_features(gbrt PUBLIC c_std_11 cxx_std_17)
 
-# ---------------------------------------------------------------------------
-# recomp-ui pre-boot launcher (shared across recomp ecosystems).
-#
-# Compiles the console-agnostic recomp-ui launcher core + the Game Boy seam
-# (launcher_ui_seam.c) INTO gbrt, REUSING gbrt's already-vendored Dear ImGui
-# (vendor/imgui) rather than linking a second copy — recomp-ui's backend glue
-# (launcher_imgui.cpp) builds against gbrt's imgui headers (HOST_IMGUI model).
-# The seam hooks gb_platform_init() (see platform_sdl.cpp / launcher_ui_seam.c).
-# Per-exe asset staging + box art lives in the generated project's CMake (it
-# calls recomp_stage_launcher_assets() on the exe target).
-#
-# Turn off with -DGBRECOMP_RECOMP_UI=OFF to build the legacy file-picker flow.
-# ---------------------------------------------------------------------------
-option(GBRECOMP_RECOMP_UI "Build the recomp-ui pre-boot launcher" ON)
-# Default assumes recomp-ui is a sibling of the gbcrecomp tree
-# (…/Projects/recomp-ui), i.e. three levels up from this runtime dir
-# (runtime → gb-recompiled → gbcrecomp → Projects). Override with
-# -DRECOMP_UI_ROOT=… for other layouts (e.g. a git-worktree checkout). When a
-# generated game project sets RECOMP_UI_ROOT before add_subdirectory(GBRT_DIR),
-# that value wins (cache set is idempotent), keeping game + runtime on one root.
-set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../recomp-ui" CACHE PATH
-    "Root of the recomp-ui launcher checkout")
-if(GBRECOMP_RECOMP_UI AND SDL2_FOUND AND EXISTS "${RECOMP_UI_ROOT}/src/recomp_launcher.h")
-    set(RUI "${RECOMP_UI_ROOT}/src")
-    set(RUI_LAUNCHER_SOURCES
-        # console-agnostic launcher core (C)
-        ${RUI}/common/launcher_model.c
-        ${RUI}/common/launcher_platform_sdl2.c
-        ${RUI}/common/launcher_gl.c
-        ${RUI}/common/launcher_input.c
-        ${RUI}/common/launcher_files.c
-        ${RUI}/common/launcher_debug.c
-        ${RUI}/common/launcher_binds.c
-        ${RUI}/common/launcher_udp_port.c
-        ${RUI}/common/launcher_ng_capi.c             # recomp_launcher_run_window()
-        ${RUI}/common/crc32.c
-        ${RUI}/common/sha256.c
-        ${RUI}/common/sha1.c
-        ${RUI}/common/keybinds.c                     # recompui_keybinds_* (namespaced)
-        ${RUI}/common/recomp_runtime_ui.c
-        ${RUI}/common/recomp_runtime_settings.c
-        ${RUI}/common/ips_patch.c
-        ${RUI}/third_party/tinyfiledialogs.c
-        # per-console helpers (only reached when the active profile opts in)
-        ${RUI}/consoles/psx/memcard_format.c
-        ${RUI}/consoles/psx/psx_binds.c
-        ${RUI}/consoles/genesis/genesis_binds.c
-        ${RUI}/consoles/nes/nes_binds.c
-        ${RUI}/consoles/n64/n64_binds.c
-        ${RUI}/consoles/gb/gb_binds.c
-        # recomp-ui's ImGui backend glue (reuses gbrt's vendored ImGui)
-        ${RUI}/common/backends/imgui/launcher_imgui.cpp
-        ${RUI}/common/backends/imgui/runtime_ui_imgui.cpp
-    )
-    target_sources(gbrt PRIVATE
-        src/launcher_ui_seam.c                       # the gb ↔ recomp-ui seam
-        ${RUI_LAUNCHER_SOURCES})
-    # The generated projects build with -ffunction-sections -fdata-sections +
-    # -Wl,--gc-sections. That combination miscompiles recomp-ui's mutable file-
-    # scope globals here (a store to one read back as NULL at the same address:
-    # its own .data$<sym> COMDAT section is mishandled by the section GC). gbrt's
-    # own code lands in plain .data and is fine; force these TUs to do the same.
-    set_source_files_properties(src/launcher_ui_seam.c ${RUI_LAUNCHER_SOURCES}
-        PROPERTIES COMPILE_OPTIONS "-fno-data-sections;-fno-function-sections")
-    target_include_directories(gbrt PRIVATE
-        ${RUI} ${RUI}/common
-        ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui
-        ${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui/backends
-    )
-    # RECOMP_LAUNCHER un-gates the seam + the gb_platform_init preboot hook.
-    # PRIVATE: only gbrt's own TUs (platform_sdl.cpp, launcher_ui_seam.c) need it.
-    # RECOMP_UI_HOST_STB_WRITE: gbrt already compiles the stb_image_write
-    # implementation (gb_printer.c), so recomp-ui's launcher_debug.c reuses it
-    # instead of defining a second (duplicate-symbol clash).
-    # LNG_GLES2: the shared ImGui opengl3 backend is compiled for GLES 2 (ANGLE),
-    # so the launcher must create a matching GLES context (not desktop GL core).
-    target_compile_definitions(gbrt PRIVATE
-        RECOMP_LAUNCHER SDL_MAIN_HANDLED RECOMP_UI_HOST_STB_WRITE LNG_GLES2)
-    message(STATUS "recomp-ui launcher: ON (${RECOMP_UI_ROOT})")
+if(GBRECOMP_RECOMP_UI AND SDL2_FOUND AND EXISTS "${RECOMP_UI_ROOT}/recomp_ui.cmake")
+    if(WIN32)
+        # Resolve shared GL 1.1 names from ANGLE before the helper's desktop
+        # opengl32 fallback. Mixing those providers gives a black launcher.
+        target_link_libraries(gbrt PUBLIC GLESv2 EGL)
+    endif()
+    include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+    recomp_target_launcher_ui(gbrt CONSOLE ${GBRECOMP_LAUNCHER_CONSOLE}
+        HOST_IMGUI IMGUI_DIR ${GBRT_IMGUI_DIR})
+    target_sources(gbrt PRIVATE src/launcher_ui_seam.c)
+    # gbrt owns the stb_image_write implementation and the GLES2 context.
+    target_compile_definitions(gbrt PRIVATE RECOMP_UI_HOST_STB_WRITE LNG_GLES2)
+    # Keep the known MinGW COMDAT/section-GC workaround on launcher TUs.
+    if(NOT MSVC)
+        get_target_property(_gb_sources gbrt SOURCES)
+        foreach(_gb_source IN LISTS _gb_sources)
+            string(FIND "${_gb_source}" "${RECOMP_UI_ROOT}/src/" _gb_is_ui)
+            if(_gb_is_ui EQUAL 0 OR _gb_source STREQUAL "src/launcher_ui_seam.c")
+                set_source_files_properties(${_gb_source} PROPERTIES
+                    COMPILE_OPTIONS "-fno-data-sections;-fno-function-sections")
+            endif()
+        endforeach()
+    endif()
+    message(STATUS "recomp-ui launcher: ON (${RECOMP_UI_ROOT}), Mods=${RECOMP_UI_ENABLE_MODS}")
 elseif(GBRECOMP_RECOMP_UI)
     message(STATUS "recomp-ui launcher: OFF (not found at ${RECOMP_UI_ROOT} or no SDL2)")
 endif()

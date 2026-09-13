@@ -4376,9 +4376,9 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    include(${RECOMP_UI_ROOT}/recomp_ui.cmake)\n";
         cmake_ss << "    set(_gb_boxart \"${CMAKE_CURRENT_SOURCE_DIR}/../recomp/launcher/boxart.tga\")\n";
         cmake_ss << "    if(EXISTS \"${_gb_boxart}\")\n";
-        cmake_ss << "        recomp_stage_launcher_assets(" << options.output_prefix << " BOXART \"${_gb_boxart}\")\n";
+        cmake_ss << "        recomp_stage_launcher_assets(" << options.output_prefix << " CONSOLE ${GBRECOMP_LAUNCHER_CONSOLE} BOXART \"${_gb_boxart}\")\n";
         cmake_ss << "    else()\n";
-        cmake_ss << "        recomp_stage_launcher_assets(" << options.output_prefix << ")\n";
+        cmake_ss << "        recomp_stage_launcher_assets(" << options.output_prefix << " CONSOLE ${GBRECOMP_LAUNCHER_CONSOLE})\n";
         cmake_ss << "    endif()\n";
         cmake_ss << "endif()\n\n";
         cmake_ss << "if(WIN32 AND TARGET SDL2::SDL2main)\n";

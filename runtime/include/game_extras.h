@@ -43,6 +43,11 @@ void game_post_frame(struct GBContext *ctx);
  * Keeps the agnostic core free of any game-specific UI. */
 void game_draw_overlay(struct GBContext *ctx);
 
+/* Built-in Mods for the shared preboot launcher. The game owns the provider
+ * and persists its selection beside the executable. Default: no Mods. */
+struct RecompLauncherCModProvider;
+const struct RecompLauncherCModProvider *game_get_mods(const char *exe_dir);
+
 /* ---- Debug hooks ---- */
 
 /* Fill game-specific data into the frame record.

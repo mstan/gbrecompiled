@@ -166,6 +166,9 @@ int gb_launcher_preboot(void) {
     const char* platform = game_get_platform();
     launcher_profile_apply(platform && platform[0] ? platform : "gbc", &gi);
     gi.name = game_get_name();
+#if RECOMP_UI_ENABLE_MODS
+    gi.mods = game_get_mods(exe_dir);
+#endif
     gi.region = "USA";
     /* The runtime derives the .sav name from the cart's save-id / header title,
      * which isn't known until the ROM is loaded (after this preboot). Leave the

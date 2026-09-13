@@ -7,6 +7,7 @@
 #include "gbrt.h"
 #include "gbrt_debug.h"
 #include "gb_widescreen.h"
+#include "gb_custom_view.h"
 #include "game_extras.h"
 #include "sgb.h"
 
@@ -1008,6 +1009,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 /* Latch scroll registers for this scanline */
                 ppu->latched_scx = ppu->scx;
                 ppu->latched_scy = ppu->scy;
+                if (ppu->ly == 0 && gb_custom_snapshot) gb_custom_snapshot(ctx);
 
                 /* Count sprites on this scanline for variable mode 3 timing */
                 {

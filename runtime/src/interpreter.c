@@ -104,6 +104,14 @@ static const uint8_t MEM_TICK_BEFORE[256] = {
 #define READ8(ctx) gb_read8(ctx, ctx->pc++)
 #define READ16(ctx) (ctx->pc += 2, gb_read16(ctx, ctx->pc - 2))
 
+/* Match generated [[imm_override]] arithmetic when a reviewed site falls
+ * back to the interpreter. Sequence the operand read before the callback. */
+static uint8_t read_alu_immediate(GBContext *ctx) {
+    uint16_t pc=ctx->pc-1;
+    uint8_t value=READ8(ctx);
+    return gbrt_imm_override8(ctx,pc<0x4000?0:ctx->rom_bank,pc,value);
+}
+
 static uint8_t get_reg8(GBContext* ctx, uint8_t idx) {
     switch (idx) {
         case 0: return ctx->b;
@@ -464,7 +472,7 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             case 0x85: gb_add8(ctx, ctx->l); break; /* ADD A, L */
             case 0x86: gb_add8(ctx, gb_read8(ctx, ctx->hl)); break; /* ADD A, (HL) */
             case 0x87: gb_add8(ctx, ctx->a); break; /* ADD A, A */
-            case 0xC6: gb_add8(ctx, READ8(ctx)); break; /* ADD A, n */
+            case 0xC6: gb_add8(ctx, read_alu_immediate(ctx)); break; /* ADD A, n */
 
             case 0x88: gb_adc8(ctx, ctx->b); break; /* ADC A, B */
             case 0x89: gb_adc8(ctx, ctx->c); break; /* ADC A, C */
@@ -474,7 +482,7 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             case 0x8D: gb_adc8(ctx, ctx->l); break; /* ADC A, L */
             case 0x8E: gb_adc8(ctx, gb_read8(ctx, ctx->hl)); break; /* ADC A, (HL) */
             case 0x8F: gb_adc8(ctx, ctx->a); break; /* ADC A, A */
-            case 0xCE: gb_adc8(ctx, READ8(ctx)); break; /* ADC A, n */
+            case 0xCE: gb_adc8(ctx, read_alu_immediate(ctx)); break; /* ADC A, n */
 
             case 0x90: gb_sub8(ctx, ctx->b); break; /* SUB B */
             case 0x91: gb_sub8(ctx, ctx->c); break; /* SUB C */
@@ -484,7 +492,7 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             case 0x95: gb_sub8(ctx, ctx->l); break; /* SUB L */
             case 0x96: gb_sub8(ctx, gb_read8(ctx, ctx->hl)); break; /* SUB (HL) */
             case 0x97: gb_sub8(ctx, ctx->a); break; /* SUB A */
-            case 0xD6: gb_sub8(ctx, READ8(ctx)); break; /* SUB n */
+            case 0xD6: gb_sub8(ctx, read_alu_immediate(ctx)); break; /* SUB n */
 
             case 0x98: gb_sbc8(ctx, ctx->b); break; /* SBC A, B */
             case 0x99: gb_sbc8(ctx, ctx->c); break; /* SBC A, C */
@@ -494,7 +502,7 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             case 0x9D: gb_sbc8(ctx, ctx->l); break; /* SBC A, L */
             case 0x9E: gb_sbc8(ctx, gb_read8(ctx, ctx->hl)); break; /* SBC A, (HL) */
             case 0x9F: gb_sbc8(ctx, ctx->a); break; /* SBC A, A */
-            case 0xDE: gb_sbc8(ctx, READ8(ctx)); break; /* SBC A, n */
+            case 0xDE: gb_sbc8(ctx, read_alu_immediate(ctx)); break; /* SBC A, n */
 
             case 0xA0: gb_and8(ctx, ctx->b); break; /* AND B */
             case 0xA1: gb_and8(ctx, ctx->c); break; /* AND C */

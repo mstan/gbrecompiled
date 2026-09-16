@@ -2,6 +2,10 @@
 
 #include <toml.hpp>
 
+extern "C" {
+#include "bps_patch.h"
+}
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -216,6 +220,40 @@ std::optional<GameConfig> load_config(const std::string& path) {
     }
 
     return config;
+}
+
+bool apply_bps_patch(const std::vector<uint8_t>& source,
+                     const std::string& patch_path,
+                     std::vector<uint8_t>& out,
+                     std::string& error) {
+    out.clear();
+    error.clear();
+
+    std::ifstream patch_file(patch_path, std::ios::binary);
+    if (!patch_file) {
+        error = "cannot open patch file: " + patch_path;
+        return false;
+    }
+    std::vector<uint8_t> patch((std::istreambuf_iterator<char>(patch_file)),
+                               std::istreambuf_iterator<char>());
+    if (patch.empty()) {
+        error = "patch file is empty: " + patch_path;
+        return false;
+    }
+
+    uint8_t* result = nullptr;
+    size_t result_len = 0;
+    char reason[192] = {0};
+    int rc = gb_bps_apply(patch.data(), patch.size(), source.data(), source.size(),
+                          &result, &result_len, reason, sizeof(reason));
+    if (rc != 0) {
+        error = std::string("patch ") + patch_path + " does not apply to this ROM: " + reason;
+        if (result) std::free(result);
+        return false;
+    }
+    out.assign(result, result + result_len);
+    std::free(result);
+    return true;
 }
 
 std::vector<DispatchMiss> load_dispatch_misses(const std::string& manifest_path) {

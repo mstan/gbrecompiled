@@ -60,6 +60,14 @@ int launcher_apply_patch_in_memory(const char *patch_filename,
                                    const char *expect_sha256);
 
 /**
+ * Does this in-memory image already hash to `sha256_hex`? Lets a multi-body
+ * project skip its patch step when the user happened to supply the patched
+ * image directly, so the CRC gate is free to accept either.
+ */
+int launcher_image_matches_sha256(const unsigned char *rom, unsigned int rom_len,
+                                  const char *sha256_hex);
+
+/**
  * Human-readable reason for the most recent launcher failure ("" if none).
  * The string is owned by the launcher and valid until the next failure.
  */

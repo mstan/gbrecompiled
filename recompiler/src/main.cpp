@@ -1896,9 +1896,32 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Failed to load ROM\n";
         return 1;
     }
-    
+
+    /* [rom] patch_file — this body is a romhack of [rom] path. The SAME BPS is
+     * applied twice: here, to derive the image actually recompiled, and again
+     * in memory at boot, to derive it from the user's copy of the stock cart.
+     * One statement of provenance, and the repo never has to hold the hack. */
+    if (!game_config.patch_file.empty()) {
+        std::vector<uint8_t> patched;
+        std::string patch_error;
+        if (!gbrecomp::apply_bps_patch(rom_opt->bytes(), game_config.patch_file,
+                                       patched, patch_error)) {
+            std::cerr << "Error: " << patch_error << "\n";
+            return 1;
+        }
+        std::cout << "Applied patch: " << game_config.patch_file << " ("
+                  << rom_opt->size() << " -> " << patched.size() << " bytes)\n";
+        auto patched_rom = gbrecomp::ROM::load_from_buffer(std::move(patched),
+                                                           rom_opt->name());
+        if (!patched_rom) {
+            std::cerr << "Error: patched image is not a loadable ROM\n";
+            return 1;
+        }
+        rom_opt = std::move(patched_rom);
+    }
+
     auto& rom = *rom_opt;
-    
+
     if (!rom.is_valid()) {
         std::cerr << "Error: " << rom.error() << "\n";
         return 1;

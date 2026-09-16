@@ -228,6 +228,12 @@ static int resolve_or_patch(const char *path, char *resolved, size_t resolved_sz
     return 1;
 }
 
+int launcher_image_matches_sha256(const unsigned char *rom, unsigned int rom_len,
+                                  const char *sha256_hex) {
+    if (!rom || !sha256_hex || !sha256_hex[0]) return 0;
+    return buffer_sha_matches(rom, (size_t)rom_len, sha256_hex);
+}
+
 /* Multi-body path: derive one body's image from the user's ROM entirely in
  * memory. Never touches the disk, never changes what the CRC gate accepts —
  * the user supplies (and the gate validates) the stock cart either way. */

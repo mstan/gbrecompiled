@@ -95,6 +95,16 @@ struct GameConfig {
 // Load config from TOML file. Returns nullopt on parse error.
 std::optional<GameConfig> load_config(const std::string& path);
 
+// Apply a BPS patch file to a ROM image, in memory. Used to derive the exact
+// image a romhack body is recompiled from ([rom] patch_file), so the repo only
+// ever holds the patch and the recompiled body's provenance is one line of
+// config. Returns false with a reason in `error` on any failure (patch missing,
+// wrong source ROM, corrupt patch).
+bool apply_bps_patch(const std::vector<uint8_t>& source,
+                     const std::string& patch_path,
+                     std::vector<uint8_t>& out,
+                     std::string& error);
+
 // ── Tier-0 dispatch-miss manifest ───────────────────────────────────────────
 // A dispatch_misses.toml records ROM addresses that fell through to the
 // interpreter at runtime — provably-real function entries the static finder

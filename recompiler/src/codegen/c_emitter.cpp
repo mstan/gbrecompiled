@@ -2338,7 +2338,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     // Function prototypes for all recompiled functions (needed for cross-bank calls)
     header_ss << "/* Recompiled function prototypes */\n";
     for (const auto& [name, func] : program.functions) {
-        header_ss << "void " << func.name << "(GBContext* ctx);\n";
+        /* Namespaced when use_prefixed_symbols is on, so two bodies' public
+         * headers can coexist in one translation unit (and so a declaration
+         * here always names a symbol this body actually defines). */
+        header_ss << "void " << emitted_function_name(options, func.name) << "(GBContext* ctx);\n";
     }
     header_ss << "\n#endif\n";
     output.header_content = header_ss.str();
@@ -3443,8 +3446,14 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "    /* Identity check: game_extras CRC hooks take precedence (multi- */\n";
     source_ss << "    /* revision allowance); otherwise the embedded SHA-256 of the */\n";
     source_ss << "    /* exact ROM this binary was recompiled from is enforced. */\n";
+    /* [rom] patch_file is a path relative to the config (that is where the
+     * recompiler read it from at generation time). At RUNTIME the launcher
+     * looks it up next to the executable, so only the basename travels into the
+     * generated code — the game's build stages the file there. */
     const std::string patch_file =
-        options.patch_file.empty() ? (options.output_prefix + ".bps") : options.patch_file;
+        options.patch_file.empty()
+            ? (options.output_prefix + ".bps")
+            : std::filesystem::path(options.patch_file).filename().string();
     source_ss << "    launcher_init();\n";
     source_ss << "    launcher_set_expected_sha256(" << rom_sha256_symbol_name(options) << ");\n";
     if (!emits_body_descriptor(options)) {
@@ -3471,8 +3480,10 @@ GeneratedOutput generate_output(const ir::Program& program,
          * MEMORY so the CRC gate keeps accepting only the stock ROM and nothing
          * is ever written to disk. */
         source_ss << "    /* This body runs a patched derivative of the user ROM. Derive */\n";
-        source_ss << "    /* it in memory: the CRC gate only ever accepts the stock cart. */\n";
-        source_ss << "    {\n";
+        source_ss << "    /* it in memory -- unless the supplied image already IS it, so */\n";
+        source_ss << "    /* the CRC gate stays free to accept either. Nothing is written. */\n";
+        source_ss << "    if (!launcher_image_matches_sha256(" << rom_data_symbol_name(options)
+                  << ", loaded_size, " << rom_sha256_symbol_name(options) << ")) {\n";
         source_ss << "        unsigned char* patched = 0;\n";
         source_ss << "        unsigned int patched_size = 0;\n";
         source_ss << "        if (!launcher_apply_patch_in_memory(\"" << patch_file << "\",\n";
@@ -3516,7 +3527,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         source_ss << "    .platform = \"" << (rom_is_cgb ? "gbc" : "gb") << "\",\n";
         source_ss << "    .patch_file = " << (options.patch_file.empty()
                                               ? std::string("0")
-                                              : ("\"" + options.patch_file + "\"")) << ",\n";
+                                              : ("\"" + patch_file + "\"")) << ",\n";
         source_ss << "    .expected_sha256 = " << rom_sha256_symbol_name(options) << ",\n";
         source_ss << "    .cartridge_supports_cgb = " << (rom_is_cgb ? 1 : 0) << ",\n";
         source_ss << "    .cartridge_requires_cgb = " << (rom_is_cgb_only ? 1 : 0) << ",\n";

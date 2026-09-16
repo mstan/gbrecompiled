@@ -18,6 +18,10 @@ add_executable(gbrecomp
     # ROM verification uses SHA-256).
     ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/gb_sha1.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/gb_sha256.c
+    # ...and the runtime's BPS applier, so [rom] patch_file derives a romhack
+    # body's image with the exact same code that derives it from the user's ROM
+    # at boot (one implementation, no drift).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/bps_patch.c
 )
 
 target_include_directories(gbrecomp

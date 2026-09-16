@@ -270,6 +270,81 @@ static void write_byte(uint16_t addr, uint8_t val)
     gb_write8(s_ctx, addr, val);
 }
 
+/* Host-side read with EXPLICIT bank selection, straight out of the backing
+ * arrays. Unlike read_byte() this never enters gb_read8, so it cannot be
+ * intercepted by a game module's gb_custom_read_override, cannot trip a
+ * watchpoint and cannot advance any emulated state -- and it can reach banks
+ * the guest does not currently have mapped (VRAM bank 1's BG attribute map,
+ * WRAM banks 2-7, any ROM/ERAM bank). Pass -1 for a bank to use the live one. */
+static uint8_t peek_byte(uint16_t addr, int rom_bank, int ram_bank,
+                         int wram_bank, int vram_bank)
+{
+    GBContext *c = s_ctx;
+    if (!c) return 0;
+    if (rom_bank  < 0) rom_bank  = (int)c->rom_bank;
+    if (ram_bank  < 0) ram_bank  = (int)c->ram_bank;
+    if (wram_bank < 0) wram_bank = (int)c->wram_bank;
+    if (vram_bank < 0) vram_bank = (int)c->vram_bank;
+    if (wram_bank == 0) wram_bank = 1;   /* SVBK 0 aliases bank 1 */
+    if (addr < 0x4000u)
+        return c->rom && addr < c->rom_size ? c->rom[addr] : 0;
+    if (addr < 0x8000u) {
+        size_t o = (size_t)rom_bank * 0x4000u + (addr - 0x4000u);
+        return c->rom && o < c->rom_size ? c->rom[o] : 0;
+    }
+    if (addr < 0xA000u) {
+        size_t o = (size_t)(vram_bank & 1) * VRAM_SIZE + (addr - 0x8000u);
+        return c->vram ? c->vram[o] : 0;
+    }
+    if (addr < 0xC000u) {
+        size_t o = (size_t)ram_bank * 0x2000u + (addr - 0xA000u);
+        return c->eram && o < c->eram_size ? c->eram[o] : 0;
+    }
+    if (addr < 0xD000u) return c->wram ? c->wram[addr - 0xC000u] : 0;
+    if (addr < 0xE000u)
+        return c->wram ? c->wram[(size_t)(wram_bank & 7) * 0x1000u + (addr - 0xD000u)] : 0;
+    if (addr >= 0xFE00u && addr < 0xFEA0u) return c->oam ? c->oam[addr - 0xFE00u] : 0;
+    if (addr >= 0xFF00u && addr < 0xFF80u) return c->io ? c->io[addr - 0xFF00u] : 0;
+    if (addr >= 0xFF80u && addr < 0xFFFFu) return c->hram ? c->hram[addr - 0xFF80u] : 0;
+    return 0;
+}
+
+/* {"cmd":"peek","addr":"0xD000","len":256,"wram_bank":2} -- see peek_byte().
+ * Chunked like dump_ram (256 bytes per line) so one call can pull a whole
+ * tilemap or attribute map. */
+static void handle_peek(int id, const char *json)
+{
+    char addr_str[32];
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    if (!json_get_str(json, "addr", addr_str, sizeof(addr_str))) {
+        send_err(id, "missing addr");
+        return;
+    }
+    uint16_t addr = (uint16_t)hex_to_u32(addr_str);
+    int len = json_get_int(json, "len", 256);
+    if (len < 1) len = 1;
+    if (len > 8192) len = 8192;
+    int rom_bank  = json_get_int(json, "rom_bank",  -1);
+    int ram_bank  = json_get_int(json, "ram_bank",  -1);
+    int wram_bank = json_get_int(json, "wram_bank", -1);
+    int vram_bank = json_get_int(json, "vram_bank", -1);
+
+    int offset = 0;
+    while (offset < len) {
+        int chunk = len - offset;
+        if (chunk > 256) chunk = 256;
+        char hex[513];
+        for (int i = 0; i < chunk; i++)
+            snprintf(hex + i * 2, 3, "%02x",
+                     peek_byte((uint16_t)(addr + offset + i),
+                               rom_bank, ram_bank, wram_bank, vram_bank));
+        send_fmt("{\"id\":%d,\"ok\":true,\"addr\":\"0x%04X\",\"offset\":%d,"
+                 "\"len\":%d,\"total\":%d,\"hex\":\"%s\"}",
+                 id, (unsigned)((addr + offset) & 0xFFFF), offset, chunk, len, hex);
+        offset += chunk;
+    }
+}
+
 /* ---- Command handlers ---- */
 
 static void handle_ping(int id, const char *json)
@@ -866,6 +941,7 @@ static const CmdEntry s_commands[] = {
     { "get_registers",     handle_get_registers },
     { "read_ram",          handle_read_ram },
     { "dump_ram",          handle_dump_ram },
+    { "peek",              handle_peek },
     { "write_ram",         handle_write_ram },
     { "read_oam",          handle_read_oam },
     { "read_vram",         handle_read_vram },

@@ -40,6 +40,80 @@ static int    s_port    = 4370;
 static char s_recv_buf[RECV_BUF_SIZE];
 static int  s_recv_len = 0;
 
+/* ---- Outbound queue ----
+ * The client socket is non-blocking, so send() can accept only part of a
+ * message (or none) whenever the kernel send buffer is full — which happens
+ * as soon as any async event source outruns the client's reader. The old code
+ * issued two unchecked send() calls per line (payload, then "\n") and dropped
+ * whatever the kernel refused, so a full buffer silently truncated a line or
+ * ate its terminator, concatenating two JSON objects on one line and
+ * desynchronizing every subsequent response. Queue whole lines instead: a
+ * message is either fully enqueued or fully dropped, never split. */
+#define SEND_BUF_SIZE (1 << 20)
+static char     s_send_buf[SEND_BUF_SIZE];
+static uint32_t s_send_head = 0;   /* next byte to transmit */
+static uint32_t s_send_tail = 0;   /* next free byte */
+static uint64_t s_send_drops = 0;  /* whole messages dropped for lack of room */
+static uint64_t s_send_drops_reported = 0;
+
+static uint32_t send_queue_used(void)
+{
+    return (s_send_tail >= s_send_head)
+         ? (s_send_tail - s_send_head)
+         : (SEND_BUF_SIZE - s_send_head + s_send_tail);
+}
+
+/* One byte is kept free so head==tail always means "empty". */
+static uint32_t send_queue_free(void)
+{
+    return SEND_BUF_SIZE - 1 - send_queue_used();
+}
+
+static void send_queue_reset(void)
+{
+    s_send_head = 0;
+    s_send_tail = 0;
+    s_send_drops = 0;
+    s_send_drops_reported = 0;
+}
+
+static void send_queue_push(const char *data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        s_send_buf[s_send_tail] = data[i];
+        s_send_tail = (s_send_tail + 1) & (SEND_BUF_SIZE - 1);
+    }
+}
+
+/* Drain as much of the queue as the socket will take. Partial sends advance
+ * the head; EWOULDBLOCK stops the drain until the next poll. */
+static void send_queue_flush(void)
+{
+    while (s_client != SOCK_INVALID && s_send_head != s_send_tail) {
+        uint32_t end = (s_send_tail > s_send_head) ? s_send_tail : SEND_BUF_SIZE;
+        int chunk = (int)(end - s_send_head);
+        int n = send(s_client, s_send_buf + s_send_head, chunk, 0);
+        if (n > 0) {
+            s_send_head = (s_send_head + (uint32_t)n) & (SEND_BUF_SIZE - 1);
+            continue;
+        }
+        if (n == 0) break;
+        {
+            int err = sock_error();
+#ifdef _WIN32
+            if (err == WSAEWOULDBLOCK) break;
+#else
+            if (err == EAGAIN || err == EWOULDBLOCK || err == EINTR) break;
+#endif
+            fprintf(stderr, "[debug] send error %d, dropping client\n", err);
+            sock_close(s_client);
+            s_client = SOCK_INVALID;
+            send_queue_reset();
+            return;
+        }
+    }
+}
+
 /* ---- Pause / step ---- */
 static volatile int s_paused     = 0;
 static int          s_step_count = 0;
@@ -131,9 +205,30 @@ static uint32_t hex_to_u32(const char *s)
 void gb_debug_server_send_line(const char *json)
 {
     if (s_client == SOCK_INVALID) return;
-    int len = (int)strlen(json);
-    send(s_client, json, len, 0);
-    send(s_client, "\n", 1, 0);
+
+    uint32_t len = (uint32_t)strlen(json);
+    if (len == 0) return;
+
+    /* Whole-line atomicity: a message that does not fit is dropped entirely,
+     * so the stream stays newline-synchronized no matter how far behind the
+     * reader is. Drops are counted and reported once there is room again. */
+    if (len + 1 > send_queue_free()) {
+        s_send_drops++;
+        return;
+    }
+    send_queue_push(json, len);
+    send_queue_push("\n", 1);
+
+    if (s_send_drops != s_send_drops_reported) {
+        char note[96];
+        int n = snprintf(note, sizeof(note),
+                         "{\"event\":\"dropped\",\"messages\":%llu}\n",
+                         (unsigned long long)s_send_drops);
+        if (n > 0 && (uint32_t)n <= send_queue_free()) {
+            send_queue_push(note, (uint32_t)n);
+            s_send_drops_reported = s_send_drops;
+        }
+    }
 }
 
 void gb_debug_server_send_fmt(const char *fmt, ...)
@@ -496,6 +591,54 @@ static void handle_run_to_frame(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"running_to\":%d}", id, target);
 }
 
+/* Always-on interpreter-fallback ring: totals plus the top entry sites, kept
+ * by gbrt_note_dispatch_fallback / gbrt_note_interpreter_session on every run
+ * (Release included). Queried here rather than streamed, so a late-joining
+ * client still sees every site recorded since boot. */
+static void handle_interp_fallbacks(int id, const char *json)
+{
+    (void)json;
+    if (!s_ctx) { send_err(id, "no context"); return; }
+
+    char sites[4096];
+    int off = 0;
+    sites[0] = '\0';
+    for (int i = 0; i < GBRT_INTERPRETER_HOTSPOT_CAPACITY; i++) {
+        const GBInterpreterHotspot *h = &s_ctx->interpreter_hotspots[i];
+        if (h->entries == 0) continue;
+        int n = snprintf(sites + off, sizeof(sites) - (size_t)off,
+                         "%s{\"bank\":%u,\"addr\":\"0x%04X\",\"entries\":%llu,"
+                         "\"instructions\":%llu,\"cycles\":%llu,\"last_frame\":%llu}",
+                         off ? "," : "",
+                         (unsigned)h->bank, (unsigned)h->addr,
+                         (unsigned long long)h->entries,
+                         (unsigned long long)h->instructions,
+                         (unsigned long long)h->cycles,
+                         (unsigned long long)h->last_frame);
+        if (n <= 0 || (size_t)n >= sizeof(sites) - (size_t)off) break;
+        off += n;
+    }
+
+    send_fmt("{\"id\":%d,\"ok\":true,"
+             "\"total_fallbacks\":%llu,\"total_entries\":%llu,"
+             "\"total_instructions\":%llu,\"total_cycles\":%llu,"
+             "\"frame_fallbacks\":%u,"
+             "\"frame_first\":\"%03X:%04X\",\"frame_last\":\"%03X:%04X\","
+             "\"unimplemented_opcode\":%u,"
+             "\"sites\":[%s]}",
+             id,
+             (unsigned long long)s_ctx->total_dispatch_fallbacks,
+             (unsigned long long)s_ctx->total_interpreter_entries,
+             (unsigned long long)s_ctx->total_interpreter_instructions,
+             (unsigned long long)s_ctx->total_interpreter_cycles,
+             s_ctx->frame_dispatch_fallbacks,
+             (unsigned)s_ctx->frame_first_fallback_bank, s_ctx->frame_first_fallback_addr,
+             (unsigned)s_ctx->frame_last_fallback_bank, s_ctx->frame_last_fallback_addr,
+             (unsigned)(s_ctx->has_unimplemented_interpreter_opcode
+                        ? s_ctx->last_unimplemented_opcode : 0),
+             sites);
+}
+
 /* ---- Ring buffer queries ---- */
 
 static void handle_history(int id, const char *json)
@@ -683,6 +826,7 @@ static const CmdEntry s_commands[] = {
     { "read_vram",         handle_read_vram },
     { "read_io",           handle_read_io },
     { "ppu_state",         handle_ppu_state },
+    { "interp_fallbacks",  handle_interp_fallbacks },
     { "mapper_state",      handle_mapper_state },
     { "watch",             handle_watch },
     { "unwatch",           handle_unwatch },
@@ -789,10 +933,18 @@ void gb_debug_server_poll(void)
             s_client = c;
             set_nonblocking(s_client);
             s_recv_len = 0;
+            s_recv_buf[0] = '\0';
+            send_queue_reset();
             fprintf(stderr, "[debug] Client connected\n");
         }
         return;
     }
+
+    /* Drain anything queued since the last poll before reading commands, so a
+     * client that alternates request/response never waits a frame for a reply
+     * that is already formatted. */
+    send_queue_flush();
+    if (s_client == SOCK_INVALID) return;
 
     /* Receive data */
     int space = RECV_BUF_SIZE - s_recv_len - 1;
@@ -805,6 +957,7 @@ void gb_debug_server_poll(void)
             fprintf(stderr, "[debug] Client disconnected\n");
             sock_close(s_client);
             s_client = SOCK_INVALID;
+            send_queue_reset();
             s_paused = 0;
             s_input_override = -1;
             return;
@@ -818,6 +971,7 @@ void gb_debug_server_poll(void)
                 fprintf(stderr, "[debug] recv error %d, dropping client\n", err);
                 sock_close(s_client);
                 s_client = SOCK_INVALID;
+                send_queue_reset();
                 s_paused = 0;
                 s_input_override = -1;
                 return;
@@ -837,6 +991,9 @@ void gb_debug_server_poll(void)
         s_recv_len -= consumed;
         memmove(s_recv_buf, nl + 1, s_recv_len + 1);
     }
+
+    /* Push the responses this poll produced. */
+    send_queue_flush();
 }
 
 void gb_debug_server_record_frame(void)
@@ -952,8 +1109,23 @@ void gb_debug_server_check_watchpoints(void)
 void gb_debug_server_shutdown(void)
 {
     if (s_client != SOCK_INVALID) {
+        /* Best-effort drain so the reply to `quit` actually reaches the
+         * client. Bounded: a wedged reader must not wedge the exit path. */
+        for (int spin = 0; spin < 200 && s_client != SOCK_INVALID
+                        && s_send_head != s_send_tail; spin++) {
+            send_queue_flush();
+            if (s_send_head == s_send_tail) break;
+#ifdef _WIN32
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
+        }
+    }
+    if (s_client != SOCK_INVALID) {
         sock_close(s_client);
         s_client = SOCK_INVALID;
+        send_queue_reset();
     }
     if (s_listen != SOCK_INVALID) {
         sock_close(s_listen);

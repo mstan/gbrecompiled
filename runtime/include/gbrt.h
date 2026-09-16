@@ -82,11 +82,20 @@ typedef struct {
 
 extern bool gbrt_trace_enabled;
 extern bool gbrt_log_lcd_transitions;
-/* Per-interpreter-entry fallback logging (stderr cap + interp_fallbacks.log +
- * debug-server ping). Default true. The co-sim disables it around a run: in
- * interpreter mode gb_interpret is the normal path, so logging (with fflush)
- * every instruction dominates long-run wall-clock. */
+/* Per-interpreter-entry fallback logging (stderr cap + interp_fallbacks.log).
+ * Default true. The co-sim disables it around a run: in interpreter mode
+ * gb_interpret is the normal path, so logging every entry dominates long-run
+ * wall-clock. Fallbacks are NOT streamed to the debug server; query the
+ * always-on hotspot ring (`interp_fallbacks` command) instead. */
 extern bool gbrt_interp_fallback_logging;
+
+/** Register the interpreter fallback log so it is flushed and closed at exit. */
+void gbrt_register_interp_log(void* file);
+
+/** Note a (bank, addr) interpreter entry site. Returns true the first time a
+ *  site is seen, so the caller can flush the log once per distinct site
+ *  instead of once per entry. */
+bool gbrt_note_interp_log_site(uint8_t bank, uint16_t addr);
 extern uint64_t gbrt_instruction_count;
 extern uint64_t gbrt_instruction_limit;
 

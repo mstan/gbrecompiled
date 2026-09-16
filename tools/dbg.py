@@ -24,6 +24,7 @@ Commands:
     continue / c                Resume game
     step [n]                    Step N frames (default 1)
     run_to <frame>              Run to specific frame
+    interp_fallbacks            Always-on interpreter-fallback ring (totals + top sites)
     history                     Ring buffer stats
     get_frame <n>               Get frame record
     range <start> <end>         Frame range query
@@ -48,16 +49,47 @@ def connect(host=DEFAULT_HOST, port=DEFAULT_PORT):
     return s
 
 
+_RECV_BUF = bytearray()
+_NEXT_ID = [1]
+EVENTS = []
+
+
 def send_cmd(sock, cmd_dict):
-    line = json.dumps(cmd_dict) + "\n"
-    sock.sendall(line.encode())
-    buf = b""
-    while b"\n" not in buf:
-        chunk = sock.recv(4096)
+    """Send one command and return its response.
+
+    The server also pushes asynchronous event lines (watchpoint, step_done,
+    run_to_done, dropped), so responses must be matched by id and event lines
+    skipped -- reading "until the first newline and parsing it" desynchronizes
+    the moment any event lands between request and reply.
+    """
+    cmd_dict = dict(cmd_dict)
+    req_id = cmd_dict.get("id")
+    if req_id is None:
+        req_id = _NEXT_ID[0]
+        _NEXT_ID[0] += 1
+        cmd_dict["id"] = req_id
+
+    sock.sendall((json.dumps(cmd_dict) + "\n").encode())
+
+    while True:
+        while b"\n" in _RECV_BUF:
+            raw, rest = bytes(_RECV_BUF).split(b"\n", 1)
+            _RECV_BUF[:] = rest
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw.decode())
+            except ValueError:
+                EVENTS.append({"event": "malformed", "raw": raw.decode(errors="replace")})
+                continue
+            if obj.get("id") == req_id:
+                return obj
+            EVENTS.append(obj)
+        chunk = sock.recv(65536)
         if not chunk:
-            break
-        buf += chunk
-    return json.loads(buf.decode().strip())
+            raise ConnectionError("debug server closed the connection")
+        _RECV_BUF.extend(chunk)
 
 
 def pretty_regs(resp):

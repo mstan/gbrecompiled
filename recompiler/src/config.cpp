@@ -59,17 +59,6 @@ std::optional<GameConfig> load_config(const std::string& path) {
         if (auto p = rom->get("patch_file")) {
             config.patch_file = p->value_or(std::string{});
         }
-        // [rom] dispatch_manifest is an alias for [options] dispatch_misses —
-        // the seed manifest lives with the ROM identity, so a second body of the
-        // same cart can point at its own manifest without touching [options].
-        if (auto p = rom->get("dispatch_manifest")) {
-            config.dispatch_misses_file = p->value_or(std::string{});
-            if (!config.dispatch_misses_file.empty() &&
-                fs::path(config.dispatch_misses_file).is_relative()) {
-                config.dispatch_misses_file =
-                    (config_dir / config.dispatch_misses_file).string();
-            }
-        }
         if (auto sym = rom->get("symbols")) {
             config.symbol_file = sym->value_or(std::string{});
             if (!config.symbol_file.empty() && fs::path(config.symbol_file).is_relative()) {

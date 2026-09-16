@@ -59,6 +59,42 @@ uint64_t gbrt_instruction_count = 0;
 uint64_t gbrt_instruction_limit = 0;
 void (*gbrt_instruction_limit_callback)(void) = NULL;
 
+/* ---- interp_fallbacks.log bookkeeping ----------------------------------- */
+/* Open-addressed set of (bank, addr) sites already written to the log. Used to
+ * flush once per distinct site rather than once per interpreter entry: harvest
+ * dedups by site, so per-site durability is all the manifest needs, while the
+ * per-entry fflush cost a large multiple of the interpretation it recorded. */
+#define GBRT_INTERP_SITE_SLOTS 8192u
+static uint32_t gbrt_interp_sites[GBRT_INTERP_SITE_SLOTS];
+static FILE* gbrt_interp_log_file = NULL;
+static bool gbrt_interp_log_atexit_registered = false;
+
+static void gbrt_flush_interp_log(void) {
+    if (gbrt_interp_log_file) fflush(gbrt_interp_log_file);
+}
+
+void gbrt_register_interp_log(void* file) {
+    gbrt_interp_log_file = (FILE*)file;
+    if (!gbrt_interp_log_atexit_registered) {
+        atexit(gbrt_flush_interp_log);
+        gbrt_interp_log_atexit_registered = true;
+    }
+}
+
+bool gbrt_note_interp_log_site(uint8_t bank, uint16_t addr) {
+    uint32_t key = ((uint32_t)bank << 16) | addr | 0x80000000u; /* 0 == empty */
+    uint32_t h = (key * 2654435761u) % GBRT_INTERP_SITE_SLOTS;
+    for (uint32_t probe = 0; probe < GBRT_INTERP_SITE_SLOTS; probe++) {
+        uint32_t slot = (h + probe) % GBRT_INTERP_SITE_SLOTS;
+        if (gbrt_interp_sites[slot] == key) return false;
+        if (gbrt_interp_sites[slot] == 0) {
+            gbrt_interp_sites[slot] = key;
+            return true;
+        }
+    }
+    return true; /* table full (never, for a 64-bank ROM): flush and move on */
+}
+
 static char* gbrt_trace_filename = NULL;
 static bool gbrt_ppu_trace_config_loaded = false;
 static char* gbrt_ppu_trace_filename = NULL;

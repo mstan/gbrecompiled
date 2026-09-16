@@ -49,7 +49,11 @@ struct GameConfig {
     // patch_file:    BPS shipped next to the executable that derives this
     //   body's exact image from the user's stock ROM. Empty = "<prefix>.bps"
     //   (the historical default) for single-body builds; in a multi-body build
-    //   it is applied IN MEMORY at init instead of written to disk.
+    //   it is applied IN MEMORY at init instead of written to disk, and at
+    //   generation time to derive the image actually recompiled.
+    // A second body of the same cart keeps its own Tier-0 seeds through the
+    // existing [options] dispatch_misses key -- the hack relocates code, so the
+    // sibling dispatch_misses.toml auto-discovery must not be shared.
     std::string symbol_prefix;
     std::string patch_file;
 

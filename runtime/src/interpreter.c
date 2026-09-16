@@ -161,9 +161,15 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
     uint8_t entry_bank = (addr < 0x4000) ? 0 : (uint8_t)ctx->rom_bank;
     uint32_t entry_cycles = ctx->cycles;
 
-    /* Interpreter fallback logging — stderr, file, and debug server.
-     * Skipped entirely when disabled (e.g. by the co-sim) because in interpreter
-     * mode this is the per-instruction hot path and the fflush dominates. */
+    /* Interpreter fallback logging — stderr cap + interp_fallbacks.log (the
+     * harvest input). Skipped entirely when disabled (e.g. by the co-sim)
+     * because in interpreter mode this is the per-instruction hot path.
+     *
+     * Deliberately NOT pushed to the debug server: at ~6 entries per frame in
+     * a real game that firehose outruns any reader, and a non-blocking socket
+     * then drops part of a line. The always-on hotspot ring in GBContext
+     * (ctx->interpreter_hotspots, fed by gbrt_note_interpreter_session) is the
+     * queryable record instead — see the `interp_fallbacks` debug command. */
     if (gbrt_interp_fallback_logging) {
         static int entry_count = 0;
         static FILE* interp_log = NULL;
@@ -180,17 +186,18 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
         /* Always log to file */
         if (!interp_log) {
             interp_log = fopen("interp_fallbacks.log", "w");
-            if (interp_log) fprintf(interp_log, "# Interpreter fallback log\n# bank addr count\n");
+            if (interp_log) {
+                fprintf(interp_log, "# Interpreter fallback log\n# bank addr count\n");
+                gbrt_register_interp_log(interp_log);
+            }
         }
         if (interp_log) {
             fprintf(interp_log, "%d 0x%04X %d\n", (int)entry_bank, addr, entry_count);
-            fflush(interp_log);
+            /* fflush only on the first sighting of a site: harvest dedups by
+             * site, so per-site durability is what matters, and flushing every
+             * repeat entry costs more than the interpretation itself. */
+            if (gbrt_note_interp_log_site(entry_bank, addr)) fflush(interp_log);
         }
-
-        /* Notify debug server (if connected) */
-        gb_debug_server_send_fmt(
-            "{\"event\":\"interp_fallback\",\"bank\":%d,\"addr\":\"0x%04X\",\"count\":%d}",
-            (int)entry_bank, addr, entry_count);
     }
     gbrt_log_trace(ctx, (addr < 0x4000) ? 0 : ctx->rom_bank, addr);
 

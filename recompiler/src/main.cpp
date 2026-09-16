@@ -2061,6 +2061,37 @@ int main(int argc, char* argv[]) {
         gen_opts.emit_main_entry_point = false;
         gen_opts.emit_cmake = false;
     }
+    /* ── Multi-body (runtime/include/gb_body.h) ───────────────────────────────
+     * All three keys default off, so an untouched config emits byte-identical
+     * output.
+     *   [rom]     symbol_prefix   namespace for every emitted global
+     *   [rom]     patch_file      BPS that derives this body's image in memory
+     *   [options] emit_main       emit the global main() wrapper (default true)
+     *   [options] body_only       LIBRARY body: no main(), no CMake project,
+     *                             a <prefix>_body.cmake source list instead,
+     *                             and namespaced symbols so it links beside
+     *                             another body in one executable
+     *   [options] multi_body      PRIMARY project of a multi-body executable:
+     *                             main() boots whichever body the game picks */
+    gen_opts.symbol_prefix = game_config.symbol_prefix;
+    gen_opts.patch_file = game_config.patch_file;
+    gen_opts.multi_body = game_config.multi_body.value_or(false);
+    gen_opts.body_only = game_config.body_only.value_or(false);
+    if (game_config.emit_main.has_value()) {
+        gen_opts.emit_main_entry_point = *game_config.emit_main;
+    }
+    if (!gen_opts.symbol_prefix.empty()) {
+        gen_opts.use_prefixed_symbols = true;
+    }
+    if (gen_opts.body_only) {
+        gen_opts.use_prefixed_symbols = true;
+        gen_opts.emit_main_entry_point = false;
+        gen_opts.emit_cmake = false;   /* <prefix>_body.cmake instead */
+    }
+    if (gen_opts.body_only && gen_opts.multi_body) {
+        std::cerr << "Error: [options] body_only and multi_body are mutually exclusive\n";
+        return 1;
+    }
     gen_opts.runtime_dir = game_config.runtime_dir;
     gen_opts.valid_crcs = game_config.valid_crcs;
     for (const auto& io : game_config.imm_overrides) {

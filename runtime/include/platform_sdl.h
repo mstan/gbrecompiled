@@ -52,6 +52,18 @@ enum {
 bool gb_platform_init(int scale);
 
 /**
+ * @brief Run the recomp-ui pre-boot launcher, at most once
+ *
+ * gb_platform_init() calls this itself, so a single-body project never has to.
+ * A multi-body project (gb_body.h) calls it explicitly before creating its
+ * GBContext: the launcher's Mods page decides which recompiled body boots, and
+ * the body supplies the GBConfig and the save id. The second call is a no-op.
+ * Returns 1 if the launcher ran, 0 if it was skipped (benchmark / scripted /
+ * frame-dump runs, GBRECOMP_NO_LAUNCHER, or a build without RECOMP_LAUNCHER).
+ */
+int gb_platform_preboot_launcher(void);
+
+/**
  * @brief Register context with platform (sets up callbacks)
  */
 void gb_platform_register_context(GBContext* ctx);

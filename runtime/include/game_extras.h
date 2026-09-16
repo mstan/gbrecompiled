@@ -48,6 +48,22 @@ void game_draw_overlay(struct GBContext *ctx);
 struct RecompLauncherCModProvider;
 const struct RecompLauncherCModProvider *game_get_mods(const char *exe_dir);
 
+/* ---- Multi-body hooks (one executable, several recompiled ROM bodies) ----
+ *
+ * Default: no bodies, so the generated project boots its own single body and
+ * nothing here has any effect. See gb_body.h for the full contract. */
+struct GBBody;
+
+/* Every recompiled body this executable contains. Return NULL / *out_count = 0
+ * (the default) for an ordinary single-body build. */
+const struct GBBody *const *game_get_bodies(int *out_count);
+
+/* Index into game_get_bodies()'s array of the body to boot. Called once, after
+ * the pre-boot launcher has run (so a Mods toggle can decide), before the
+ * GBContext is created. Return -1 to keep the generated project's own body.
+ * Default: 0. */
+int game_select_body(const struct GBBody *const *bodies, int count);
+
 /* ---- Debug hooks ---- */
 
 /* Fill game-specific data into the frame record.

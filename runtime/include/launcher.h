@@ -40,6 +40,32 @@ void launcher_set_expected_sha256(const char *hex);
 void launcher_set_patch_file(const char *filename);
 
 /**
+ * Apply a BPS patch to an in-memory ROM image. Nothing is written to disk and
+ * the caller's buffer is left untouched.
+ *
+ * `patch_filename` is looked up next to the executable (launcher_init() must
+ * have run). On success returns 1 and hands back a malloc'd patched image in
+ * *out / *out_len (caller frees). When `expect_sha256` is non-NULL/non-empty
+ * the patched image must hash to it, otherwise the call fails.
+ *
+ * This is the multi-body path (gb_body.h): a body recompiled from a romhack
+ * derives its image from the user's stock ROM at boot, in RAM, so the user
+ * only ever supplies — and the CRC gate only ever accepts — the stock cart.
+ * Returns 0 on any failure, with a human-readable reason in
+ * launcher_last_error().
+ */
+int launcher_apply_patch_in_memory(const char *patch_filename,
+                                   const unsigned char *rom, unsigned int rom_len,
+                                   unsigned char **out, unsigned int *out_len,
+                                   const char *expect_sha256);
+
+/**
+ * Human-readable reason for the most recent launcher failure ("" if none).
+ * The string is owned by the launcher and valid until the next failure.
+ */
+const char *launcher_last_error(void);
+
+/**
  * Get ROM file path. Checks in order:
  *   1. Cached path from rom.cfg (if file still exists and CRC matches)
  *   2. Windows file picker dialog (re-prompts on CRC mismatch)

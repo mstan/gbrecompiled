@@ -38,6 +38,31 @@ struct GeneratorOptions {
     bool use_prefixed_symbols = false;   // Prefix all symbols (for multi-ROM)
     bool emit_main_entry_point = true;   // Emit a global main() wrapper
     bool emit_cmake = true;              // Emit a standalone CMakeLists.txt
+
+    // ── Multi-body (runtime/include/gb_body.h) ──────────────────────────────
+    // All off by default: an untouched config emits byte-identical output.
+    //
+    // symbol_prefix   Namespace for use_prefixed_symbols. Empty falls back to
+    //                 output_prefix, matching the historical --prefix-symbols
+    //                 / multi-rom behaviour.
+    // body_only       This tree is a LIBRARY body: no CMakeLists.txt project,
+    //                 a <prefix>_body.cmake source list instead, and every
+    //                 emitted global namespaced so it links beside another
+    //                 body in one executable.
+    // multi_body      This tree is the PRIMARY project of a multi-body
+    //                 executable: its main() resolves the body to boot through
+    //                 gb_body_resolve() and takes the GBConfig, save id, and
+    //                 init/run entry from it.
+    // patch_file      BPS filename shipped next to the executable that derives
+    //                 this body's exact image from the user's stock ROM. Empty
+    //                 keeps the historical "<prefix>.bps" default. Under
+    //                 body_only/multi_body it is applied IN MEMORY at init —
+    //                 nothing is written to disk and the CRC gate keeps
+    //                 accepting only the stock cart.
+    std::string symbol_prefix;
+    bool body_only = false;
+    bool multi_body = false;
+    std::string patch_file;
     bool embed_rom_data = true;          // Embed ROM data in output
     bool debug_mode = false;             // Extra debug output
     size_t parallel_codegen_jobs = 0;    // 0 = auto, 1 = disabled

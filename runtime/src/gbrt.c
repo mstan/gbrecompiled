@@ -3456,7 +3456,37 @@ void gbrt_log_interrupt_service(GBContext* ctx,
 }
 
 /* gb_dispatch is provided by the generated project's code (the recompiler
- * emits the definition; e.g. main.c). The runtime only calls it here. */
+ * emits the definition; e.g. main.c). The runtime only calls it here.
+ *
+ * Multi-body seam (gb_body.h): an executable carrying several recompiled
+ * bodies namespaces all but the primary one, so the plain gb_dispatch is the
+ * primary body's. gb_body_resolve() registers the selected body's own pair
+ * here; with nothing registered (every single-body build) gbrt_dispatch() is
+ * a null test away from the direct call it has always been. */
+
+static GBDispatchFn g_gbrt_dispatch;
+static GBDispatchFn g_gbrt_dispatch_call;
+
+void gb_set_dispatch(GBDispatchFn dispatch, GBDispatchFn dispatch_call) {
+    g_gbrt_dispatch = dispatch;
+    g_gbrt_dispatch_call = dispatch_call;
+}
+
+void gbrt_dispatch(GBContext* ctx, uint16_t addr) {
+    if (g_gbrt_dispatch) {
+        g_gbrt_dispatch(ctx, addr);
+        return;
+    }
+    gb_dispatch(ctx, addr);
+}
+
+void gbrt_dispatch_call(GBContext* ctx, uint16_t addr) {
+    if (g_gbrt_dispatch_call) {
+        g_gbrt_dispatch_call(ctx, addr);
+        return;
+    }
+    gb_dispatch_call(ctx, addr);
+}
 
 #ifndef _MSC_VER
 __attribute__((weak)) void gb_dispatch_call(GBContext* ctx, uint16_t addr) {
@@ -4043,7 +4073,7 @@ uint32_t gb_step(GBContext* ctx) {
     }
 
     uint32_t start = ctx->cycles;
-    gb_dispatch(ctx, ctx->pc);
+    gbrt_dispatch(ctx, ctx->pc);
     return ctx->cycles - start;
 }
 
@@ -4099,7 +4129,7 @@ uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
     if (mode == GB_EXECUTION_INTERPRETER || ctx->halt_bug) {
         gb_interpret(ctx, ctx->pc);
     } else {
-        gb_dispatch(ctx, ctx->pc);
+        gbrt_dispatch(ctx, ctx->pc);
     }
 
     ctx->single_step_mode = saved_single_step;

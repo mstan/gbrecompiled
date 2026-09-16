@@ -600,6 +600,25 @@ void gb_dispatch(GBContext* ctx, uint16_t addr);
 void gb_dispatch_call(GBContext* ctx, uint16_t addr);
 
 /**
+ * @brief Route the runtime's own entry into recompiled code
+ *
+ * Multi-body seam (see gb_body.h). A generated project normally defines the
+ * plain gb_dispatch above and the runtime calls it directly; that is the
+ * default and nothing has to call this. An executable carrying more than one
+ * recompiled body namespaces all but one of them, so gb_dispatch belongs to
+ * the primary body only: gb_body_resolve() calls this with the selected body's
+ * own dispatch pair. Passing NULL restores the direct gb_dispatch path.
+ */
+typedef void (*GBDispatchFn)(GBContext* ctx, uint16_t addr);
+void gb_set_dispatch(GBDispatchFn dispatch, GBDispatchFn dispatch_call);
+
+/**
+ * @brief The dispatch entry the runtime will use (registered body, else gb_dispatch)
+ */
+void gbrt_dispatch(GBContext* ctx, uint16_t addr);
+void gbrt_dispatch_call(GBContext* ctx, uint16_t addr);
+
+/**
  * @brief Fallback interpreter for uncompiled code
  */
 void gb_interpret(GBContext* ctx, uint16_t addr);

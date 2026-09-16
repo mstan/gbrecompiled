@@ -4734,6 +4734,39 @@ static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
     }
 }
 
+/* Pre-boot launcher (recomp-ui). Interactive runs only: skip benchmark,
+ * scripted replay, and any frame-dump/headless mode. Runs BEFORE the SDL_Init +
+ * load_runtime_preferences + window creation in gb_platform_init(), so the
+ * settings + keybinds it writes to runtime_prefs.ini are read moments later,
+ * and the ROM it writes to rom.cfg is picked up in game init.
+ *
+ * gb_platform_init() calls this itself, which is all a single-body project
+ * needs. A multi-body project (gb_body.h) calls it explicitly first: the Mods
+ * page decides which body boots, and that body decides the GBConfig and the
+ * save id, both of which are needed before gb_context_create(). Runs at most
+ * once, so the gb_platform_init() call is then a no-op. Returns 1 if the
+ * launcher actually ran, 0 if it was skipped. */
+extern "C" int gb_platform_preboot_launcher(void) {
+    static int s_preboot_done = 0;
+    if (s_preboot_done) return 0;
+    s_preboot_done = 1;
+
+#ifdef RECOMP_LAUNCHER
+    g_benchmark_mode = g_benchmark_mode || env_flag_enabled("GBRECOMP_BENCHMARK");
+    if (!g_benchmark_mode &&
+        g_script_count == 0 && g_dump_count == 0 &&
+        g_dump_present_count == 0 && g_dump_cycle_count == 0 &&
+        !env_flag_enabled("GBRECOMP_NO_LAUNCHER")) {
+        if (gb_launcher_preboot() == GB_LAUNCHER_QUIT) {
+            /* user closed the launcher window: clean exit, no game boot */
+            exit(0);
+        }
+        return 1;
+    }
+#endif
+    return 0;
+}
+
 bool gb_platform_init(int scale) {
     g_benchmark_mode = g_benchmark_mode || env_flag_enabled("GBRECOMP_BENCHMARK");
     g_scale = scale;
@@ -4760,22 +4793,7 @@ bool gb_platform_init(int scale) {
     g_present_count = 0;
     g_last_timing = {};
 
-#ifdef RECOMP_LAUNCHER
-    /* Pre-boot launcher (recomp-ui). Interactive runs only: skip benchmark,
-     * scripted replay, and any frame-dump/headless mode. Runs BEFORE the
-     * SDL_Init + load_runtime_preferences + window creation below, so the
-     * settings + keybinds it writes to runtime_prefs.ini are read moments
-     * later, and the ROM it writes to rom.cfg is picked up in game init. */
-    if (!g_benchmark_mode &&
-        g_script_count == 0 && g_dump_count == 0 &&
-        g_dump_present_count == 0 && g_dump_cycle_count == 0 &&
-        !env_flag_enabled("GBRECOMP_NO_LAUNCHER")) {
-        if (gb_launcher_preboot() == GB_LAUNCHER_QUIT) {
-            /* user closed the launcher window: clean exit, no game boot */
-            exit(0);
-        }
-    }
-#endif
+    gb_platform_preboot_launcher();
 
     /* Load configurable keybinds */
     keybinds_init(NULL);
@@ -5959,6 +5977,8 @@ void gb_platform_register_context(GBContext* ctx) {
 #else  /* !GB_HAS_SDL2 */
 
 /* Stub implementations when SDL2 is not available */
+
+extern "C" int gb_platform_preboot_launcher(void) { return 0; }
 
 bool gb_platform_init(int scale) {
     (void)scale;

@@ -648,11 +648,28 @@ static std::string json_escape(const std::string& input) {
     return ss.str();
 }
 
+/* Namespace for every emitted global when use_prefixed_symbols is on. An
+ * explicit [rom] symbol_prefix wins; otherwise the output prefix, which is what
+ * --prefix-symbols and multi-rom mode have always used. */
+static const std::string& symbol_namespace(const GeneratorOptions& options) {
+    return options.symbol_prefix.empty() ? options.output_prefix : options.symbol_prefix;
+}
+
 static std::string module_link_name(const GeneratorOptions& options, const std::string& symbol) {
     if (!options.use_prefixed_symbols) {
         return symbol;
     }
-    return options.output_prefix + "__" + symbol;
+    return symbol_namespace(options) + "__" + symbol;
+}
+
+/* Name of the GBBody descriptor this module exports (multi-body builds). */
+static std::string body_symbol_name(const GeneratorOptions& options) {
+    return options.output_prefix + "_body";
+}
+
+/* True when this module participates in the multi-body seam at all. */
+static bool emits_body_descriptor(const GeneratorOptions& options) {
+    return options.body_only || options.multi_body;
 }
 
 static std::string emitted_function_name(const GeneratorOptions& options,
@@ -2659,6 +2676,9 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "#include \"" << internal_header_file << "\"\n";
     source_ss << "#include \"gbrt.h\"\n";
     source_ss << "#include \"launcher.h\"\n";
+    if (emits_body_descriptor(options)) {
+        source_ss << "#include \"gb_body.h\"\n";
+    }
     source_ss << "#include <stdio.h>\n";
     source_ss << "#include <stdlib.h>\n\n";
     
@@ -3423,11 +3443,18 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "    /* Identity check: game_extras CRC hooks take precedence (multi- */\n";
     source_ss << "    /* revision allowance); otherwise the embedded SHA-256 of the */\n";
     source_ss << "    /* exact ROM this binary was recompiled from is enforced. */\n";
+    const std::string patch_file =
+        options.patch_file.empty() ? (options.output_prefix + ".bps") : options.patch_file;
     source_ss << "    launcher_init();\n";
     source_ss << "    launcher_set_expected_sha256(" << rom_sha256_symbol_name(options) << ");\n";
-    source_ss << "    /* If a stock ROM is supplied, auto-apply this enhancement patch */\n";
-    source_ss << "    /* (shipped next to the exe, if present) to derive the expected ROM. */\n";
-    source_ss << "    launcher_set_patch_file(\"" << options.output_prefix << ".bps\");\n";
+    if (!emits_body_descriptor(options)) {
+        /* Single-body: the launcher may derive the expected image from a stock
+         * ROM on disk. A multi-body build patches in memory instead (below), so
+         * the on-disk ROM the CRC gate accepts never changes. */
+        source_ss << "    /* If a stock ROM is supplied, auto-apply this enhancement patch */\n";
+        source_ss << "    /* (shipped next to the exe, if present) to derive the expected ROM. */\n";
+        source_ss << "    launcher_set_patch_file(\"" << patch_file << "\");\n";
+    }
     source_ss << "    const char* rom_path = launcher_get_rom_path();\n";
     source_ss << "    if (!rom_path) {\n";
     source_ss << "        fprintf(stderr, \"[" << options.output_prefix << "] No ROM selected — exiting.\\n\");\n";
@@ -3439,6 +3466,30 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "        fprintf(stderr, \"[" << options.output_prefix << "] Failed to load ROM: %s\\n\", rom_path);\n";
     source_ss << "        exit(1);\n";
     source_ss << "    }\n";
+    if (emits_body_descriptor(options) && !options.patch_file.empty()) {
+        /* This body runs a patched derivative of the user cart. Derive it IN
+         * MEMORY so the CRC gate keeps accepting only the stock ROM and nothing
+         * is ever written to disk. */
+        source_ss << "    /* This body runs a patched derivative of the user ROM. Derive */\n";
+        source_ss << "    /* it in memory: the CRC gate only ever accepts the stock cart. */\n";
+        source_ss << "    {\n";
+        source_ss << "        unsigned char* patched = 0;\n";
+        source_ss << "        unsigned int patched_size = 0;\n";
+        source_ss << "        if (!launcher_apply_patch_in_memory(\"" << patch_file << "\",\n";
+        source_ss << "                                           " << rom_data_symbol_name(options)
+                  << ", loaded_size,\n";
+        source_ss << "                                           &patched, &patched_size,\n";
+        source_ss << "                                           " << rom_sha256_symbol_name(options)
+                  << ")) {\n";
+        source_ss << "            fprintf(stderr, \"[" << options.output_prefix
+                  << "] %s\\n\", launcher_last_error());\n";
+        source_ss << "            exit(1);\n";
+        source_ss << "        }\n";
+        source_ss << "        free(" << rom_data_symbol_name(options) << ");\n";
+        source_ss << "        " << rom_data_symbol_name(options) << " = patched;\n";
+        source_ss << "        loaded_size = patched_size;\n";
+        source_ss << "    }\n";
+    }
     source_ss << "    " << rom_size_symbol_name(options) << " = (size_t)loaded_size;\n";
     source_ss << "    gb_context_load_rom(ctx, " << rom_data_symbol_name(options)
               << ", " << rom_size_symbol_name(options) << ");\n";
@@ -3454,6 +3505,30 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "    // Start the trampoline loop - execution will stay here until stopped\n";
     source_ss << "    " << dispatch_function_name(options) << "(ctx, ctx->pc);\n";
     source_ss << "}\n";
+
+    if (emits_body_descriptor(options)) {
+        /* One executable, several recompiled ROM bodies (runtime/gb_body.h).
+         * The game extras.c collects these descriptors and picks one. */
+        source_ss << "\n/* Multi-body descriptor - see runtime/include/gb_body.h. */\n";
+        source_ss << "const GBBody " << body_symbol_name(options) << " = {\n";
+        source_ss << "    .id = \"" << options.output_prefix << "\",\n";
+        source_ss << "    .display_name = 0,\n";
+        source_ss << "    .platform = \"" << (rom_is_cgb ? "gbc" : "gb") << "\",\n";
+        source_ss << "    .patch_file = " << (options.patch_file.empty()
+                                              ? std::string("0")
+                                              : ("\"" + options.patch_file + "\"")) << ",\n";
+        source_ss << "    .expected_sha256 = " << rom_sha256_symbol_name(options) << ",\n";
+        source_ss << "    .cartridge_supports_cgb = " << (rom_is_cgb ? 1 : 0) << ",\n";
+        source_ss << "    .cartridge_requires_cgb = " << (rom_is_cgb_only ? 1 : 0) << ",\n";
+        source_ss << "    .default_config = " << options.output_prefix << "_default_config,\n";
+        source_ss << "    .init = " << options.output_prefix << "_init,\n";
+        source_ss << "    .run = " << options.output_prefix << "_run,\n";
+        source_ss << "    .dispatch = " << dispatch_function_name(options) << ",\n";
+        source_ss << "    .dispatch_call = " << dispatch_call_function_name(options) << ",\n";
+        source_ss << "    .rom_data = &" << rom_data_symbol_name(options) << ",\n";
+        source_ss << "    .rom_size = &" << rom_size_symbol_name(options) << ",\n";
+        source_ss << "};\n";
+    }
     
     output.source_content = source_ss.str();
     output.source_file = options.output_prefix + ".c";
@@ -3502,10 +3577,32 @@ GeneratedOutput generate_output(const ir::Program& program,
     output.rom_data_content = rom_ss.str();
     output.rom_data_file = options.output_prefix + "_rom.c";
     
+    /* Multi-body (runtime/include/gb_body.h). When this tree is the PRIMARY
+     * project of an executable carrying several recompiled bodies, main() takes
+     * its GBConfig, save id and init/run entry from whichever body
+     * game_select_body() picked instead of hard-wiring its own. Off by default:
+     * every expression below collapses back to the single-body spelling. */
+    const bool body_aware_main = options.multi_body;
+    const std::string cfg_expr = body_aware_main
+        ? std::string("gb_active_body->default_config()")
+        : (options.output_prefix + "_default_config()");
+    const std::string save_id_expr = body_aware_main
+        ? std::string("gb_active_body->id")
+        : ("\"" + options.output_prefix + "\"");
+    const std::string init_call = body_aware_main
+        ? std::string("gb_active_body->init")
+        : (options.output_prefix + "_init");
+    const std::string run_call = body_aware_main
+        ? std::string("gb_active_body->run")
+        : (options.output_prefix + "_run");
+
     // Generate main
     std::ostringstream main_ss;
     main_ss << "/* Main entry point */\n";
     main_ss << "#include \"" << options.output_prefix << ".h\"\n";
+    if (body_aware_main) {
+        main_ss << "#include \"gb_body.h\"\n";
+    }
     main_ss << "#include \"gbrt.h\"\n";
     main_ss << "#include \"audio.h\"\n";
     main_ss << "#include \"audio_stats.h\"\n";
@@ -3843,7 +3940,25 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "                slow_frame_ms,\n";
     main_ss << "                slow_vsync_ms);\n";
     main_ss << "    }\n\n";
-    main_ss << "    GBConfig runtime_config = *" << options.output_prefix << "_default_config();\n";
+    if (body_aware_main) {
+        /* The pre-boot launcher owns the body choice (a Mods toggle), and the
+         * body owns the GBConfig and the save id — so it has to run BEFORE the
+         * context exists. gb_platform_init() below sees it already done. */
+        main_ss << "    /* Multi-body: the pre-boot launcher picks which recompiled */\n";
+        main_ss << "    /* body runs; it owns the hardware config and the save id. */\n";
+        main_ss << "#ifdef GB_HAS_SDL2\n";
+        main_ss << "    if (benchmark_mode) gb_platform_set_benchmark_mode(true);\n";
+        main_ss << "    gb_platform_preboot_launcher();\n";
+        main_ss << "#endif\n";
+        main_ss << "    const GBBody* gb_active_body = gb_body_resolve(&"
+                << body_symbol_name(options) << ");\n";
+        main_ss << "    if (!gb_active_body) {\n";
+        main_ss << "        fprintf(stderr, \"[" << options.output_prefix
+                << "] no recompiled body to boot\\n\");\n";
+        main_ss << "        return 1;\n";
+        main_ss << "    }\n";
+    }
+    main_ss << "    GBConfig runtime_config = *" << cfg_expr << ";\n";
     main_ss << "    if (strcmp(model_override, \"auto\") == 0) {\n";
     main_ss << "        runtime_config.model = runtime_config.cartridge_supports_cgb ? GB_MODEL_CGB : GB_MODEL_DMG;\n";
     main_ss << "        runtime_config.cgb_compatibility_mode = false;\n";
@@ -3873,10 +3988,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            gb_context_destroy(interpreted_ctx);\n";
     main_ss << "            return 1;\n";
     main_ss << "        }\n";
-    main_ss << "        gb_context_set_save_id(generated_ctx, \"" << options.output_prefix << "\");\n";
-    main_ss << "        gb_context_set_save_id(interpreted_ctx, \"" << options.output_prefix << "\");\n";
-    main_ss << "        " << options.output_prefix << "_init(generated_ctx);\n";
-    main_ss << "        " << options.output_prefix << "_init(interpreted_ctx);\n";
+    main_ss << "        gb_context_set_save_id(generated_ctx, " << save_id_expr << ");\n";
+    main_ss << "        gb_context_set_save_id(interpreted_ctx, " << save_id_expr << ");\n";
+    main_ss << "        " << init_call << "(generated_ctx);\n";
+    main_ss << "        " << init_call << "(interpreted_ctx);\n";
     main_ss << "        GBDifferentialOptions diff_options = {\n";
     main_ss << "            .max_steps = differential_steps,\n";
     main_ss << "            .max_frames = differential_frames,\n";
@@ -3902,10 +4017,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            gb_context_destroy(cosim_b);\n";
     main_ss << "            return 1;\n";
     main_ss << "        }\n";
-    main_ss << "        gb_context_set_save_id(cosim_a, \"" << options.output_prefix << "\");\n";
-    main_ss << "        gb_context_set_save_id(cosim_b, \"" << options.output_prefix << "\");\n";
-    main_ss << "        " << options.output_prefix << "_init(cosim_a);\n";
-    main_ss << "        " << options.output_prefix << "_init(cosim_b);\n";
+    main_ss << "        gb_context_set_save_id(cosim_a, " << save_id_expr << ");\n";
+    main_ss << "        gb_context_set_save_id(cosim_b, " << save_id_expr << ");\n";
+    main_ss << "        " << init_call << "(cosim_a);\n";
+    main_ss << "        " << init_call << "(cosim_b);\n";
     main_ss << "        GBExecutionMode mode_a = (cosim_pair == 2) ? GB_EXECUTION_INTERPRETER : GB_EXECUTION_GENERATED;\n";
     main_ss << "        GBExecutionMode mode_b = (cosim_pair == 1) ? GB_EXECUTION_GENERATED : GB_EXECUTION_INTERPRETER;\n";
     main_ss << "        GBCosimOptions cosim_options = {\n";
@@ -3945,10 +4060,10 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        GBContext* lle = gb_context_create(&runtime_config);\n";
     main_ss << "        GBContext* hle = gb_context_create(&runtime_config);\n";
     main_ss << "        if (!lle || !hle) { fprintf(stderr, \"[BOOTGATE] context create failed\\n\"); return 1; }\n";
-    main_ss << "        gb_context_set_save_id(lle, \"" << options.output_prefix << "\");\n";
-    main_ss << "        gb_context_set_save_id(hle, \"" << options.output_prefix << "\");\n";
-    main_ss << "        " << options.output_prefix << "_init(lle);\n";
-    main_ss << "        " << options.output_prefix << "_init(hle);\n";
+    main_ss << "        gb_context_set_save_id(lle, " << save_id_expr << ");\n";
+    main_ss << "        gb_context_set_save_id(hle, " << save_id_expr << ");\n";
+    main_ss << "        " << init_call << "(lle);\n";
+    main_ss << "        " << init_call << "(hle);\n";
     main_ss << "        if (!gb_context_load_boot_rom(lle, boot_buf, boot_sz)) {\n";
     main_ss << "            fprintf(stderr, \"[BOOTGATE] bad boot ROM size %zu (need 256 or 2304)\\n\", boot_sz);\n";
     main_ss << "            return 1;\n";
@@ -3971,8 +4086,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        fclose(obf);\n";
     main_ss << "        GBContext* oc = gb_context_create(&runtime_config);\n";
     main_ss << "        if (!oc) { fprintf(stderr, \"[SBORACLE] context create failed\\n\"); return 1; }\n";
-    main_ss << "        gb_context_set_save_id(oc, \"" << options.output_prefix << "\");\n";
-    main_ss << "        " << options.output_prefix << "_init(oc);\n";
+    main_ss << "        gb_context_set_save_id(oc, " << save_id_expr << ");\n";
+    main_ss << "        " << init_call << "(oc);\n";
     main_ss << "        int is_cgb = (oc->config.model == GB_MODEL_CGB);\n";
     main_ss << "        int orc = 0;\n";
     main_ss << "        if (oracle_selfcheck) {\n";
@@ -4006,7 +4121,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "        fprintf(stderr, \"Failed to create context\\n\");\n";
     main_ss << "        return 1;\n";
     main_ss << "    }\n";
-    main_ss << "    gb_context_set_save_id(ctx, \"" << options.output_prefix << "\");\n";
+    main_ss << "    gb_context_set_save_id(ctx, " << save_id_expr << ");\n";
     main_ss << "    gbrt_log_lcd_transitions = log_lcd_transitions;\n";
     main_ss << "    if (debug_audio) gb_audio_set_debug(true);\n";
     main_ss << "    gb_audio_set_debug_capture_seconds(debug_audio_seconds);\n";
@@ -4051,7 +4166,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                 << "_GAME.game_id);\n";
         main_ss << "#endif\n";
     }
-    main_ss << "    " << options.output_prefix << "_init(ctx);\n";
+    main_ss << "    " << init_call << "(ctx);\n";
     main_ss << "    int exit_code = 0;\n";
     main_ss << "\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
@@ -4174,7 +4289,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    if (report_interpreter_hotspots) {\n";
     main_ss << "        gbrt_enable_interpreter_summary(ctx, (unsigned)interpreter_hotspot_limit);\n";
     main_ss << "    }\n";
-    main_ss << "    " << options.output_prefix << "_run(ctx);\n";
+    main_ss << "    " << run_call << "(ctx);\n";
     main_ss << "    printf(\"Recompiled code executed successfully!\\n\");\n";
     main_ss << "    printf(\"Registers: A=%02X B=%02X C=%02X\\n\", ctx->a, ctx->b, ctx->c);\n";
     main_ss << "#endif\n";
@@ -4398,8 +4513,46 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "endif()\n";
         output.cmake_content = cmake_ss.str();
         output.cmake_file = "CMakeLists.txt";
+    } else if (options.body_only) {
+        /* A secondary body is not a program: it has no main(), no CMake project
+         * and no runtime of its own — it is a source list the owning project
+         * include()s and compiles into its own executable. Declarative on
+         * purpose: no target, no policy, so the owning project decides the
+         * optimization level, include dirs and defines exactly as it does for
+         * its primary body. */
+        std::ostringstream body_ss;
+        body_ss << "# Generated by gbrecomp -- source list for the '" << options.output_prefix
+                << "' recompiled body.\n";
+        body_ss << "#\n";
+        body_ss << "# One executable, several bodies (runtime/include/gb_body.h). Every global\n";
+        body_ss << "# in these files is namespaced behind '"
+                << symbol_namespace(options) << "__', so they link beside\n";
+        body_ss << "# another body without collisions. There is deliberately no add_library()\n";
+        body_ss << "# here: include() this from the owning project's game_build.cmake and do\n";
+        body_ss << "#\n";
+        body_ss << "#     target_sources(${GBRECOMP_GAME_TARGET} PRIVATE ${"
+                << options.output_prefix << "_BODY_SOURCES})\n";
+        body_ss << "#     target_include_directories(${GBRECOMP_GAME_TARGET} PRIVATE ${"
+                << options.output_prefix << "_BODY_INCLUDE_DIR})\n";
+        body_ss << "#\n";
+        body_ss << "# so the body inherits the same toolchain, defines and include path as the\n";
+        body_ss << "# primary body. " << options.output_prefix
+                << "_main.c is NOT listed: the primary body owns main().\n\n";
+        body_ss << "set(" << options.output_prefix
+                << "_BODY_INCLUDE_DIR \"${CMAKE_CURRENT_LIST_DIR}\")\n\n";
+        body_ss << "set(" << options.output_prefix << "_BODY_SOURCES\n";
+        body_ss << "    \"${CMAKE_CURRENT_LIST_DIR}/" << options.output_prefix << ".c\"\n";
+        for (const auto& extra_file : output.extra_files) {
+            if (extra_file.is_source) {
+                body_ss << "    \"${CMAKE_CURRENT_LIST_DIR}/" << extra_file.filename << "\"\n";
+            }
+        }
+        body_ss << "    \"${CMAKE_CURRENT_LIST_DIR}/" << options.output_prefix << "_rom.c\"\n";
+        body_ss << ")\n";
+        output.cmake_content = body_ss.str();
+        output.cmake_file = options.output_prefix + "_body.cmake";
     }
-    
+
     return output;
 }
 

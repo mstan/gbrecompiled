@@ -49,6 +49,23 @@ std::optional<GameConfig> load_config(const std::string& path) {
         if (auto p = rom->get("output_prefix")) {
             config.output_prefix = p->value_or(std::string{});
         }
+        if (auto p = rom->get("symbol_prefix")) {
+            config.symbol_prefix = p->value_or(std::string{});
+        }
+        if (auto p = rom->get("patch_file")) {
+            config.patch_file = p->value_or(std::string{});
+        }
+        // [rom] dispatch_manifest is an alias for [options] dispatch_misses —
+        // the seed manifest lives with the ROM identity, so a second body of the
+        // same cart can point at its own manifest without touching [options].
+        if (auto p = rom->get("dispatch_manifest")) {
+            config.dispatch_misses_file = p->value_or(std::string{});
+            if (!config.dispatch_misses_file.empty() &&
+                fs::path(config.dispatch_misses_file).is_relative()) {
+                config.dispatch_misses_file =
+                    (config_dir / config.dispatch_misses_file).string();
+            }
+        }
         if (auto crcs = rom->get("valid_crcs")) {
             if (auto arr = crcs->as_array()) {
                 for (auto& elem : *arr) {
@@ -67,6 +84,9 @@ std::optional<GameConfig> load_config(const std::string& path) {
         if (auto v = opts->get("aggressive_scan")) config.aggressive_scan = v->value_or(true);
         if (auto v = opts->get("emit_comments"))   config.emit_comments = v->value_or(true);
         if (auto v = opts->get("single_function")) config.single_function = v->value_or(false);
+        if (auto v = opts->get("emit_main"))       config.emit_main = v->value_or(true);
+        if (auto v = opts->get("body_only"))       config.body_only = v->value_or(false);
+        if (auto v = opts->get("multi_body"))      config.multi_body = v->value_or(false);
         if (auto v = opts->get("limit_instructions"))
             config.limit_instructions = static_cast<size_t>(v->value_or(int64_t{0}));
         if (auto v = opts->get("bank"))

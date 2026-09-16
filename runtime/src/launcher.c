@@ -27,6 +27,9 @@ static char s_rom_path[512] = {0};
 static char s_exe_dir[512] = {0};        /* dir containing the executable (with trailing sep) */
 static char s_expected_sha256[65] = {0};  /* gen-time ROM digest, "" = disabled */
 static char s_patch_file[260] = {0};      /* BPS filename (next to exe), "" = none */
+static char s_last_error[256] = {0};      /* reason for the most recent failure */
+
+const char *launcher_last_error(void) { return s_last_error; }
 
 void launcher_set_expected_sha256(const char *hex) {
     if (hex && hex[0]) {
@@ -225,6 +228,55 @@ static int resolve_or_patch(const char *path, char *resolved, size_t resolved_sz
     return 1;
 }
 
+/* Multi-body path: derive one body's image from the user's ROM entirely in
+ * memory. Never touches the disk, never changes what the CRC gate accepts —
+ * the user supplies (and the gate validates) the stock cart either way. */
+int launcher_apply_patch_in_memory(const char *patch_filename,
+                                   const unsigned char *rom, unsigned int rom_len,
+                                   unsigned char **out, unsigned int *out_len,
+                                   const char *expect_sha256) {
+    s_last_error[0] = '\0';
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!patch_filename || !patch_filename[0] || !rom || !out || !out_len) {
+        snprintf(s_last_error, sizeof(s_last_error), "internal: bad patch request");
+        return 0;
+    }
+
+    char patch_path[600];
+    snprintf(patch_path, sizeof(patch_path), "%s%s", s_exe_dir, patch_filename);
+    long psz = 0;
+    unsigned char *patch = load_file(patch_path, &psz);
+    if (!patch) {
+        snprintf(s_last_error, sizeof(s_last_error),
+                 "patch file not found next to the executable: %s", patch_filename);
+        return 0;
+    }
+
+    unsigned char *patched = NULL;
+    size_t patched_len = 0;
+    char err[160] = {0};
+    int rc = gb_bps_apply(patch, (size_t)psz, rom, (size_t)rom_len,
+                          &patched, &patched_len, err, sizeof(err));
+    free(patch);
+    if (rc != 0) {
+        snprintf(s_last_error, sizeof(s_last_error),
+                 "%s does not apply to this ROM: %s", patch_filename, err);
+        return 0;
+    }
+    if (expect_sha256 && expect_sha256[0] &&
+        !buffer_sha_matches(patched, patched_len, expect_sha256)) {
+        free(patched);
+        snprintf(s_last_error, sizeof(s_last_error),
+                 "%s produced an image this build was not compiled from", patch_filename);
+        return 0;
+    }
+
+    *out = patched;
+    *out_len = (unsigned int)patched_len;
+    return 1;
+}
+
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 /* Returns: 0 invalid, 1 valid as-is, 2 valid after producing a patched file
@@ -285,6 +337,7 @@ static int verify_rom(const char *path, char *resolved, size_t resolved_sz) {
         "ROM CRC32 mismatch!\n\nGot: %08X\n\n"
         "Please select a valid ROM file.",
         actual);
+    snprintf(s_last_error, sizeof(s_last_error), "ROM CRC32 mismatch (got %08X)", actual);
     fprintf(stderr, "[Launcher] %s\n", msg);
 #ifdef _WIN32
     MessageBoxA(NULL, msg, "Wrong ROM", MB_ICONWARNING | MB_OK);

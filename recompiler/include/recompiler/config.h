@@ -40,12 +40,35 @@ struct GameConfig {
     std::string runtime_dir;  // Path to runtime/ (relative to output_dir)
     std::string output_prefix;  // Override for generated symbol/file prefix
 
+    // Multi-body support (see runtime/include/gb_body.h). All default off, so
+    // an existing config generates byte-identical output.
+    //
+    // symbol_prefix: namespace EVERY emitted global (func_*, rst_*, int_*,
+    //   gb_main, gb_dispatch, rom_data, ...) behind "<prefix>__" so two
+    //   recompiled ROM bodies link into one executable. Empty = unprefixed.
+    // patch_file:    BPS shipped next to the executable that derives this
+    //   body's exact image from the user's stock ROM. Empty = "<prefix>.bps"
+    //   (the historical default) for single-body builds; in a multi-body build
+    //   it is applied IN MEMORY at init instead of written to disk.
+    std::string symbol_prefix;
+    std::string patch_file;
+
     // Options (all optional — unset means "use default / CLI value")
     std::optional<bool> verbose;
     std::optional<bool> trace_log;
     std::optional<bool> aggressive_scan;
     std::optional<bool> emit_comments;
     std::optional<bool> single_function;
+    // emit_main:  emit the global main() wrapper. false for a secondary body.
+    // body_only:  this tree is a LIBRARY body, not a program — implies symbol
+    //             prefixing (from symbol_prefix, else output_prefix) and
+    //             emit_main = false, and emits <prefix>_body.cmake (a source
+    //             list the owning project include()s) instead of CMakeLists.txt.
+    // multi_body: this tree is the PRIMARY project of a multi-body executable —
+    //             its main() boots whichever body game_select_body() picks.
+    std::optional<bool> emit_main;
+    std::optional<bool> body_only;
+    std::optional<bool> multi_body;
     std::optional<size_t> limit_instructions;
     std::optional<int> specific_bank;
     std::string trace_file;

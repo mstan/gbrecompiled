@@ -29,7 +29,9 @@ add_library(gbrt STATIC
     src/game_defaults/game_default_get_expected_crc32.c
     src/game_defaults/game_default_get_valid_crcs.c
     src/game_defaults/game_default_extended_view.c
+    src/game_defaults/game_default_bodies.c
     src/gb_widescreen.c
+    src/gb_body.c
     src/gb_custom_view.c
     src/keybinds.c
     src/launcher.c

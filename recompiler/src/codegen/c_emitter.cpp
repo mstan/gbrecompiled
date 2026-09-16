@@ -2333,7 +2333,15 @@ GeneratedOutput generate_output(const ir::Program& program,
     header_ss << "const GBConfig* " << options.output_prefix << "_default_config(void);\n";
     header_ss << "void " << options.output_prefix << "_run(GBContext* ctx);\n";
     header_ss << "void " << options.output_prefix << "_init(GBContext* ctx);\n";
-    header_ss << "int " << module_main_name(options) << "(int argc, char* argv[]);\n\n";
+    header_ss << "int " << module_main_name(options) << "(int argc, char* argv[]);\n";
+    if (emits_body_descriptor(options)) {
+        /* This module's entry in the multi-body table (runtime/gb_body.h). The
+         * game's extras.c collects one of these per body; the primary body's
+         * main() hands its own to gb_body_resolve() as the fallback. */
+        header_ss << "#include \"gb_body.h\"\n";
+        header_ss << "extern const GBBody " << body_symbol_name(options) << ";\n";
+    }
+    header_ss << "\n";
 
     // Function prototypes for all recompiled functions (needed for cross-bank calls)
     header_ss << "/* Recompiled function prototypes */\n";

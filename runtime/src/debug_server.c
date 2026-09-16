@@ -15,6 +15,8 @@
 #include "game_extras.h"
 #include "gbrt.h"
 #include "gb_platform_compat.h"
+#include "gb_body.h"
+#include "ppu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -366,6 +368,49 @@ static void handle_read_io(int id, const char *json)
              id, addr, len, hex);
 }
 
+static void handle_hw_state(int id, const char *json)
+{
+    (void)json;
+    if (!s_ctx) { send_err(id, "no context"); return; }
+
+    /* Which hardware model is actually live, which recompiled body is running
+     * it, and -- on CGB -- both 64-byte palette RAMs, read straight out of the
+     * GBPPU. Deliberately NOT a BCPS/BCPD poke sequence: writing the palette
+     * index register to walk the RAM would permanently move the guest's own
+     * index, and BCPD reads back 0xFF during mode 3, so a probe paused at an
+     * arbitrary cycle would silently record garbage. This is one non-mutating
+     * read of state the runtime already keeps. */
+    const GBPPU *ppu = (const GBPPU *)s_ctx->ppu;
+    const GBBody *body = gb_body_active();
+    int cgb = s_ctx->config.model == GB_MODEL_CGB;
+
+    char bg_hex[129], obj_hex[129];
+    bg_hex[0] = obj_hex[0] = '\0';
+    if (cgb && ppu) {
+        for (int i = 0; i < 64; i++) {
+            snprintf(bg_hex + i * 2, 3, "%02X", ppu->bg_palette_ram[i]);
+            snprintf(obj_hex + i * 2, 3, "%02X", ppu->obj_palette_ram[i]);
+        }
+    }
+
+    send_fmt("{\"id\":%d,\"ok\":true,"
+             "\"model\":\"%s\",\"cgb\":%d,\"cgb_compat\":%d,"
+             "\"body\":\"%s\",\"rom_size\":%u,\"mbc\":\"0x%02X\","
+             "\"bgpi\":\"0x%02X\",\"obpi\":\"0x%02X\","
+             "\"bg_palette\":\"%s\",\"obj_palette\":\"%s\"}",
+             id,
+             s_ctx->config.model == GB_MODEL_CGB ? "cgb"
+                 : (s_ctx->config.model == GB_MODEL_SGB ? "sgb" : "dmg"),
+             cgb ? 1 : 0,
+             s_ctx->config.cgb_compatibility_mode ? 1 : 0,
+             body && body->id ? body->id : "",
+             (unsigned)s_ctx->rom_size,
+             s_ctx->mbc_type,
+             ppu ? (unsigned)ppu->bgpi : 0u,
+             ppu ? (unsigned)ppu->obpi : 0u,
+             bg_hex, obj_hex);
+}
+
 static void handle_ppu_state(int id, const char *json)
 {
     (void)json;
@@ -683,6 +728,7 @@ static const CmdEntry s_commands[] = {
     { "read_vram",         handle_read_vram },
     { "read_io",           handle_read_io },
     { "ppu_state",         handle_ppu_state },
+    { "hw_state",          handle_hw_state },
     { "mapper_state",      handle_mapper_state },
     { "watch",             handle_watch },
     { "unwatch",           handle_unwatch },

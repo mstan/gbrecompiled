@@ -4519,6 +4519,24 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    # SDL2 redefines main to SDL_main via SDL.h; SDL2main provides WinMain.\n";
         cmake_ss << "    target_link_libraries(" << options.output_prefix << " SDL2::SDL2main)\n";
         cmake_ss << "endif()\n";
+        // Stage the mingw-w64 runtime DLLs beside the executable so a bare
+        // double-click (or a PATH that puts another toolchain's libstdc++ first,
+        // e.g. devkitPro) does not die with "entry point not found". Same list
+        // the packaging docs require; libEGL.dll is dlopen'ed by SDL/ANGLE and
+        // is invisible to ldd. Copies only what exists next to the compiler.
+        cmake_ss << "option(GBRECOMP_STAGE_RUNTIME_DLLS \"Copy the mingw-w64 runtime DLLs next to the executable (Windows/GNU)\" ON)\n";
+        cmake_ss << "if(WIN32 AND GBRECOMP_STAGE_RUNTIME_DLLS AND CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang\")\n";
+        cmake_ss << "    get_filename_component(_gb_toolchain_bin \"${CMAKE_C_COMPILER}\" DIRECTORY)\n";
+        cmake_ss << "    foreach(_gb_dll SDL2.dll libEGL.dll libGLESv2.dll zlib1.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)\n";
+        cmake_ss << "        if(EXISTS \"${_gb_toolchain_bin}/${_gb_dll}\")\n";
+        cmake_ss << "            add_custom_command(TARGET " << options.output_prefix << " POST_BUILD\n";
+        cmake_ss << "                COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_gb_toolchain_bin}/${_gb_dll}\" $<TARGET_FILE_DIR:" << options.output_prefix << ">\n";
+        cmake_ss << "                VERBATIM)\n";
+        cmake_ss << "        else()\n";
+        cmake_ss << "            message(WARNING \"" << options.output_prefix << ": runtime DLL ${_gb_dll} not found in ${_gb_toolchain_bin}; the packaged tree will need it\")\n";
+        cmake_ss << "        endif()\n";
+        cmake_ss << "    endforeach()\n";
+        cmake_ss << "endif()\n";
         cmake_ss << "if(GBRECOMP_ENABLE_STRIP AND NOT MSVC AND NOT CMAKE_BUILD_TYPE STREQUAL \"Debug\")\n";
         cmake_ss << "    if(APPLE)\n";
         cmake_ss << "        add_custom_command(TARGET " << options.output_prefix << " POST_BUILD\n";

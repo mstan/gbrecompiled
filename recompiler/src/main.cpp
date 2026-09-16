@@ -1686,6 +1686,8 @@ int main(int argc, char* argv[]) {
         // Apply TOML values where CLI didn't override
         if (rom_path.empty()) rom_path = game_config.rom_path;
         if (output_dir.empty()) output_dir = game_config.output_dir;
+        if (symbol_file_path.empty()) symbol_file_path = game_config.symbol_file;
+        if (annotation_file_path.empty()) annotation_file_path = game_config.annotation_file;
         if (!trace_file_path.empty()) { /* CLI wins */ }
         else trace_file_path = game_config.trace_file;
 

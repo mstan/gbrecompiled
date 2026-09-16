@@ -70,6 +70,18 @@ std::optional<GameConfig> load_config(const std::string& path) {
                     (config_dir / config.dispatch_misses_file).string();
             }
         }
+        if (auto sym = rom->get("symbols")) {
+            config.symbol_file = sym->value_or(std::string{});
+            if (!config.symbol_file.empty() && fs::path(config.symbol_file).is_relative()) {
+                config.symbol_file = (config_dir / config.symbol_file).string();
+            }
+        }
+        if (auto ann = rom->get("annotations")) {
+            config.annotation_file = ann->value_or(std::string{});
+            if (!config.annotation_file.empty() && fs::path(config.annotation_file).is_relative()) {
+                config.annotation_file = (config_dir / config.annotation_file).string();
+            }
+        }
         if (auto crcs = rom->get("valid_crcs")) {
             if (auto arr = crcs->as_array()) {
                 for (auto& elem : *arr) {

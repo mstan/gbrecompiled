@@ -88,6 +88,12 @@ struct GameConfig {
     // Valid CRC32s (for multi-version ROM support, e.g. Red + Blue)
     std::vector<uint32_t> valid_crcs;
 
+    // Optional per-ROM symbol (.sym) / analyzer annotation files, resolved
+    // relative to the config file. Equivalent to --symbols / --annotations
+    // (CLI wins when both are given).
+    std::string symbol_file;
+    std::string annotation_file;
+
     // Tier-0 dispatch-miss manifest path actually ingested (if any), for logging.
     std::string dispatch_misses_file;
 };

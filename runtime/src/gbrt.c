@@ -1901,7 +1901,8 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
         if (ctx->eram) {
             uint32_t eram_addr = ((uint32_t)ctx->ram_bank * 0x2000) + (addr - 0xA000);
             if (eram_addr < ctx->eram_size) {
-                return ctx->eram[eram_addr];
+                uint8_t value = ctx->eram[eram_addr];
+                return gb_custom_read_override ? gb_custom_read_override(ctx, addr, value) : value;
             }
         }
         return 0xFF;
@@ -1910,7 +1911,10 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
         uint8_t value=ctx->wram[addr - 0xC000];
         return gb_custom_read_override ? gb_custom_read_override(ctx, addr, value) : value;
     }
-    if (addr < 0xE000) return ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)];
+    if (addr < 0xE000) {
+        uint8_t value = ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)];
+        return gb_custom_read_override ? gb_custom_read_override(ctx, addr, value) : value;
+    }
     if (addr < 0xFE00) return gb_read8(ctx, addr - 0x2000);
     if (addr < 0xFEA0) {
         gb_sync(ctx);
@@ -2023,7 +2027,10 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
         }
         return ctx->io[addr - 0xFF00];
     }
-    if (addr < 0xFFFF) return ctx->hram[addr - 0xFF80];
+    if (addr < 0xFFFF) {
+        uint8_t value = ctx->hram[addr - 0xFF80];
+        return gb_custom_read_override ? gb_custom_read_override(ctx, addr, value) : value;
+    }
     if (addr == 0xFFFF) return ctx->io[0x80];
     return 0xFF;
 }

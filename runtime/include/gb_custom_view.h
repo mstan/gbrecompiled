@@ -10,6 +10,9 @@ struct GBContext;
 typedef int (*GBCustomRender)(struct GBContext *, uint32_t *, int, const uint32_t *);
 typedef void (*GBCustomSnapshot)(struct GBContext *);
 typedef void (*GBCustomReadTap)(struct GBContext *, uint16_t);
+/* Called from gb_read8 for banked ROM, external RAM, work RAM and HRAM, so a
+ * game module can present a virtual value (e.g. a widened camera) to specific
+ * consumers. Inert when no hook is installed. */
 typedef uint8_t (*GBCustomReadOverride)(struct GBContext *, uint16_t, uint8_t);
 extern GBCustomRender gb_custom_render;
 extern GBCustomSnapshot gb_custom_snapshot;

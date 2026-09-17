@@ -50,6 +50,7 @@ Absolute paths are safest from a script.
 | Command | Args | Reply | Notes |
 |---|---|---|---|
 | `ping` | — | `frame` | Connectivity check. |
+| `help` | — | `commands[]` of `{name,summary}`, `docs`, `note` | Served from the dispatcher's own table, so it cannot drift from what the binary accepts. |
 | `frame` | — | `frame`, `last_func` | Current guest frame and the last function the body reported. |
 | `pause` | — | `paused:true`, `frame` | Halts at the next frame boundary; the window keeps pumping events. |
 | `continue` | — | `paused:false` | Resumes; also clears a pending `step` / `run_to_frame`. |
@@ -90,9 +91,11 @@ Button arguments accept two spellings, interchangeably:
 * **hex mask** — `"0x30"` or `"30"`; bit 0 R, 1 L, 2 U, 3 D, 4 A, 5 B, 6 Select,
   7 Start, active high.
 
-While an override is active it replaces the real joypad entirely
-(`gb_platform_get_joypad()`); clearing it hands control back to the keyboard and
-controller. All four commands reply with the resulting state: `cmd`, `buttons`
+While an override is active it replaces the real joypad entirely — it is applied
+at the end of `gb_platform_poll_events()`, on top of keyboard, controller, the
+`--input` script and the in-game menu gate, and newly pressed buttons raise the
+joypad interrupt the same way a real press does. Clearing it hands control back.
+All five commands reply with the resulting state: `cmd`, `buttons`
 (letters), `mask` (int, `-1` when no override), `frames` (remaining transient
 frames, 0 = held) and `frame`.
 

@@ -1338,46 +1338,72 @@ int gb_debug_server_screenshot(int id, const char *json)
 typedef void (*CmdHandler)(int id, const char *json);
 typedef struct {
     const char *name;
+    const char *summary;   /* one-line description, served by `help` */
     CmdHandler  handler;
 } CmdEntry;
 
+static void handle_help(int id, const char *json);
+
 static const CmdEntry s_commands[] = {
-    { "ping",              handle_ping },
-    { "frame",             handle_frame },
-    { "get_registers",     handle_get_registers },
-    { "read_ram",          handle_read_ram },
-    { "dump_ram",          handle_dump_ram },
-    { "peek",              handle_peek },
-    { "write_ram",         handle_write_ram },
-    { "read_oam",          handle_read_oam },
-    { "read_vram",         handle_read_vram },
-    { "read_io",           handle_read_io },
-    { "ppu_state",         handle_ppu_state },
-    { "hw_state",          handle_hw_state },
-    { "interp_fallbacks",  handle_interp_fallbacks },
-    { "mapper_state",      handle_mapper_state },
-    { "watch",             handle_watch },
-    { "unwatch",           handle_unwatch },
-    { "set_input",         handle_set_input },
-    { "clear_input",       handle_clear_input },
-    { "press",             handle_press },
-    { "hold",              handle_hold },
-    { "release",           handle_release },
-    { "save_state",        handle_save_state },
-    { "load_state",        handle_load_state },
-    { "save_slot_path",    handle_save_slot_path },
-    { "screenshot",        handle_screenshot },
-    { "pause",             handle_pause },
-    { "continue",          handle_continue },
-    { "step",              handle_step },
-    { "run_to_frame",      handle_run_to_frame },
-    { "history",           handle_history },
-    { "get_frame",         handle_get_frame },
-    { "frame_range",       handle_frame_range },
-    { "frame_timeseries",  handle_frame_timeseries },
-    { "quit",              handle_quit },
-    { NULL, NULL }
+    { "ping",              "connectivity check; returns the current frame",                              handle_ping },
+    { "help",              "list every built-in command with a one-line summary",                        handle_help },
+    { "frame",             "current frame number and last reported function",                            handle_frame },
+    { "get_registers",     "SM83 register + flag state, bank and frame",                                 handle_get_registers },
+    { "read_ram",          "read up to 256 bytes through gb_read8 (live banks, side effects)",           handle_read_ram },
+    { "dump_ram",          "streamed hex dump through gb_read8, 256 bytes per line",                     handle_dump_ram },
+    { "peek",              "read backing arrays directly with explicit ROM/ERAM/WRAM/VRAM banks",        handle_peek },
+    { "write_ram",         "debug poke: one byte (val) or a run (hex)",                                  handle_write_ram },
+    { "read_oam",          "one decoded sprite (index) or all 160 OAM bytes",                            handle_read_oam },
+    { "read_vram",         "read 0x8000-0x9FFF from the current VRAM bank",                              handle_read_vram },
+    { "read_io",           "read 0xFF00-0xFF7F I/O registers",                                           handle_read_io },
+    { "ppu_state",         "LCDC/STAT/scroll/window/palette registers",                                  handle_ppu_state },
+    { "hw_state",          "model, CGB mode, active body, MBC and CGB palette RAM",                      handle_hw_state },
+    { "interp_fallbacks",  "always-on interpreter-fallback ring: totals and per-site counts",            handle_interp_fallbacks },
+    { "mapper_state",      "current banks, MBC type, RAM enable and mode",                               handle_mapper_state },
+    { "watch",             "watch a byte; changes arrive as watchpoint events (max 8)",                  handle_watch },
+    { "unwatch",           "drop a watchpoint",                                                          handle_unwatch },
+    { "set_input",         "set the held button mask absolutely (letters RLUDABST or hex)",              handle_set_input },
+    { "clear_input",       "drop the override and hand the joypad back to the user",                     handle_clear_input },
+    { "press",             "hold buttons for N guest frames (default 1), then auto-release",             handle_press },
+    { "hold",              "add buttons to the held mask",                                               handle_hold },
+    { "release",           "remove buttons from the held mask",                                          handle_release },
+    { "save_state",        "save state to {path} or the runtime's own {slot:N} file",                    handle_save_state },
+    { "load_state",        "load state from {path} or {slot:N}, with the in-game post-load hooks",       handle_load_state },
+    { "save_slot_path",    "resolve the <save_id>.stateN file for a slot without touching it",           handle_save_slot_path },
+    { "screenshot",        "write the presented frame; .png gives PNG, anything else PPM",               handle_screenshot },
+    { "pause",             "pause at the next frame boundary",                                           handle_pause },
+    { "continue",          "resume; also cancels a pending step / run_to_frame",                         handle_continue },
+    { "step",              "run N frames then re-pause; emits step_done",                                handle_step },
+    { "run_to_frame",      "resume and pause at an absolute frame; emits run_to_done",                   handle_run_to_frame },
+    { "history",           "frame-ring window: count, oldest, newest",                                   handle_history },
+    { "get_frame",         "one historical frame record (CPU + PPU + banks + game data)",                handle_get_frame },
+    { "frame_range",       "a span of historical frames, max 200",                                       handle_frame_range },
+    { "frame_timeseries",  "compact per-frame timeseries over a span, max 200",                          handle_frame_timeseries },
+    { "quit",              "reply, flush, and exit the runner",                                          handle_quit },
+    { NULL, NULL, NULL }
 };
+
+/* Discoverability: an undocumented command is a command nobody uses. `help`
+ * serves the same table the dispatcher uses, so it can never drift from what
+ * the binary actually accepts. Full argument/reply detail is in
+ * docs/DEBUG_SERVER.md. */
+static void handle_help(int id, const char *json)
+{
+    (void)json;
+    char *buf = (char *)malloc(16384);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    int pos = snprintf(buf, 16384, "{\"id\":%d,\"ok\":true,\"commands\":[", id);
+    for (int i = 0; s_commands[i].name; i++) {
+        pos += snprintf(buf + pos, 16384 - pos,
+                        "%s{\"name\":\"%s\",\"summary\":\"%s\"}",
+                        i ? "," : "", s_commands[i].name, s_commands[i].summary);
+    }
+    snprintf(buf + pos, 16384 - pos,
+             "],\"docs\":\"gb-recompiled/docs/DEBUG_SERVER.md\",\"note\":"
+             "\"unknown commands fall through to game_handle_debug_cmd()\"}");
+    send_line(buf);
+    free(buf);
+}
 
 static void process_command(const char *line)
 {

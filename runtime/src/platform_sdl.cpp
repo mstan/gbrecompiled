@@ -349,6 +349,11 @@ static uint32_t g_custom_framebuffer[GB_CUSTOM_FRAME_SIZE];
 static int presentation_width(void) {
     return gb_custom_render ? gb_custom_width : gb_ws_render_width();
 }
+/* Most recent frame handed to the presentation path, published by
+ * render_frame_internal() for gb_platform_get_presented_frame(). */
+static const uint32_t* g_presented_frame = NULL;
+static int g_presented_width = 0;
+static int g_presented_height = 0;
 static uint32_t g_lcd_off_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 static uint32_t g_last_guest_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 static bool g_lcd_off_framebuffer_initialized = false;
@@ -2900,6 +2905,16 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         }
         framebuffer = g_custom_framebuffer;
     }
+
+    /* Publish what the user is about to see. Deliberately placed after the
+     * compositor and before the benchmark/headless early-out below, so the
+     * `screenshot` debug command captures the *presented* frame (wide when the
+     * custom view is armed) in windowed and headless runs alike. Both possible
+     * sources (g_custom_framebuffer and the PPU's rgb_framebuffer) are stable
+     * allocations, so a pointer is enough; it names the most recent frame. */
+    g_presented_frame = framebuffer;
+    g_presented_width = presentation_width();
+    g_presented_height = GB_SCREEN_HEIGHT;
 
     if (count_guest_frame) {
         /* Handle Screenshot Dumping */
@@ -5629,7 +5644,7 @@ static bool save_savestate_slot(GBContext* ctx, int slot) {
 
     char filename[512];
     sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
-    const bool success = gb_context_save_state_file(ctx, filename);
+    const bool success = gb_platform_save_state_path(ctx, filename);
     set_savestate_status("Save", slot, success, filename);
     return success;
 }
@@ -5642,15 +5657,64 @@ static bool load_savestate_slot(GBContext* ctx, int slot) {
 
     char filename[512];
     sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
-    const bool success = gb_context_load_state_file(ctx, filename);
-    if (success) {
-        reset_audio_output_buffer(true);
-        g_last_guest_framebuffer_valid = false;
-        g_present_count = ctx->completed_frames;
-        g_last_frame_time = SDL_GetTicks();
-    }
+    const bool success = gb_platform_load_state_path(ctx, filename);
     set_savestate_status("Load", slot, success, filename);
     return success;
+}
+
+/* Host-side resets that must follow any state load, whichever route took it:
+ * the audio ring holds samples generated for the abandoned timeline, the
+ * cached guest framebuffer belongs to the abandoned frame, and the present
+ * counter has to resync to the restored frame count. gb_custom_reset() and
+ * gb_ws_reapply() already run inside gb_context_load_state_file(). */
+static void apply_post_load_host_state(GBContext* ctx) {
+    reset_audio_output_buffer(true);
+    g_last_guest_framebuffer_valid = false;
+    g_present_count = ctx ? ctx->completed_frames : 0;
+    g_last_frame_time = SDL_GetTicks();
+}
+
+bool gb_platform_savestate_slot_path(const GBContext* ctx, int slot,
+                                     char* out, size_t out_size) {
+    if (!ctx || !out || out_size == 0) {
+        return false;
+    }
+    char filename[512];
+    sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
+    if (strlen(filename) + 1 > out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    snprintf(out, out_size, "%s", filename);
+    return true;
+}
+
+bool gb_platform_save_state_path(GBContext* ctx, const char* path) {
+    if (!ctx || !path || !path[0]) {
+        return false;
+    }
+    return gb_context_save_state_file(ctx, path);
+}
+
+bool gb_platform_load_state_path(GBContext* ctx, const char* path) {
+    if (!ctx || !path || !path[0]) {
+        return false;
+    }
+    if (!gb_context_load_state_file(ctx, path)) {
+        return false;
+    }
+    apply_post_load_host_state(ctx);
+    return true;
+}
+
+bool gb_platform_get_presented_frame(const uint32_t** pixels, int* width, int* height) {
+    if (!g_presented_frame || g_presented_width <= 0 || g_presented_height <= 0) {
+        return false;
+    }
+    if (pixels) *pixels = g_presented_frame;
+    if (width)  *width  = g_presented_width;
+    if (height) *height = g_presented_height;
+    return true;
 }
 
 static bool delete_savestate_slot(GBContext* ctx, int slot) {

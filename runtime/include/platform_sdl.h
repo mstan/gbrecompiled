@@ -7,6 +7,7 @@
 #define GB_PLATFORM_SDL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -219,6 +220,46 @@ void gb_platform_stop_recording(void);
 
 void gb_platform_set_dump_frames(const char* frames);
 void gb_platform_set_screenshot_prefix(const char* prefix);
+
+/**
+ * @brief Last frame handed to the presentation path (what the user sees)
+ *
+ * When a custom compositor is installed (gb_custom_render, e.g. the widescreen
+ * view) this is the composited frame at gb_custom_width; otherwise it is the
+ * native framebuffer at gb_ws_render_width(). Captured inside
+ * render_frame_internal() *before* the benchmark/headless early-out, so it is
+ * populated in headless runs too.
+ *
+ * @return false before the first present, or if the platform never ran.
+ */
+bool gb_platform_get_presented_frame(const uint32_t** pixels, int* width, int* height);
+
+/**
+ * @brief Resolve the runtime's own save-state slot file for a 0-based slot
+ *
+ * Same naming the F5/F8 in-game keys use: "<save_id>.state<slot+1>" beside the
+ * executable, e.g. "Super_Mario_Land_2_DX.state1" for slot 0. A state the user
+ * saved in-game therefore loads through gb_platform_load_state_path().
+ *
+ * @return false if ctx is NULL or the buffer is too small.
+ */
+bool gb_platform_savestate_slot_path(const GBContext* ctx, int slot,
+                                     char* out, size_t out_size);
+
+/**
+ * @brief Save state to an explicit path (the F5 path, minus the slot lookup)
+ */
+bool gb_platform_save_state_path(GBContext* ctx, const char* path);
+
+/**
+ * @brief Load state from an explicit path (the F8 path, minus the slot lookup)
+ *
+ * Runs the same post-load host-side resets the in-game load performs: audio
+ * output buffer reset, guest-framebuffer cache invalidation, present counter
+ * resync. The custom-view reset (gb_custom_reset) and widescreen re-apply run
+ * inside gb_context_load_state_file() itself.
+ */
+bool gb_platform_load_state_path(GBContext* ctx, const char* path);
 
 #ifdef __cplusplus
 }

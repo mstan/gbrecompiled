@@ -5,6 +5,7 @@
  * Auto-generates with defaults if the file doesn't exist.
  */
 #include "keybinds.h"
+#include "gb_host_paths.h"
 #include <SDL.h>
 #include <stdio.h>
 #include <string.h>
@@ -82,7 +83,10 @@ static char s_ini_path[512] = {0};
 
 static void derive_ini_path(const char *exe_path) {
     if (!exe_path) {
-        strcpy(s_ini_path, "keybinds.ini");
+        /* keybinds.ini is user state. Anchoring it on the process working
+         * directory scattered a fresh copy wherever the game was started
+         * from; gb_host_paths.c puts it beside the .exe / .AppImage / .app. */
+        gb_host_state_path("keybinds.ini", s_ini_path, sizeof(s_ini_path));
         return;
     }
     const char *slash = NULL, *p = exe_path;

@@ -32,6 +32,7 @@ add_library(gbrt STATIC
     src/game_defaults/game_default_bodies.c
     src/gb_widescreen.c
     src/gb_body.c
+    src/gb_host_paths.c
     src/gb_custom_view.c
     src/keybinds.c
     src/launcher.c

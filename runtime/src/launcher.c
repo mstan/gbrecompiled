@@ -6,6 +6,7 @@
  */
 #include "launcher.h"
 #include "game_extras.h"
+#include "gb_host_paths.h"
 #include "gb_sha256.h"
 #include "bps_patch.h"
 #include <stdint.h>
@@ -24,7 +25,8 @@
 
 static char s_cfg_path[512] = {0};
 static char s_rom_path[512] = {0};
-static char s_exe_dir[512] = {0};        /* dir containing the executable (with trailing sep) */
+static char s_state_dir[512] = {0};      /* writable, user-visible (with trailing sep) */
+static char s_asset_dir[512] = {0};      /* read-only payload shipped with the exe */
 static char s_expected_sha256[65] = {0};  /* gen-time ROM digest, "" = disabled */
 static char s_patch_file[260] = {0};      /* BPS filename (next to exe), "" = none */
 static char s_last_error[256] = {0};      /* reason for the most recent failure */
@@ -73,17 +75,15 @@ static unsigned int crc32_compute(const unsigned char *data, unsigned int len) {
 }
 
 void launcher_init(void) {
-#ifdef _WIN32
-    char exe_path[MAX_PATH];
-    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-    char *last_sep = strrchr(exe_path, '\\');
-    if (last_sep) *(last_sep + 1) = '\0';
-    snprintf(s_exe_dir, sizeof(s_exe_dir), "%s", exe_path);
-    snprintf(s_cfg_path, sizeof(s_cfg_path), "%srom.cfg", exe_path);
-#else
-    s_exe_dir[0] = '\0';  /* current dir */
-    strcpy(s_cfg_path, "rom.cfg");
-#endif
+    /* rom.cfg is user state: it must land beside the .AppImage / .app, not
+     * inside a read-only container, and not wherever the process happened to
+     * be started from. gb_host_paths.c owns that policy for every platform —
+     * before it existed this was the exe directory on Windows and the process
+     * working directory everywhere else, so a Linux build launched from a
+     * desktop entry cached its ROM path into $HOME. */
+    snprintf(s_state_dir, sizeof(s_state_dir), "%s", gb_host_state_dir());
+    snprintf(s_asset_dir, sizeof(s_asset_dir), "%s", gb_host_asset_dir());
+    gb_host_state_path("rom.cfg", s_cfg_path, sizeof(s_cfg_path));
 }
 
 static void rom_cfg_read(char *path_out, int max_len) {
@@ -155,6 +155,20 @@ static int write_file(const char *path, const unsigned char *data, size_t len) {
     return n == len;
 }
 
+/* Resolve a file shipped WITH the program (a BPS patch today). It normally
+ * sits next to the executable, which inside an AppImage means inside the
+ * read-only mount — so the asset directory is tried first, and the state
+ * directory (next to the .AppImage / .app) second, which also lets a user drop
+ * their own patch beside the program without unpacking it. */
+static void resolve_payload_file(const char *name, char *out, size_t out_size) {
+    FILE *f;
+    gb_host_asset_path(name, out, out_size);
+    f = fopen(out, "rb");
+    if (f) { fclose(f); return; }
+    if (strcmp(s_state_dir, s_asset_dir) == 0) return;
+    gb_host_state_path(name, out, out_size);
+}
+
 /* Basename without directory or extension, e.g. ".../Foo Bar.gbc" -> "Foo Bar". */
 static void path_stem(const char *path, char *out, size_t n) {
     const char *base = path;
@@ -191,7 +205,7 @@ static int resolve_or_patch(const char *path, char *resolved, size_t resolved_sz
     if (!s_patch_file[0]) { free(rom); return 0; }
 
     char patch_path[600];
-    snprintf(patch_path, sizeof(patch_path), "%s%s", s_exe_dir, s_patch_file);
+    resolve_payload_file(s_patch_file, patch_path, sizeof(patch_path));
     long psz = 0;
     unsigned char *patch = load_file(patch_path, &psz);
     if (!patch) { free(rom); return 0; }  /* no patch shipped → not patchable */
@@ -213,8 +227,8 @@ static int resolve_or_patch(const char *path, char *resolved, size_t resolved_sz
     char stem[256];
     path_stem(path, stem, sizeof(stem));
     char ext_path[600], stock_copy[600];
-    snprintf(ext_path,   sizeof(ext_path),   "%s%s.extended.gbc", s_exe_dir, stem);
-    snprintf(stock_copy, sizeof(stock_copy), "%s%s.gbc",          s_exe_dir, stem);
+    snprintf(ext_path,   sizeof(ext_path),   "%s%s.extended.gbc", s_state_dir, stem);
+    snprintf(stock_copy, sizeof(stock_copy), "%s%s.gbc",          s_state_dir, stem);
     if (!write_file(ext_path, out, out_len)) {
         fprintf(stderr, "[Launcher] failed to write %s\n", ext_path);
         free(out); free(rom);
@@ -250,7 +264,7 @@ int launcher_apply_patch_in_memory(const char *patch_filename,
     }
 
     char patch_path[600];
-    snprintf(patch_path, sizeof(patch_path), "%s%s", s_exe_dir, patch_filename);
+    resolve_payload_file(patch_filename, patch_path, sizeof(patch_path));
     long psz = 0;
     unsigned char *patch = load_file(patch_path, &psz);
     if (!patch) {

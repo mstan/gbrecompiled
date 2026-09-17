@@ -21,6 +21,7 @@
 #include "color_lut.h"  /* present-time screen-color LUT (opt-in, default raw) */
 extern "C" {
 #include "keybinds.h"
+#include "gb_host_paths.h"
 #ifdef RECOMP_LAUNCHER
 #include "recomp_runtime_ui.h"
 #include "launcher_ui_seam.h"   /* gb_launcher_preboot() — recomp-ui pre-boot seam */
@@ -1230,12 +1231,15 @@ static void set_default_input_bindings(void) {
 }
 
 static std::string runtime_preferences_path(void) {
-    /* Co-locate runtime prefs with the binary (same place .sav / .rtc /
-     * .stateN files live) so the whole game folder is portable. */
-    char* base_path = SDL_GetBasePath();
-    if (base_path) {
-        fs::path resolved = fs::path(base_path) / "runtime_prefs.ini";
-        SDL_free(base_path);
+    /* Co-locate runtime prefs with the other user state (.sav / .rtc /
+     * .stateN) so the whole game folder is portable. SDL_GetBasePath() is the
+     * wrong anchor inside a container: in an AppImage it resolves to
+     * usr/bin in the read-only squashfs, so every setting the player changed
+     * vanished on the next launch. gb_host_state_dir() anchors beside the
+     * .AppImage / .app and is identical to the base path everywhere else. */
+    const char* state_dir = gb_host_state_dir();
+    if (state_dir && state_dir[0]) {
+        fs::path resolved = fs::path(state_dir) / "runtime_prefs.ini";
         return resolved.lexically_normal().string();
     }
     return fs::path("runtime_prefs.ini").lexically_normal().string();
@@ -2345,10 +2349,10 @@ static void scan_border_directory(void) {
 
     std::vector<fs::path> candidates;
     candidates.push_back(fs::current_path() / GB_BORDER_DIR_NAME);
-    char* base_path = SDL_GetBasePath();
-    if (base_path) {
-        candidates.push_back(fs::path(base_path) / GB_BORDER_DIR_NAME);
-        SDL_free(base_path);
+    /* Borders the player dropped in live beside the .exe / .AppImage / .app
+     * (state), then any shipped with the program (asset payload). */
+    for (const char* dir : { gb_host_state_dir(), gb_host_asset_dir() }) {
+        if (dir && dir[0]) candidates.push_back(fs::path(dir) / GB_BORDER_DIR_NAME);
     }
 
     for (const fs::path& candidate : candidates) {
@@ -5547,10 +5551,9 @@ static void sdl_get_persistent_path(char* buffer, size_t size, const char* rom_n
     const std::string resolved = resolve_writable_path(filename.c_str(), base_name.c_str());
     snprintf(buffer, size, "%s", resolved.c_str());
 #else
-    char* base_path = SDL_GetBasePath();
-    if (base_path) {
-        fs::path resolved = fs::path(base_path) / filename;
-        SDL_free(base_path);
+    const char* state_dir = gb_host_state_dir();
+    if (state_dir && state_dir[0]) {
+        fs::path resolved = fs::path(state_dir) / filename;
         snprintf(buffer, size, "%s", resolved.lexically_normal().string().c_str());
     } else {
         const std::string resolved = resolve_writable_path(filename.c_str(), base_name.c_str());

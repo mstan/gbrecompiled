@@ -6,6 +6,7 @@
 
 #include "launcher_ui_seam.h"
 #include "game_extras.h"
+#include "gb_host_paths.h"
 
 #include "recomp_launcher.h"   // recomp-ui C ABI
 #include "launcher_profile.h"  // launcher_profile_apply()
@@ -121,11 +122,12 @@ static void seam_write_rom_cfg(const char* path, const char* rom) {
 /* ── the seam ─────────────────────────────────────────────────────────────── */
 
 int gb_launcher_preboot(void) {
-    /* exe-anchored paths (same base load_runtime_preferences / launcher.c use) */
-    char* base = SDL_GetBasePath();
+    /* State-anchored paths (the same directory load_runtime_preferences and
+     * launcher.c use). Not SDL_GetBasePath(): inside an AppImage that is the
+     * read-only mount, so the launcher wrote rom.cfg and runtime_prefs.ini
+     * where nothing could read them back. */
     char exe_dir[1024];
-    snprintf(exe_dir, sizeof(exe_dir), "%s", base ? base : "");
-    if (base) SDL_free(base);
+    snprintf(exe_dir, sizeof(exe_dir), "%s", gb_host_state_dir());
 
     char prefs_path[1152], romcfg_path[1152];
     seam_join(prefs_path,  sizeof(prefs_path),  exe_dir, "runtime_prefs.ini");

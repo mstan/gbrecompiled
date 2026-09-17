@@ -5064,14 +5064,20 @@ static bool handle_shared_runtime_ui_event(const SDL_Event* event) {
             default: mapped = false; break;
         }
         if (mapped) {
-            if (!recomp_runtime_ui_is_open(g_runtime_ui) &&
-                input == RECOMP_RUNTIME_UI_INPUT_BACK && pressed && !repeat) {
-                g_show_menu = false;
-                recomp_runtime_ui_open(g_runtime_ui);
-            } else if (recomp_runtime_ui_is_open(g_runtime_ui)) {
+            if (recomp_runtime_ui_is_open(g_runtime_ui)) {
                 recomp_runtime_ui_handle_input(g_runtime_ui, input, pressed, repeat);
+                return true;
             }
-            return true;
+            if (input == RECOMP_RUNTIME_UI_INPUT_BACK) {
+                if (pressed && !repeat) {
+                    g_show_menu = false;
+                    recomp_runtime_ui_open(g_runtime_ui);
+                }
+                return true;
+            }
+            /* Overlay closed: Enter/Space/arrows belong to the game (Start and
+             * the d-pad on the default bindings). Swallowing them here made
+             * every GB title unplayable from the keyboard. Fall through. */
         }
         return recomp_runtime_ui_is_open(g_runtime_ui) != 0;
     }

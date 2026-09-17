@@ -5386,6 +5386,42 @@ bool gb_platform_poll_events(GBContext* ctx) {
     }
 
     update_effective_joypad_state();
+
+    /* Debug-server input override, applied last so it beats keyboard,
+     * controller, the --input script and the in-game menu gate: a client that
+     * asked for a button explicitly is driving the joypad.
+     *
+     * This has to land on g_joypad_dpad/g_joypad_buttons. The override used to
+     * exist only inside gb_platform_get_joypad(), but gbrt.c's JOYP read
+     * (gb_read8 at 0xFF00) reads the two globals directly and never calls that
+     * accessor -- so set_input over TCP silently did nothing, which is why game
+     * modules grew their own input commands on top of the script route. */
+    {
+        static uint8_t s_prev_debug_dpad = 0xFF;
+        static uint8_t s_prev_debug_buttons = 0xFF;
+        const int override = gb_debug_server_get_input_override();
+        uint8_t debug_dpad = 0xFF;
+        uint8_t debug_buttons = 0xFF;
+        if (override >= 0) {
+            /* Mask is active high, 0=R 1=L 2=U 3=D 4=A 5=B 6=Select 7=Start;
+             * the joypad nibbles are active low. */
+            debug_dpad    = (uint8_t)(0xF0 | (~override & 0x0F));
+            debug_buttons = (uint8_t)(0xF0 | ((~(override >> 4)) & 0x0F));
+            g_joypad_dpad = debug_dpad;
+            g_joypad_buttons = debug_buttons;
+        }
+        const uint8_t new_debug_dpad =
+            (uint8_t)(s_prev_debug_dpad & (uint8_t)(~debug_dpad) & 0x0F);
+        const uint8_t new_debug_buttons =
+            (uint8_t)(s_prev_debug_buttons & (uint8_t)(~debug_buttons) & 0x0F);
+        if (ctx && ((new_debug_dpad && dpad_selected) ||
+                    (new_debug_buttons && buttons_selected))) {
+            request_joypad_interrupt(ctx);
+        }
+        s_prev_debug_dpad = debug_dpad;
+        s_prev_debug_buttons = debug_buttons;
+    }
+
     record_manual_input_state(current_cycles);
 
     return true;
@@ -5434,9 +5470,14 @@ uint8_t gb_platform_get_joypad(void) {
     /* Check for debug server input override */
     int override = gb_debug_server_get_input_override();
     if (override >= 0) {
-        /* Override bits: 0=Right,1=Left,2=Up,3=Down,4=A,5=B,6=Select,7=Start (active high)
-         * GB joypad is active low, so invert */
-        return (uint8_t)(~override & 0xFF);
+        /* Override bits: 0=Right,1=Left,2=Up,3=Down,4=A,5=B,6=Select,7=Start
+         * (active high). Both joypad nibbles are active low and live in bits
+         * 0-3, so fold the two halves of the mask together the same way the
+         * combined return below does -- the old code returned ~mask verbatim,
+         * which put A/B/Select/Start in the high nibble where no caller looks. */
+        const uint8_t dpad    = (uint8_t)(0xF0 | (~override & 0x0F));
+        const uint8_t buttons = (uint8_t)(0xF0 | ((~(override >> 4)) & 0x0F));
+        return (uint8_t)(dpad & buttons);
     }
     /* Return combined state based on P1 register selection */
     /* Caller should AND with the appropriate selection bits */

@@ -112,6 +112,16 @@ Session resume: **say "Run the game."** Screenshot + Ghidra are the only source 
 
 ---
 
+## Driving a running build over TCP
+
+The runtime's debug server (`localhost:4370`, JSON-per-line) can save/load
+states, step frames, inject input and screenshot the *presented* frame — so a
+visual check does not need a rebuild with `--dump-frames`. Full command
+reference, including the game-command seam: **[docs/DEBUG_SERVER.md](docs/DEBUG_SERVER.md)**.
+Game repos ship `tools/tcp.py` as the client.
+
+---
+
 ## Visual Debugging
 
 Dump specific frames as screenshots with `--dump-frames`:

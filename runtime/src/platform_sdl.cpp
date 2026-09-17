@@ -350,6 +350,11 @@ static uint32_t g_custom_framebuffer[GB_CUSTOM_FRAME_SIZE];
 static int presentation_width(void) {
     return gb_custom_render ? gb_custom_width : gb_ws_render_width();
 }
+/* Most recent frame handed to the presentation path, published by
+ * render_frame_internal() for gb_platform_get_presented_frame(). */
+static const uint32_t* g_presented_frame = NULL;
+static int g_presented_width = 0;
+static int g_presented_height = 0;
 static uint32_t g_lcd_off_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 static uint32_t g_last_guest_framebuffer[GB_MAX_FRAMEBUFFER_SIZE];
 static bool g_lcd_off_framebuffer_initialized = false;
@@ -2905,6 +2910,16 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         framebuffer = g_custom_framebuffer;
     }
 
+    /* Publish what the user is about to see. Deliberately placed after the
+     * compositor and before the benchmark/headless early-out below, so the
+     * `screenshot` debug command captures the *presented* frame (wide when the
+     * custom view is armed) in windowed and headless runs alike. Both possible
+     * sources (g_custom_framebuffer and the PPU's rgb_framebuffer) are stable
+     * allocations, so a pointer is enough; it names the most recent frame. */
+    g_presented_frame = framebuffer;
+    g_presented_width = presentation_width();
+    g_presented_height = GB_SCREEN_HEIGHT;
+
     if (count_guest_frame) {
         /* Handle Screenshot Dumping */
         if (frame_is_selected_for_dump(g_dump_frames, g_dump_count, (uint32_t)g_frame_count)) {
@@ -5375,6 +5390,42 @@ bool gb_platform_poll_events(GBContext* ctx) {
     }
 
     update_effective_joypad_state();
+
+    /* Debug-server input override, applied last so it beats keyboard,
+     * controller, the --input script and the in-game menu gate: a client that
+     * asked for a button explicitly is driving the joypad.
+     *
+     * This has to land on g_joypad_dpad/g_joypad_buttons. The override used to
+     * exist only inside gb_platform_get_joypad(), but gbrt.c's JOYP read
+     * (gb_read8 at 0xFF00) reads the two globals directly and never calls that
+     * accessor -- so set_input over TCP silently did nothing, which is why game
+     * modules grew their own input commands on top of the script route. */
+    {
+        static uint8_t s_prev_debug_dpad = 0xFF;
+        static uint8_t s_prev_debug_buttons = 0xFF;
+        const int override = gb_debug_server_get_input_override();
+        uint8_t debug_dpad = 0xFF;
+        uint8_t debug_buttons = 0xFF;
+        if (override >= 0) {
+            /* Mask is active high, 0=R 1=L 2=U 3=D 4=A 5=B 6=Select 7=Start;
+             * the joypad nibbles are active low. */
+            debug_dpad    = (uint8_t)(0xF0 | (~override & 0x0F));
+            debug_buttons = (uint8_t)(0xF0 | ((~(override >> 4)) & 0x0F));
+            g_joypad_dpad = debug_dpad;
+            g_joypad_buttons = debug_buttons;
+        }
+        const uint8_t new_debug_dpad =
+            (uint8_t)(s_prev_debug_dpad & (uint8_t)(~debug_dpad) & 0x0F);
+        const uint8_t new_debug_buttons =
+            (uint8_t)(s_prev_debug_buttons & (uint8_t)(~debug_buttons) & 0x0F);
+        if (ctx && ((new_debug_dpad && dpad_selected) ||
+                    (new_debug_buttons && buttons_selected))) {
+            request_joypad_interrupt(ctx);
+        }
+        s_prev_debug_dpad = debug_dpad;
+        s_prev_debug_buttons = debug_buttons;
+    }
+
     record_manual_input_state(current_cycles);
 
     return true;
@@ -5423,9 +5474,14 @@ uint8_t gb_platform_get_joypad(void) {
     /* Check for debug server input override */
     int override = gb_debug_server_get_input_override();
     if (override >= 0) {
-        /* Override bits: 0=Right,1=Left,2=Up,3=Down,4=A,5=B,6=Select,7=Start (active high)
-         * GB joypad is active low, so invert */
-        return (uint8_t)(~override & 0xFF);
+        /* Override bits: 0=Right,1=Left,2=Up,3=Down,4=A,5=B,6=Select,7=Start
+         * (active high). Both joypad nibbles are active low and live in bits
+         * 0-3, so fold the two halves of the mask together the same way the
+         * combined return below does -- the old code returned ~mask verbatim,
+         * which put A/B/Select/Start in the high nibble where no caller looks. */
+        const uint8_t dpad    = (uint8_t)(0xF0 | (~override & 0x0F));
+        const uint8_t buttons = (uint8_t)(0xF0 | ((~(override >> 4)) & 0x0F));
+        return (uint8_t)(dpad & buttons);
     }
     /* Return combined state based on P1 register selection */
     /* Caller should AND with the appropriate selection bits */
@@ -5632,7 +5688,7 @@ static bool save_savestate_slot(GBContext* ctx, int slot) {
 
     char filename[512];
     sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
-    const bool success = gb_context_save_state_file(ctx, filename);
+    const bool success = gb_platform_save_state_path(ctx, filename);
     set_savestate_status("Save", slot, success, filename);
     return success;
 }
@@ -5645,15 +5701,64 @@ static bool load_savestate_slot(GBContext* ctx, int slot) {
 
     char filename[512];
     sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
-    const bool success = gb_context_load_state_file(ctx, filename);
-    if (success) {
-        reset_audio_output_buffer(true);
-        g_last_guest_framebuffer_valid = false;
-        g_present_count = ctx->completed_frames;
-        g_last_frame_time = SDL_GetTicks();
-    }
+    const bool success = gb_platform_load_state_path(ctx, filename);
     set_savestate_status("Load", slot, success, filename);
     return success;
+}
+
+/* Host-side resets that must follow any state load, whichever route took it:
+ * the audio ring holds samples generated for the abandoned timeline, the
+ * cached guest framebuffer belongs to the abandoned frame, and the present
+ * counter has to resync to the restored frame count. gb_custom_reset() and
+ * gb_ws_reapply() already run inside gb_context_load_state_file(). */
+static void apply_post_load_host_state(GBContext* ctx) {
+    reset_audio_output_buffer(true);
+    g_last_guest_framebuffer_valid = false;
+    g_present_count = ctx ? ctx->completed_frames : 0;
+    g_last_frame_time = SDL_GetTicks();
+}
+
+bool gb_platform_savestate_slot_path(const GBContext* ctx, int slot,
+                                     char* out, size_t out_size) {
+    if (!ctx || !out || out_size == 0) {
+        return false;
+    }
+    char filename[512];
+    sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
+    if (strlen(filename) + 1 > out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    snprintf(out, out_size, "%s", filename);
+    return true;
+}
+
+bool gb_platform_save_state_path(GBContext* ctx, const char* path) {
+    if (!ctx || !path || !path[0]) {
+        return false;
+    }
+    return gb_context_save_state_file(ctx, path);
+}
+
+bool gb_platform_load_state_path(GBContext* ctx, const char* path) {
+    if (!ctx || !path || !path[0]) {
+        return false;
+    }
+    if (!gb_context_load_state_file(ctx, path)) {
+        return false;
+    }
+    apply_post_load_host_state(ctx);
+    return true;
+}
+
+bool gb_platform_get_presented_frame(const uint32_t** pixels, int* width, int* height) {
+    if (!g_presented_frame || g_presented_width <= 0 || g_presented_height <= 0) {
+        return false;
+    }
+    if (pixels) *pixels = g_presented_frame;
+    if (width)  *width  = g_presented_width;
+    if (height) *height = g_presented_height;
+    return true;
 }
 
 static bool delete_savestate_slot(GBContext* ctx, int slot) {

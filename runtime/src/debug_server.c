@@ -17,6 +17,11 @@
 #include "gb_platform_compat.h"
 #include "gb_body.h"
 #include "ppu.h"
+#include "platform_sdl.h"
+#include "gb_custom_view.h"
+#include "gb_widescreen.h"
+/* Declarations only — gb_printer.c owns STB_IMAGE_WRITE_IMPLEMENTATION. */
+#include "stb_image_write.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -121,8 +126,15 @@ static volatile int s_paused     = 0;
 static int          s_step_count = 0;
 static uint32_t     s_run_to     = 0;
 
-/* ---- Input override ---- */
+/* ---- Input override ----
+ * s_input_override is an active-high button mask consumed by
+ * gb_platform_get_joypad(); -1 means "no override, the real joypad wins".
+ * s_input_frames > 0 makes the override transient: record_frame() counts it
+ * down and clears the override when it hits zero (the `press` command). A
+ * value of 0 with an active override means "held until cleared"
+ * (set_input / hold / release). */
 static int s_input_override = -1;
+static int s_input_frames   = 0;
 
 /* ---- Frame counter (maintained by record_frame) ---- */
 static uint64_t s_frame_count = 0;
@@ -194,6 +206,31 @@ static int json_get_int(const char *json, const char *key, int def)
     char buf[64];
     if (!json_get_str(json, key, buf, sizeof(buf))) return def;
     return atoi(buf);
+}
+
+/* Escape a string for embedding in a JSON reply. Paths are the reason this
+ * exists: sdl_get_persistent_path() hands back native Windows paths, and an
+ * unescaped "C:\Users\..." makes the whole reply line invalid JSON -- the
+ * client's parser then fails on a reply that reports success. Handles the two
+ * characters that must be escaped plus control bytes; the rest passes through
+ * (UTF-8 is legal raw in JSON strings). Truncates rather than overflowing. */
+static void json_escape(const char *in, char *out, int out_sz)
+{
+    int o = 0;
+    if (out_sz <= 0) return;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o < out_sz - 1; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (o + 2 > out_sz - 1) break;
+            out[o++] = '\\';
+            out[o++] = (char)*p;
+        } else if (*p < 0x20) {
+            if (o + 6 > out_sz - 1) break;
+            o += snprintf(out + o, out_sz - o, "\\u%04x", *p);
+        } else {
+            out[o++] = (char)*p;
+        }
+    }
+    out[o] = '\0';
 }
 
 static uint32_t hex_to_u32(const char *s)
@@ -655,6 +692,77 @@ static void handle_unwatch(int id, const char *json)
     send_err(id, "watchpoint not found");
 }
 
+/* Button spellings accepted anywhere a `buttons` argument is taken.
+ *
+ * Two forms, distinguished by the leading characters:
+ *   - a hex mask, "0x30" or "30"  (bit 0 R, 1 L, 2 U, 3 D, 4 A, 5 B,
+ *                                  6 Select, 7 Start -- active high)
+ *   - a letter string, "AB", "RS", "-"  using the same letters the --input
+ *     script route and platform_sdl.cpp's parse_buttons()/write_buttons() use:
+ *     R L U D A B S(tart) T(selecT).
+ * Returns the mask, or -1 if the string is not a valid spelling. "-" and ""
+ * both mean "no buttons" (mask 0). */
+static int parse_button_mask(const char *s)
+{
+    if (!s) return -1;
+    if (s[0] == '\0' || (s[0] == '-' && s[1] == '\0')) return 0;
+
+    /* Hex form: an explicit 0x prefix, or an all-hex-digit string that
+     * contains at least one character that is not a button letter. */
+    int all_letters = 1;
+    for (const char *p = s; *p; p++) {
+        if (!strchr("RLUDABST", *p)) { all_letters = 0; break; }
+    }
+    if (!all_letters || (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))) {
+        const char *p = (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? s + 2 : s;
+        if (!*p) return -1;
+        for (const char *q = p; *q; q++) {
+            if (!strchr("0123456789abcdefABCDEF", *q)) return -1;
+        }
+        return (int)(hex_to_u32(s) & 0xFFu);
+    }
+
+    int mask = 0;
+    for (const char *p = s; *p; p++) {
+        switch (*p) {
+            case 'R': mask |= 0x01; break;
+            case 'L': mask |= 0x02; break;
+            case 'U': mask |= 0x04; break;
+            case 'D': mask |= 0x08; break;
+            case 'A': mask |= 0x10; break;
+            case 'B': mask |= 0x20; break;
+            case 'T': mask |= 0x40; break;  /* selecT */
+            case 'S': mask |= 0x80; break;  /* Start */
+            default:  return -1;
+        }
+    }
+    return mask;
+}
+
+/* Render a mask back in the letter spelling, for echoing in replies. */
+static void button_mask_to_str(int mask, char *out, int out_sz)
+{
+    static const char k_letters[8] = { 'R', 'L', 'U', 'D', 'A', 'B', 'T', 'S' };
+    int n = 0;
+    for (int i = 0; i < 8 && n < out_sz - 1; i++) {
+        if (mask & (1 << i)) out[n++] = k_letters[i];
+    }
+    if (n == 0 && out_sz > 1) out[n++] = '-';
+    out[n] = '\0';
+}
+
+static void reply_input(int id, const char *cmd)
+{
+    char letters[16];
+    int mask = s_input_override < 0 ? 0 : s_input_override;
+    button_mask_to_str(mask, letters, sizeof(letters));
+    send_fmt("{\"id\":%d,\"ok\":true,\"cmd\":\"%s\",\"buttons\":\"%s\","
+             "\"mask\":%d,\"frames\":%d,\"frame\":%llu}",
+             id, cmd, s_input_override < 0 ? "-" : letters,
+             s_input_override, s_input_frames,
+             (unsigned long long)s_frame_count);
+}
+
 static void handle_set_input(int id, const char *json)
 {
     char val_str[32];
@@ -662,15 +770,293 @@ static void handle_set_input(int id, const char *json)
         send_err(id, "missing buttons");
         return;
     }
-    s_input_override = (int)hex_to_u32(val_str);
-    send_ok(id);
+    int mask = parse_button_mask(val_str);
+    if (mask < 0) { send_err(id, "bad buttons"); return; }
+    s_input_override = mask;
+    s_input_frames   = 0;   /* held until cleared */
+    reply_input(id, "set_input");
 }
 
 static void handle_clear_input(int id, const char *json)
 {
     (void)json;
     s_input_override = -1;
-    send_ok(id);
+    s_input_frames   = 0;
+    reply_input(id, "clear_input");
+}
+
+/* Transient press: hold `buttons` for `frames` guest frames (default 1), then
+ * release automatically. Counted down in gb_debug_server_record_frame(), which
+ * runs once per presented guest frame, so N frames means N frames of the
+ * emulated joypad -- not N host frames and not N poll cycles. */
+static void handle_press(int id, const char *json)
+{
+    char val_str[32];
+    if (!json_get_str(json, "buttons", val_str, sizeof(val_str))) {
+        send_err(id, "missing buttons");
+        return;
+    }
+    int mask = parse_button_mask(val_str);
+    if (mask < 0) { send_err(id, "bad buttons"); return; }
+    int frames = json_get_int(json, "frames", 1);
+    if (frames < 1) frames = 1;
+    s_input_override = mask;
+    s_input_frames   = frames;
+    reply_input(id, "press");
+}
+
+/* Incremental variants of set_input: add / remove buttons from the held mask
+ * without having to restate the whole thing. Both cancel any pending `press`
+ * countdown, because the caller is asking for an explicitly held state. */
+static void handle_hold(int id, const char *json)
+{
+    char val_str[32];
+    if (!json_get_str(json, "buttons", val_str, sizeof(val_str))) {
+        send_err(id, "missing buttons");
+        return;
+    }
+    int mask = parse_button_mask(val_str);
+    if (mask < 0) { send_err(id, "bad buttons"); return; }
+    s_input_override = (s_input_override < 0 ? 0 : s_input_override) | mask;
+    s_input_frames   = 0;
+    reply_input(id, "hold");
+}
+
+static void handle_release(int id, const char *json)
+{
+    char val_str[32];
+    if (!json_get_str(json, "buttons", val_str, sizeof(val_str))) {
+        send_err(id, "missing buttons");
+        return;
+    }
+    int mask = parse_button_mask(val_str);
+    if (mask < 0) { send_err(id, "bad buttons"); return; }
+    if (s_input_override >= 0) {
+        s_input_override &= ~mask;
+        /* Releasing every held button hands the joypad back to the user
+         * rather than pinning it at "nothing pressed" forever. */
+        if (s_input_override == 0) s_input_override = -1;
+    }
+    s_input_frames = 0;
+    reply_input(id, "release");
+}
+
+/* ---- Save states ----
+ *
+ * Both commands take either {"path":"..."} or {"slot":N}. A slot resolves
+ * through gb_platform_savestate_slot_path(), i.e. the exact file the in-game
+ * F5/F8 keys use ("<save_id>.state<N+1>" beside the executable), so a state
+ * the user saved by hand loads over TCP and vice versa.
+ *
+ * Frame boundary: every command is dispatched from gb_debug_server_poll(),
+ * which the platform calls from gb_platform_poll_events() once per guest
+ * frame, between frames -- never from inside a recompiled body. State swaps
+ * therefore land at the same point the F5/F8 keys take effect. */
+static int resolve_state_path(const char *json, char *out, int out_sz,
+                              const char **err)
+{
+    if (json_get_str(json, "path", out, out_sz) && out[0]) return 1;
+
+    char slot_str[32];
+    if (json_get_str(json, "slot", slot_str, sizeof(slot_str)) && slot_str[0]) {
+        int slot = atoi(slot_str);
+        if (!s_ctx) { *err = "no context"; return 0; }
+        if (!gb_platform_savestate_slot_path(s_ctx, slot, out, (size_t)out_sz)) {
+            *err = "slot path failed";
+            return 0;
+        }
+        return 1;
+    }
+    *err = "missing path or slot";
+    return 0;
+}
+
+static void handle_save_state(int id, const char *json)
+{
+    char path[512];
+    const char *err = "bad request";
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    if (!resolve_state_path(json, path, (int)sizeof(path), &err)) {
+        send_err(id, err);
+        return;
+    }
+    if (!gb_platform_save_state_path(s_ctx, path)) {
+        send_err(id, "save failed");
+        return;
+    }
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
+    send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"frame\":%llu}",
+             id, esc, (unsigned long long)s_frame_count);
+}
+
+static void handle_load_state(int id, const char *json)
+{
+    char path[512];
+    const char *err = "bad request";
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    if (!resolve_state_path(json, path, (int)sizeof(path), &err)) {
+        send_err(id, err);
+        return;
+    }
+    /* gb_platform_load_state_path() runs the same post-load hooks the in-game
+     * F8 path runs: gb_ws_reapply() + gb_custom_reset() inside
+     * gb_context_load_state_file(), then the audio-ring reset, the
+     * guest-framebuffer cache invalidation and the present-counter resync.
+     * Without the custom reset the compositor keeps deriving margins from the
+     * abandoned timeline and the next frame composes wrong. */
+    if (!gb_platform_load_state_path(s_ctx, path)) {
+        send_err(id, "load failed");
+        return;
+    }
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
+    send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"frame\":%llu}",
+             id, esc, (unsigned long long)s_frame_count);
+}
+
+static void handle_save_slot_path(int id, const char *json)
+{
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    int slot = json_get_int(json, "slot", 0);
+    char path[512];
+    if (!gb_platform_savestate_slot_path(s_ctx, slot, path, sizeof(path))) {
+        send_err(id, "slot path failed");
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    int exists = f != NULL;
+    if (f) fclose(f);
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
+    send_fmt("{\"id\":%d,\"ok\":true,\"slot\":%d,\"path\":\"%s\",\"exists\":%s}",
+             id, slot, esc, exists ? "true" : "false");
+}
+
+/* ---- Screenshot ----
+ *
+ * Writes the PRESENTED frame: the composited custom/wide frame when a
+ * compositor is armed, the native 160x144 framebuffer otherwise. The platform
+ * publishes that frame from render_frame_internal(); if it has never presented
+ * (no platform, or a headless run that has not reached its first present) we
+ * compose one here through the same custom render hook so the reply is still
+ * what the user would see. */
+static uint32_t s_shot_buf[GB_CUSTOM_FRAME_SIZE];
+
+static int compose_presented_fallback(const uint32_t **out, int *w, int *h)
+{
+    if (!s_ctx || !s_ctx->ppu) return 0;
+    const uint32_t *native = ((GBPPU *)s_ctx->ppu)->rgb_framebuffer;
+    const int native_w = gb_ws_render_width();
+    *h = GB_SCREEN_HEIGHT;
+
+    if (!gb_custom_render) {
+        *out = native;
+        *w = native_w;
+        return 1;
+    }
+
+    int width = gb_custom_width > 0 ? gb_custom_width : native_w;
+    if (width > GB_CUSTOM_MAX_WIDTH) width = GB_CUSTOM_MAX_WIDTH;
+    if (!gb_custom_render(s_ctx, s_shot_buf, width, native)) {
+        /* Compositor declined this frame -- pillarbox the native image the
+         * same way the platform does, so the reply matches the screen. */
+        for (int i = 0; i < width * GB_SCREEN_HEIGHT; i++) s_shot_buf[i] = 0xFF000000u;
+        for (int y = 0; y < GB_SCREEN_HEIGHT; y++)
+            memcpy(s_shot_buf + (size_t)y * width + (width - native_w) / 2,
+                   native + (size_t)y * native_w,
+                   (size_t)native_w * sizeof(uint32_t));
+    }
+    *out = s_shot_buf;
+    *w = width;
+    return 1;
+}
+
+static int path_ends_with_png(const char *path)
+{
+    size_t n = strlen(path);
+    if (n < 4) return 0;
+    const char *e = path + n - 4;
+    return (e[0] == '.' &&
+            (e[1] == 'p' || e[1] == 'P') &&
+            (e[2] == 'n' || e[2] == 'N') &&
+            (e[3] == 'g' || e[3] == 'G'));
+}
+
+static int write_ppm(const char *path, const uint32_t *fb, int w, int h)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    uint8_t *row = (uint8_t *)malloc((size_t)w * 3);
+    if (!row) { fclose(f); return 0; }
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            uint32_t p = fb[(size_t)y * w + x];   /* 0xAARRGGBB */
+            row[x * 3 + 0] = (uint8_t)(p >> 16);
+            row[x * 3 + 1] = (uint8_t)(p >> 8);
+            row[x * 3 + 2] = (uint8_t)(p);
+        }
+        fwrite(row, 1, (size_t)w * 3, f);
+    }
+    free(row);
+    fclose(f);
+    return 1;
+}
+
+static int write_png(const char *path, const uint32_t *fb, int w, int h)
+{
+    /* stb wants tightly packed RGB(A) bytes; the framebuffer is host-order
+     * 0xAARRGGBB, so repack to RGB triples (alpha is always opaque here). */
+    uint8_t *rgb = (uint8_t *)malloc((size_t)w * h * 3);
+    if (!rgb) return 0;
+    for (int i = 0; i < w * h; i++) {
+        uint32_t p = fb[i];
+        rgb[i * 3 + 0] = (uint8_t)(p >> 16);
+        rgb[i * 3 + 1] = (uint8_t)(p >> 8);
+        rgb[i * 3 + 2] = (uint8_t)(p);
+    }
+    int ok = stbi_write_png(path, w, h, 3, rgb, w * 3);
+    free(rgb);
+    return ok;
+}
+
+static void handle_screenshot(int id, const char *json)
+{
+    char path[512];
+    if (!json_get_str(json, "path", path, sizeof(path)) || !path[0]) {
+        snprintf(path, sizeof(path), "gb_shot_%05llu.ppm",
+                 (unsigned long long)s_frame_count);
+    }
+
+    const uint32_t *fb = NULL;
+    int w = 0, h = 0;
+    /* {"recompose":1} forces a fresh pass through the custom render hook
+     * instead of reusing the last presented frame. The presented frame is the
+     * honest answer to "what is on screen", so it is the default; recompose
+     * exists for callers that want the compositor re-run against the current
+     * VRAM/OAM (the old sml2_capture semantics). */
+    int recompose = json_get_int(json, "recompose", 0);
+    int source_is_present = 0;
+    if (!recompose) {
+        source_is_present = gb_platform_get_presented_frame(&fb, &w, &h) ? 1 : 0;
+    }
+    if (!source_is_present && !compose_presented_fallback(&fb, &w, &h)) {
+        send_err(id, "no frame available");
+        return;
+    }
+    if (!fb || w <= 0 || h <= 0) { send_err(id, "no frame available"); return; }
+
+    int ok = path_ends_with_png(path) ? write_png(path, fb, w, h)
+                                      : write_ppm(path, fb, w, h);
+    if (!ok) { send_err(id, "write failed"); return; }
+
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
+    send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"width\":%d,\"height\":%d,"
+             "\"frame\":%llu,\"source\":\"%s\"}",
+             id, esc, w, h, (unsigned long long)s_frame_count,
+             source_is_present ? "presented" : "composed");
 }
 
 static void handle_pause(int id, const char *json)
@@ -927,44 +1313,97 @@ static void handle_quit(int id, const char *json)
     exit(0);
 }
 
+/* ---- Delegation seam for game command handlers (see debug_server.h) ---- */
+
+int gb_debug_server_save_state(int id, const char *json)
+{
+    handle_save_state(id, json ? json : "{}");
+    return 1;
+}
+
+int gb_debug_server_load_state(int id, const char *json)
+{
+    handle_load_state(id, json ? json : "{}");
+    return 1;
+}
+
+int gb_debug_server_screenshot(int id, const char *json)
+{
+    handle_screenshot(id, json ? json : "{}");
+    return 1;
+}
+
 /* ---- Command dispatch ---- */
 
 typedef void (*CmdHandler)(int id, const char *json);
 typedef struct {
     const char *name;
+    const char *summary;   /* one-line description, served by `help` */
     CmdHandler  handler;
 } CmdEntry;
 
+static void handle_help(int id, const char *json);
+
 static const CmdEntry s_commands[] = {
-    { "ping",              handle_ping },
-    { "frame",             handle_frame },
-    { "get_registers",     handle_get_registers },
-    { "read_ram",          handle_read_ram },
-    { "dump_ram",          handle_dump_ram },
-    { "peek",              handle_peek },
-    { "write_ram",         handle_write_ram },
-    { "read_oam",          handle_read_oam },
-    { "read_vram",         handle_read_vram },
-    { "read_io",           handle_read_io },
-    { "ppu_state",         handle_ppu_state },
-    { "hw_state",          handle_hw_state },
-    { "interp_fallbacks",  handle_interp_fallbacks },
-    { "mapper_state",      handle_mapper_state },
-    { "watch",             handle_watch },
-    { "unwatch",           handle_unwatch },
-    { "set_input",         handle_set_input },
-    { "clear_input",       handle_clear_input },
-    { "pause",             handle_pause },
-    { "continue",          handle_continue },
-    { "step",              handle_step },
-    { "run_to_frame",      handle_run_to_frame },
-    { "history",           handle_history },
-    { "get_frame",         handle_get_frame },
-    { "frame_range",       handle_frame_range },
-    { "frame_timeseries",  handle_frame_timeseries },
-    { "quit",              handle_quit },
-    { NULL, NULL }
+    { "ping",              "connectivity check; returns the current frame",                              handle_ping },
+    { "help",              "list every built-in command with a one-line summary",                        handle_help },
+    { "frame",             "current frame number and last reported function",                            handle_frame },
+    { "get_registers",     "SM83 register + flag state, bank and frame",                                 handle_get_registers },
+    { "read_ram",          "read up to 256 bytes through gb_read8 (live banks, side effects)",           handle_read_ram },
+    { "dump_ram",          "streamed hex dump through gb_read8, 256 bytes per line",                     handle_dump_ram },
+    { "peek",              "read backing arrays directly with explicit ROM/ERAM/WRAM/VRAM banks",        handle_peek },
+    { "write_ram",         "debug poke: one byte (val) or a run (hex)",                                  handle_write_ram },
+    { "read_oam",          "one decoded sprite (index) or all 160 OAM bytes",                            handle_read_oam },
+    { "read_vram",         "read 0x8000-0x9FFF from the current VRAM bank",                              handle_read_vram },
+    { "read_io",           "read 0xFF00-0xFF7F I/O registers",                                           handle_read_io },
+    { "ppu_state",         "LCDC/STAT/scroll/window/palette registers",                                  handle_ppu_state },
+    { "hw_state",          "model, CGB mode, active body, MBC and CGB palette RAM",                      handle_hw_state },
+    { "interp_fallbacks",  "always-on interpreter-fallback ring: totals and per-site counts",            handle_interp_fallbacks },
+    { "mapper_state",      "current banks, MBC type, RAM enable and mode",                               handle_mapper_state },
+    { "watch",             "watch a byte; changes arrive as watchpoint events (max 8)",                  handle_watch },
+    { "unwatch",           "drop a watchpoint",                                                          handle_unwatch },
+    { "set_input",         "set the held button mask absolutely (letters RLUDABST or hex)",              handle_set_input },
+    { "clear_input",       "drop the override and hand the joypad back to the user",                     handle_clear_input },
+    { "press",             "hold buttons for N guest frames (default 1), then auto-release",             handle_press },
+    { "hold",              "add buttons to the held mask",                                               handle_hold },
+    { "release",           "remove buttons from the held mask",                                          handle_release },
+    { "save_state",        "save state to {path} or the runtime's own {slot:N} file",                    handle_save_state },
+    { "load_state",        "load state from {path} or {slot:N}, with the in-game post-load hooks",       handle_load_state },
+    { "save_slot_path",    "resolve the <save_id>.stateN file for a slot without touching it",           handle_save_slot_path },
+    { "screenshot",        "write the presented frame; .png gives PNG, anything else PPM",               handle_screenshot },
+    { "pause",             "pause at the next frame boundary",                                           handle_pause },
+    { "continue",          "resume; also cancels a pending step / run_to_frame",                         handle_continue },
+    { "step",              "run N frames then re-pause; emits step_done",                                handle_step },
+    { "run_to_frame",      "resume and pause at an absolute frame; emits run_to_done",                   handle_run_to_frame },
+    { "history",           "frame-ring window: count, oldest, newest",                                   handle_history },
+    { "get_frame",         "one historical frame record (CPU + PPU + banks + game data)",                handle_get_frame },
+    { "frame_range",       "a span of historical frames, max 200",                                       handle_frame_range },
+    { "frame_timeseries",  "compact per-frame timeseries over a span, max 200",                          handle_frame_timeseries },
+    { "quit",              "reply, flush, and exit the runner",                                          handle_quit },
+    { NULL, NULL, NULL }
 };
+
+/* Discoverability: an undocumented command is a command nobody uses. `help`
+ * serves the same table the dispatcher uses, so it can never drift from what
+ * the binary actually accepts. Full argument/reply detail is in
+ * docs/DEBUG_SERVER.md. */
+static void handle_help(int id, const char *json)
+{
+    (void)json;
+    char *buf = (char *)malloc(16384);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    int pos = snprintf(buf, 16384, "{\"id\":%d,\"ok\":true,\"commands\":[", id);
+    for (int i = 0; s_commands[i].name; i++) {
+        pos += snprintf(buf + pos, 16384 - pos,
+                        "%s{\"name\":\"%s\",\"summary\":\"%s\"}",
+                        i ? "," : "", s_commands[i].name, s_commands[i].summary);
+    }
+    snprintf(buf + pos, 16384 - pos,
+             "],\"docs\":\"gb-recompiled/docs/DEBUG_SERVER.md\",\"note\":"
+             "\"unknown commands fall through to game_handle_debug_cmd()\"}");
+    send_line(buf);
+    free(buf);
+}
 
 static void process_command(const char *line)
 {
@@ -1082,6 +1521,7 @@ void gb_debug_server_poll(void)
             send_queue_reset();
             s_paused = 0;
             s_input_override = -1;
+            s_input_frames = 0;
             return;
         } else {
             int err = sock_error();
@@ -1096,6 +1536,7 @@ void gb_debug_server_poll(void)
                 send_queue_reset();
                 s_paused = 0;
                 s_input_override = -1;
+                s_input_frames = 0;
                 return;
             }
         }
@@ -1166,6 +1607,13 @@ void gb_debug_server_record_frame(void)
 
     s_history_count = s_frame_count + 1;
     s_frame_count++;
+
+    /* Transient `press`: this frame consumed one of the requested frames.
+     * Release on the last one so the button is down for exactly N frames. */
+    if (s_input_frames > 0) {
+        s_input_frames--;
+        if (s_input_frames == 0) s_input_override = -1;
+    }
 
     /* Step mode: count down and re-pause */
     if (s_step_count > 0) {

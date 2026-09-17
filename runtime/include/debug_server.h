@@ -96,6 +96,19 @@ void gb_debug_server_send_line(const char *json);
 /* Send a formatted JSON line (printf-style). */
 void gb_debug_server_send_fmt(const char *fmt, ...);
 
+/* ---- Generic handlers, callable from a game command handler ----
+ *
+ * A game module that shipped its own save/load/capture command before these
+ * existed can forward to the generic implementation instead of keeping a
+ * second copy. Each formats and sends the standard reply for `id` and returns
+ * 1, so a game handler can `return gb_debug_server_save_state(id, json);`.
+ *
+ * `json` is a normal command object; pass a literal such as
+ * "{\"path\":\"logs/probe.state\"}" to supply a default path. */
+int gb_debug_server_save_state(int id, const char *json);
+int gb_debug_server_load_state(int id, const char *json);
+int gb_debug_server_screenshot(int id, const char *json);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1000,7 +1000,16 @@ static void handle_screenshot(int id, const char *json)
 
     const uint32_t *fb = NULL;
     int w = 0, h = 0;
-    int source_is_present = gb_platform_get_presented_frame(&fb, &w, &h) ? 1 : 0;
+    /* {"recompose":1} forces a fresh pass through the custom render hook
+     * instead of reusing the last presented frame. The presented frame is the
+     * honest answer to "what is on screen", so it is the default; recompose
+     * exists for callers that want the compositor re-run against the current
+     * VRAM/OAM (the old sml2_capture semantics). */
+    int recompose = json_get_int(json, "recompose", 0);
+    int source_is_present = 0;
+    if (!recompose) {
+        source_is_present = gb_platform_get_presented_frame(&fb, &w, &h) ? 1 : 0;
+    }
     if (!source_is_present && !compose_presented_fallback(&fb, &w, &h)) {
         send_err(id, "no frame available");
         return;
@@ -1269,6 +1278,26 @@ static void handle_quit(int id, const char *json)
     send_ok(id);
     gb_debug_server_shutdown();
     exit(0);
+}
+
+/* ---- Delegation seam for game command handlers (see debug_server.h) ---- */
+
+int gb_debug_server_save_state(int id, const char *json)
+{
+    handle_save_state(id, json ? json : "{}");
+    return 1;
+}
+
+int gb_debug_server_load_state(int id, const char *json)
+{
+    handle_load_state(id, json ? json : "{}");
+    return 1;
+}
+
+int gb_debug_server_screenshot(int id, const char *json)
+{
+    handle_screenshot(id, json ? json : "{}");
+    return 1;
 }
 
 /* ---- Command dispatch ---- */

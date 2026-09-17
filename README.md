@@ -213,7 +213,10 @@ The generated code links against `libgbrt`, which provides:
 
 At runtime, interpreter fallbacks are logged to `interp_fallbacks.log` with bank and address. Add these addresses to your TOML config to eliminate fallbacks in the next build.
 
-A TCP debug server listens on `localhost:4370` for runtime inspection (register state, watchpoints, OAM, frame stepping).
+A TCP debug server listens on `localhost:4370` for runtime inspection and control:
+register state, memory, the always-on frame ring, watchpoints, frame stepping,
+save/load state, transient input injection and screenshots of the presented
+frame. Every command is documented in **[docs/DEBUG_SERVER.md](docs/DEBUG_SERVER.md)**.
 
 ---
 

@@ -208,6 +208,31 @@ static int json_get_int(const char *json, const char *key, int def)
     return atoi(buf);
 }
 
+/* Escape a string for embedding in a JSON reply. Paths are the reason this
+ * exists: sdl_get_persistent_path() hands back native Windows paths, and an
+ * unescaped "C:\Users\..." makes the whole reply line invalid JSON -- the
+ * client's parser then fails on a reply that reports success. Handles the two
+ * characters that must be escaped plus control bytes; the rest passes through
+ * (UTF-8 is legal raw in JSON strings). Truncates rather than overflowing. */
+static void json_escape(const char *in, char *out, int out_sz)
+{
+    int o = 0;
+    if (out_sz <= 0) return;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o < out_sz - 1; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (o + 2 > out_sz - 1) break;
+            out[o++] = '\\';
+            out[o++] = (char)*p;
+        } else if (*p < 0x20) {
+            if (o + 6 > out_sz - 1) break;
+            o += snprintf(out + o, out_sz - o, "\\u%04x", *p);
+        } else {
+            out[o++] = (char)*p;
+        }
+    }
+    out[o] = '\0';
+}
+
 static uint32_t hex_to_u32(const char *s)
 {
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
@@ -859,8 +884,10 @@ static void handle_save_state(int id, const char *json)
         send_err(id, "save failed");
         return;
     }
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
     send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"frame\":%llu}",
-             id, path, (unsigned long long)s_frame_count);
+             id, esc, (unsigned long long)s_frame_count);
 }
 
 static void handle_load_state(int id, const char *json)
@@ -882,8 +909,10 @@ static void handle_load_state(int id, const char *json)
         send_err(id, "load failed");
         return;
     }
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
     send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"frame\":%llu}",
-             id, path, (unsigned long long)s_frame_count);
+             id, esc, (unsigned long long)s_frame_count);
 }
 
 static void handle_save_slot_path(int id, const char *json)
@@ -898,8 +927,10 @@ static void handle_save_slot_path(int id, const char *json)
     FILE *f = fopen(path, "rb");
     int exists = f != NULL;
     if (f) fclose(f);
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
     send_fmt("{\"id\":%d,\"ok\":true,\"slot\":%d,\"path\":\"%s\",\"exists\":%s}",
-             id, slot, path, exists ? "true" : "false");
+             id, slot, esc, exists ? "true" : "false");
 }
 
 /* ---- Screenshot ----
@@ -1020,9 +1051,11 @@ static void handle_screenshot(int id, const char *json)
                                       : write_ppm(path, fb, w, h);
     if (!ok) { send_err(id, "write failed"); return; }
 
+    char esc[1100];
+    json_escape(path, esc, sizeof(esc));
     send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"width\":%d,\"height\":%d,"
              "\"frame\":%llu,\"source\":\"%s\"}",
-             id, path, w, h, (unsigned long long)s_frame_count,
+             id, esc, w, h, (unsigned long long)s_frame_count,
              source_is_present ? "presented" : "composed");
 }
 

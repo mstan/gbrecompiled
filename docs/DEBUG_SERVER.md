@@ -245,6 +245,16 @@ can stop it:
   GL context: `[launcher] SDL_CreateWindow failed: OpenGL support is either not
   configured in SDL or not available in current SDL video driver (dummy)`.
 
+The runtime's OWN window is a different story: `gb_platform_init()` never calls
+`SDL_RaiseWindow`, so a game window created with that hint set in the
+environment is shown without activation and stays off the foreground for the
+whole run. A probe that genuinely needs a window (one that resizes it and reads
+the resolved view width back, say) can have it without hijacking the screen:
+
+```
+SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN=1
+```
+
 So a probe that must never disturb the desktop has to test the launcher's
 *inputs and outputs* (the game's mod provider, the ini it writes, the prefs the
 keybinds page edits) headlessly, and keep the real-UI pass behind an explicit

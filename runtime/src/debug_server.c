@@ -175,14 +175,36 @@ static void set_nonblocking(sock_t s)
 
 /* ---- JSON helpers (hand-parsed, no library) ---- */
 
+/* Find the VALUE of `key` in a flat JSON object.
+ *
+ * A plain strstr for "key" also matches the key name appearing as somebody
+ * else's string value -- {"type":"key","key":"Right"} used to resolve
+ * `key` against the `type` value and hand back an empty string. So only accept
+ * a match that is followed by a colon and preceded by an object/member start.
+ * Escapes are still not processed (see docs/DEBUG_SERVER.md). */
 static const char *json_get_str(const char *json, const char *key,
                                  char *out, int out_sz)
 {
     char pattern[128];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return NULL;
-    p += strlen(pattern);
+    const size_t plen = strlen(pattern);
+    const char *p = json;
+    for (;;) {
+        p = strstr(p, pattern);
+        if (!p) return NULL;
+        /* Preceded by the start of a member: { or , (whitespace allowed). */
+        const char *before = p;
+        while (before > json && (before[-1] == ' ' || before[-1] == '\t' ||
+                                 before[-1] == '\n' || before[-1] == '\r'))
+            --before;
+        const int member_start = (before == json) ||
+                                 (before[-1] == '{') || (before[-1] == ',');
+        /* Followed by a colon: it is a key, not a value. */
+        const char *after = p + plen;
+        while (*after == ' ' || *after == '\t') ++after;
+        if (member_start && *after == ':') { p = after; break; }
+        p += plen;
+    }
     while (*p == ' ' || *p == ':') p++;
     if (*p == '"') {
         p++;
@@ -1333,6 +1355,299 @@ int gb_debug_server_screenshot(int id, const char *json)
     return 1;
 }
 
+/* ---- Synthetic SDL events (sdl_event / key / mouse) --------------------
+ *
+ * These build a real SDL_Event and hand it to gb_platform_inject_sdl_event(),
+ * which pushes it into the very queue gb_platform_poll_events() drains. The
+ * binding-capture code, the binding-resolution tables, the runtime-UI hook and
+ * the joypad mapping therefore see exactly what a physical key produces --
+ * unlike `press`/`set_input`, which override the resolved joypad mask and would
+ * pass even with the binding layer broken.
+ *
+ * No window focus is needed, in a normal window or under SDL_VIDEODRIVER=dummy
+ * (GBRECOMP_HEADLESS=1), because nothing on that path reads the OS foreground
+ * window or SDL_GetKeyboardState(). */
+
+#ifdef GB_HAS_SDL2
+
+/* "left"/"1" .. "x2"/"5"; 0 means "not a button name". */
+static int sdl_event_button_code(const char *name)
+{
+    if (!name || !name[0]) return SDL_BUTTON_LEFT;
+    if (!strcmp(name, "left")   || !strcmp(name, "1")) return SDL_BUTTON_LEFT;
+    if (!strcmp(name, "middle") || !strcmp(name, "2")) return SDL_BUTTON_MIDDLE;
+    if (!strcmp(name, "right")  || !strcmp(name, "3")) return SDL_BUTTON_RIGHT;
+    if (!strcmp(name, "x1")     || !strcmp(name, "4")) return SDL_BUTTON_X1;
+    if (!strcmp(name, "x2")     || !strcmp(name, "5")) return SDL_BUTTON_X2;
+    return 0;
+}
+
+/* Resolve the scancode from either {"scancode":N} or {"key":"D"} (any name
+ * SDL_GetScancodeName() prints). Returns SDL_SCANCODE_UNKNOWN when neither
+ * is usable. */
+static SDL_Scancode sdl_event_scancode(const char *json)
+{
+    const int code = json_get_int(json, "scancode", -1);
+    if (code > SDL_SCANCODE_UNKNOWN && code < SDL_NUM_SCANCODES)
+        return (SDL_Scancode)code;
+    char name[64];
+    if (json_get_str(json, "key", name, sizeof(name)) && name[0])
+        return SDL_GetScancodeFromName(name);
+    return SDL_SCANCODE_UNKNOWN;
+}
+
+/* A synthetic pointer move. `warp` (default 0) also drags the HOST cursor via
+ * SDL_WarpMouseInWindow -- off by default precisely so a probe never disturbs
+ * the machine it runs on. UIs that read the event (ImGui, Clay) need no warp;
+ * only a UI that polls SDL_GetMouseState() does. */
+static int sdl_event_push_motion(const char *json, int x, int y)
+{
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = SDL_MOUSEMOTION;
+    ev.motion.x = x;
+    ev.motion.y = y;
+    ev.motion.state = (Uint32)json_get_int(json, "buttons_held", 0);
+    if (!json_get_int(json, "warp", 0)) {
+        /* Tell the platform layer not to warp: a non-zero `which` marks this as
+         * a synthetic device, which gb_platform_inject_sdl_event() honours. */
+        ev.motion.which = GB_PLATFORM_SYNTHETIC_MOUSE_ID;
+    }
+    return gb_platform_inject_sdl_event(&ev);
+}
+
+static void sdl_event_common(int id, const char *json, const char *default_type)
+{
+    char type[32];
+    if (!json_get_str(json, "type", type, sizeof(type)) || !type[0])
+        snprintf(type, sizeof(type), "%s", default_type ? default_type : "key");
+
+    /* `mouse` with no explicit type: a button event when one is named,
+     * otherwise a bare pointer move. */
+    if (!strcmp(type, "mouse")) {
+        char btn[16];
+        snprintf(type, sizeof(type), "%s",
+                 json_get_str(json, "button", btn, sizeof(btn)) ? "mouse_button"
+                                                                : "mouse_move");
+    }
+
+    int pushed = 0;
+
+    if (!strcmp(type, "key")) {
+        const SDL_Scancode sc = sdl_event_scancode(json);
+        if (sc <= SDL_SCANCODE_UNKNOWN || sc >= SDL_NUM_SCANCODES) {
+            send_err(id, "sdl_event: need scancode:N or a valid key name");
+            return;
+        }
+        const int down   = json_get_int(json, "down", 1);
+        const int repeat = json_get_int(json, "repeat", 0);
+        SDL_Event ev;
+        SDL_zero(ev);
+        ev.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+        ev.key.repeat = (Uint8)(down ? (repeat ? 1 : 0) : 0);
+        ev.key.keysym.scancode = sc;
+        ev.key.keysym.sym = SDL_GetKeyFromScancode(sc);
+        ev.key.keysym.mod = (Uint16)json_get_int(json, "mod", 0);
+        pushed = gb_platform_inject_sdl_event(&ev);
+        const char *label = SDL_GetScancodeName(sc);
+        send_fmt("{\"id\":%d,\"ok\":%s,\"type\":\"key\",\"scancode\":%d,"
+                 "\"key\":\"%s\",\"down\":%d,\"repeat\":%d,\"pushed\":%d,"
+                 "\"frame\":%llu}",
+                 id, pushed ? "true" : "false", (int)sc,
+                 (label && label[0]) ? label : "", down ? 1 : 0,
+                 (down && repeat) ? 1 : 0, pushed,
+                 (unsigned long long)s_frame_count);
+        return;
+    }
+
+    if (!strcmp(type, "mouse_move")) {
+        const int x = json_get_int(json, "x", 0);
+        const int y = json_get_int(json, "y", 0);
+        pushed = sdl_event_push_motion(json, x, y);
+        send_fmt("{\"id\":%d,\"ok\":%s,\"type\":\"mouse_move\",\"x\":%d,"
+                 "\"y\":%d,\"pushed\":%d,\"frame\":%llu}",
+                 id, pushed ? "true" : "false", x, y, pushed,
+                 (unsigned long long)s_frame_count);
+        return;
+    }
+
+    if (!strcmp(type, "mouse_button")) {
+        char btn[16];
+        btn[0] = '\0';
+        json_get_str(json, "button", btn, sizeof(btn));
+        const int button = sdl_event_button_code(btn);
+        if (button == 0) {
+            send_err(id, "sdl_event: button must be left/middle/right/x1/x2");
+            return;
+        }
+        const int down   = json_get_int(json, "down", 1);
+        const int clicks = json_get_int(json, "clicks", 1);
+        const int x = json_get_int(json, "x", -1);
+        const int y = json_get_int(json, "y", -1);
+        /* A click at a named point is a move THEN a button, the order a real
+         * pointer produces -- otherwise the UI resolves the hit against
+         * wherever the pointer last was. */
+        if (x >= 0 && y >= 0) pushed += sdl_event_push_motion(json, x, y);
+        SDL_Event ev;
+        SDL_zero(ev);
+        ev.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+        ev.button.button = (Uint8)button;
+        ev.button.clicks = (Uint8)(clicks > 0 ? clicks : 1);
+        ev.button.x = (x >= 0) ? x : 0;
+        ev.button.y = (y >= 0) ? y : 0;
+        pushed += gb_platform_inject_sdl_event(&ev);
+        send_fmt("{\"id\":%d,\"ok\":%s,\"type\":\"mouse_button\",\"button\":%d,"
+                 "\"down\":%d,\"x\":%d,\"y\":%d,\"pushed\":%d,\"frame\":%llu}",
+                 id, pushed ? "true" : "false", button, down ? 1 : 0, x, y,
+                 pushed, (unsigned long long)s_frame_count);
+        return;
+    }
+
+    if (!strcmp(type, "mouse_wheel")) {
+        SDL_Event ev;
+        SDL_zero(ev);
+        ev.type = SDL_MOUSEWHEEL;
+        ev.wheel.x = json_get_int(json, "x", 0);
+        ev.wheel.y = json_get_int(json, "y", 0);
+        ev.wheel.preciseX = (float)ev.wheel.x;
+        ev.wheel.preciseY = (float)ev.wheel.y;
+        pushed = gb_platform_inject_sdl_event(&ev);
+        send_fmt("{\"id\":%d,\"ok\":%s,\"type\":\"mouse_wheel\",\"x\":%d,"
+                 "\"y\":%d,\"pushed\":%d,\"frame\":%llu}",
+                 id, pushed ? "true" : "false", ev.wheel.x, ev.wheel.y, pushed,
+                 (unsigned long long)s_frame_count);
+        return;
+    }
+
+    if (!strcmp(type, "text")) {
+        SDL_Event ev;
+        SDL_zero(ev);
+        ev.type = SDL_TEXTINPUT;
+        if (!json_get_str(json, "text", ev.text.text, sizeof(ev.text.text))) {
+            send_err(id, "sdl_event: text requires a text argument");
+            return;
+        }
+        pushed = gb_platform_inject_sdl_event(&ev);
+        char esc[256];
+        json_escape(ev.text.text, esc, sizeof(esc));
+        send_fmt("{\"id\":%d,\"ok\":%s,\"type\":\"text\",\"text\":\"%s\","
+                 "\"pushed\":%d,\"frame\":%llu}",
+                 id, pushed ? "true" : "false", esc, pushed,
+                 (unsigned long long)s_frame_count);
+        return;
+    }
+
+    send_err(id, "sdl_event: type must be key/mouse_move/mouse_button/"
+                 "mouse_wheel/text");
+}
+
+static void handle_sdl_event(int id, const char *json) { sdl_event_common(id, json, "key"); }
+static void handle_key_event(int id, const char *json) { sdl_event_common(id, json, "key"); }
+static void handle_mouse_event(int id, const char *json) { sdl_event_common(id, json, "mouse"); }
+
+#else  /* !GB_HAS_SDL2 */
+
+static void handle_sdl_event(int id, const char *json)
+{
+    (void)json;
+    send_err(id, "sdl_event requires an SDL build");
+}
+static void handle_key_event(int id, const char *json)   { handle_sdl_event(id, json); }
+static void handle_mouse_event(int id, const char *json) { handle_sdl_event(id, json); }
+
+#endif /* GB_HAS_SDL2 */
+
+/* ---- Pre-boot listener (the recomp-ui launcher phase) ------------------
+ *
+ * The launcher runs its own SDL loop BEFORE the game exists, so the ordinary
+ * once-per-guest-frame pump never runs and a probe has nothing to talk to. This
+ * serves the same protocol from a small thread for the duration of the launcher
+ * and then hands the listening socket -- and any connected client -- to
+ * gb_debug_server_init(), so one TCP session spans launcher and game.
+ *
+ * Only the commands that mean anything without a GBContext are accepted while
+ * it is up; everything else answers "not available until the game boots".
+ *
+ * Off unless GBRECOMP_DEBUG_PORT names a port: a normal player run must never
+ * open a socket before the game does.
+ *
+ * Thread safety: the main thread is inside the launcher's own loop and does not
+ * touch any server state until gb_debug_server_preboot_end() has joined this
+ * thread, so the server's buffers are owned by exactly one thread at a time.
+ * The only cross-thread call is SDL_PushEvent(), which SDL documents as safe
+ * from any thread and which wakes the launcher's SDL_WaitEventTimeout(). */
+
+/* Defined with the rest of the socket setup, below. */
+static int server_bind(int port);
+
+static int s_preboot_mode = 0;      /* restrict the command set while up */
+#ifdef GB_HAS_SDL2
+static SDL_Thread *s_preboot_thread = NULL;
+static volatile int s_preboot_stop = 0;
+#endif
+
+static int preboot_command_allowed(const char *cmd)
+{
+    static const char *const allowed[] = {
+        "ping", "help", "frame", "sdl_event", "key", "mouse", "quit", NULL
+    };
+    for (int i = 0; allowed[i]; i++)
+        if (strcmp(cmd, allowed[i]) == 0) return 1;
+    return 0;
+}
+
+#ifdef GB_HAS_SDL2
+static int SDLCALL preboot_thread_main(void *unused)
+{
+    (void)unused;
+    while (!s_preboot_stop) {
+        gb_debug_server_poll();
+        SDL_Delay(2);
+    }
+    return 0;
+}
+#endif
+
+void gb_debug_server_preboot_begin(void)
+{
+    const char *configured_port = getenv("GBRECOMP_DEBUG_PORT");
+    if (!configured_port || !configured_port[0]) return;   /* opt-in only */
+    if (s_listen != SOCK_INVALID) return;                  /* already up */
+
+    long value = strtol(configured_port, NULL, 10);
+    if (value <= 0 || value > 65535) return;
+    s_port = (int)value;
+
+    if (!server_bind(s_port)) return;
+    s_preboot_mode = 1;
+
+#ifdef GB_HAS_SDL2
+    s_preboot_stop = 0;
+    s_preboot_thread = SDL_CreateThread(preboot_thread_main, "gbdbg-preboot", NULL);
+    if (!s_preboot_thread) {
+        fprintf(stderr, "[debug] pre-boot pump thread failed: %s\n", SDL_GetError());
+        s_preboot_mode = 0;
+        return;
+    }
+#endif
+    fprintf(stderr, "[debug] pre-boot listener on 127.0.0.1:%d (launcher phase)\n",
+            s_port);
+}
+
+void gb_debug_server_preboot_end(void)
+{
+    if (!s_preboot_mode) return;
+#ifdef GB_HAS_SDL2
+    s_preboot_stop = 1;
+    if (s_preboot_thread) {
+        SDL_WaitThread(s_preboot_thread, NULL);
+        s_preboot_thread = NULL;
+    }
+#endif
+    s_preboot_mode = 0;
+    fprintf(stderr, "[debug] pre-boot listener handed over to the game\n");
+}
+
 /* ---- Command dispatch ---- */
 
 typedef void (*CmdHandler)(int id, const char *json);
@@ -1379,6 +1694,9 @@ static const CmdEntry s_commands[] = {
     { "get_frame",         "one historical frame record (CPU + PPU + banks + game data)",                handle_get_frame },
     { "frame_range",       "a span of historical frames, max 200",                                       handle_frame_range },
     { "frame_timeseries",  "compact per-frame timeseries over a span, max 200",                          handle_frame_timeseries },
+    { "sdl_event",         "synthesize an SDL event (key/mouse/text) into the real event queue",   handle_sdl_event },
+    { "key",               "sdl_event shorthand: {scancode|key, down, repeat}",                    handle_key_event },
+    { "mouse",             "sdl_event shorthand: {x,y} moves and {button,down} clicks",            handle_mouse_event },
     { "quit",              "reply, flush, and exit the runner",                                          handle_quit },
     { NULL, NULL, NULL }
 };
@@ -1418,6 +1736,13 @@ static void process_command(const char *line)
 
     int id = json_get_int(line, "id", 0);
 
+    /* The launcher phase has no GBContext; refuse the rest by name rather
+     * than let a handler read a NULL context. */
+    if (s_preboot_mode && !preboot_command_allowed(cmd)) {
+        send_err(id, "not available until the game boots (pre-boot launcher)");
+        return;
+    }
+
     for (const CmdEntry *e = s_commands; e->name; e++) {
         if (strcmp(cmd, e->name) == 0) {
             e->handler(id, line);
@@ -1434,21 +1759,16 @@ static void process_command(const char *line)
 
 /* ---- Public API ---- */
 
-void gb_debug_server_init(int port)
+/* Bind + listen on `port`. Shared by the pre-boot listener and the in-game
+ * server so both open the socket exactly the same way. Returns 1 on success. */
+static int server_bind(int port)
 {
-    const char *configured_port = getenv("GBRECOMP_DEBUG_PORT");
-    if (port <= 0 && configured_port) {
-        long value = strtol(configured_port, NULL, 10);
-        if (value > 0 && value <= 65535) port = (int)value;
-    }
-    if (port > 0) s_port = port;
-
     gb_net_global_init();
 
     s_listen = socket(AF_INET, SOCK_STREAM, 0);
     if (s_listen == SOCK_INVALID) {
         fprintf(stderr, "[debug] Failed to create socket\n");
-        return;
+        return 0;
     }
 
     int yes = 1;
@@ -1458,21 +1778,44 @@ void gb_debug_server_init(int port)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((uint16_t)s_port);
+    addr.sin_port = htons((uint16_t)port);
 
     if (bind(s_listen, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "[debug] Failed to bind port %d\n", s_port);
+        fprintf(stderr, "[debug] Failed to bind port %d\n", port);
         sock_close(s_listen);
         s_listen = SOCK_INVALID;
-        return;
+        return 0;
     }
 
     listen(s_listen, 1);
     set_nonblocking(s_listen);
+    return 1;
+}
+
+void gb_debug_server_init(int port)
+{
+    const char *configured_port = getenv("GBRECOMP_DEBUG_PORT");
+    if (port <= 0 && configured_port) {
+        long value = strtol(configured_port, NULL, 10);
+        if (value > 0 && value <= 65535) port = (int)value;
+    }
+    if (port > 0) s_port = port;
 
     memset(s_frame_history, 0, sizeof(s_frame_history));
     s_history_count = 0;
     memset(s_watchpoints, 0, sizeof(s_watchpoints));
+
+    /* The pre-boot listener may already own the port -- and a client with it.
+     * Adopt both rather than rebind, so a probe that drove the launcher keeps
+     * the same connection into the game. */
+    if (s_listen != SOCK_INVALID) {
+        fprintf(stderr, "[debug] TCP server adopted the pre-boot listener on "
+                        "127.0.0.1:%d (client %s)\n",
+                s_port, s_client != SOCK_INVALID ? "connected" : "none");
+        return;
+    }
+
+    if (!server_bind(s_port)) return;
 
     fprintf(stderr, "[debug] TCP server listening on 127.0.0.1:%d\n", s_port);
 }
@@ -1640,11 +1983,11 @@ void gb_debug_server_wait_if_paused(void)
         gb_debug_server_poll();
 
 #ifdef GB_HAS_SDL2
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) exit(0);
-            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) exit(0);
-        }
+        /* Hand the queue to the platform instead of discarding it. The old
+         * drain threw every event away, so a key injected with `sdl_event`
+         * (or pressed by hand) while paused never reached the binding layer;
+         * SDL_QUIT and Escape keep their meaning inside the pump. */
+        gb_platform_pump_paused_events();
         SDL_Delay(5);
 #else
         /* No SDL — just a short sleep */

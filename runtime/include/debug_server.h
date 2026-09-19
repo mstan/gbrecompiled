@@ -57,6 +57,19 @@ typedef struct {
  * port=0 uses the default (4370). */
 void gb_debug_server_init(int port);
 
+/**
+ * Serve the protocol during the pre-boot recomp-ui launcher, before any
+ * GBContext exists. No-op unless GBRECOMP_DEBUG_PORT is set.
+ *
+ * begin() binds the port and starts a small pump thread; end() joins it and
+ * leaves the listening socket (and any connected client) in place, so the
+ * following gb_debug_server_init() adopts them and one TCP session spans the
+ * launcher and the game. Only ping/help/frame/sdl_event/key/mouse/quit are
+ * accepted while the launcher owns the process.
+ */
+void gb_debug_server_preboot_begin(void);
+void gb_debug_server_preboot_end(void);
+
 /* Poll for incoming connections and commands. Non-blocking.
  * Call once per frame. */
 void gb_debug_server_poll(void);

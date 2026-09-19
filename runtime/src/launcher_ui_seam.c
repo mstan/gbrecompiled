@@ -7,6 +7,7 @@
 #include "launcher_ui_seam.h"
 #include "game_extras.h"
 #include "gb_host_paths.h"
+#include "debug_server.h"
 
 #include "recomp_launcher.h"   // recomp-ui C ABI
 #include "launcher_profile.h"  // launcher_profile_apply()
@@ -225,8 +226,20 @@ int gb_launcher_preboot(void) {
 
     char out_rom[1024];
     out_rom[0] = '\0';
+    /* Serve the debug protocol for the duration of the launcher own loop. The
+     * launcher owns the process here -- no GBContext exists and the per-frame
+     * pump has not started -- so a probe would otherwise have nothing to talk
+     * to until the game boots. No-op unless GBRECOMP_DEBUG_PORT is set, and
+     * the listening socket (plus any connected client) is handed to
+     * gb_debug_server_init() afterwards, so one TCP session spans the
+     * launcher and the game.
+     *
+     * Game-agnostic on purpose: it sits in the shared seam every title routes
+     * through, not in any game module. */
+    gb_debug_server_preboot_begin();
     int rc = recomp_launcher_run_window(title, &ls, &gi, exe_dir,
                                         initial_rom, out_rom, sizeof(out_rom));
+    gb_debug_server_preboot_end();
 
     if (rc == 1) return GB_LAUNCHER_QUIT;         /* user closed the launcher */
     if (rc != 0) return GB_LAUNCHER_UNAVAILABLE;  /* couldn't init: fall back  */

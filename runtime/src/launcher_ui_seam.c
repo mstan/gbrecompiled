@@ -110,6 +110,17 @@ static int seam_find_rom_in_dir(const char* dir, char* out, size_t cap) {
     return seam_file_readable(out);
 }
 
+/* The first ROM a player has put where the program can see it: beside it, then
+ * under roms/. Returns 1 and fills `out` when there is one. */
+static int seam_find_local_rom(const char* state_dir, char* out, size_t cap) {
+    char roms_dir[600];
+    /* gb_host_state_dir() returns "" for "the process working directory". */
+    const char* base = (state_dir && state_dir[0]) ? state_dir : "./";
+    if (seam_find_rom_in_dir(base, out, cap)) return 1;
+    seam_join(roms_dir, sizeof(roms_dir), base, "roms");
+    return seam_find_rom_in_dir(roms_dir, out, cap);
+}
+
 /* Point recomp-ui's file picker at something a player can actually use. Called
  * once, immediately before recomp_launcher_run_window. */
 static void seam_arm_file_picker(const char* state_dir) {
@@ -118,17 +129,11 @@ static void seam_arm_file_picker(const char* state_dir) {
 #endif
 
     char hint[600];
-    char roms_dir[600];
     if (!state_dir) state_dir = "";
 
     /* 1. a ROM beside the program, 2. one under roms/ — either gives the
      * browser both the right folder and a pre-selected file. */
-    if (state_dir[0] && seam_find_rom_in_dir(state_dir, hint, sizeof(hint))) {
-        SDL_setenv("RECOMP_DISC_HINT", hint, 0);
-        return;
-    }
-    seam_join(roms_dir, sizeof(roms_dir), state_dir, "roms");
-    if (seam_find_rom_in_dir(roms_dir, hint, sizeof(hint))) {
+    if (seam_find_local_rom(state_dir, hint, sizeof(hint))) {
         SDL_setenv("RECOMP_DISC_HINT", hint, 0);
         return;
     }
@@ -270,6 +275,16 @@ int gb_launcher_preboot(void) {
             fclose(rc);
         }
     }
+    /* No cached ROM (first run, or the player moved theirs): offer the one they
+     * dropped beside the program, or in roms/. The launcher then opens with the
+     * ROM already resolved and PLAY live, instead of an empty GAME card that
+     * makes them browse for a file sitting right there. The identity gate is
+     * unchanged — a wrong cart seeded here shows "not verified" and PLAY stays
+     * disabled. The Linux AppRun did this for AppImages only, in shell; here
+     * every packaging form gets it. */
+    if (!seam_file_readable(initial_rom))
+        if (!seam_find_local_rom(exe_dir, initial_rom, sizeof(initial_rom)))
+            initial_rom[0] = '\0';
 
     /* "Skip launcher on boot": honor the persisted flag unless forced — but
      * never when the cached ROM has gone. Skipping then hands an unresolvable

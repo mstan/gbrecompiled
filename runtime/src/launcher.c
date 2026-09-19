@@ -9,6 +9,7 @@
 #include "gb_host_paths.h"
 #include "gb_sha256.h"
 #include "bps_patch.h"
+#include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,11 @@ static char s_asset_dir[512] = {0};      /* read-only payload shipped with the e
 static char s_expected_sha256[65] = {0};  /* gen-time ROM digest, "" = disabled */
 static char s_patch_file[260] = {0};      /* BPS filename (next to exe), "" = none */
 static char s_last_error[256] = {0};      /* reason for the most recent failure */
+/* A rejected ROM normally warrants a message box / a stderr line: the user
+ * chose that file. The beside-the-program scan below tries every cart in a
+ * folder, so its rejections are routine and must stay silent — one dialog per
+ * unrelated .gb sitting next to the exe is not a diagnostic, it is a wall. */
+static int  s_verify_quiet = 0;
 
 const char *launcher_last_error(void) { return s_last_error; }
 
@@ -119,8 +125,16 @@ static int pick_rom_file(char *out, int max_len) {
     ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
     return GetOpenFileNameA(&ofn) ? 1 : 0;
 #else
+    /* No native dialog off Windows, and none is wanted: ROM picking belongs to
+     * the recomp-ui launcher, which draws its own in-app browser on Linux
+     * (launcher_ui_seam.c arms it). This path is only reached by a build with
+     * no launcher at all, so say what the player can do about it instead of
+     * "no file picker available", which named a thing they cannot install. */
     (void)out; (void)max_len;
-    fprintf(stderr, "[Launcher] No ROM specified and no file picker available on this platform.\n");
+    fprintf(stderr,
+            "[Launcher] No ROM selected. Put a .gb/.gbc file beside the program "
+            "(or in roms/), or write its full path as the first line of %s\n",
+            s_cfg_path[0] ? s_cfg_path : "rom.cfg");
     return 0;
 #endif
 }
@@ -365,6 +379,68 @@ static int verify_rom(const char *path, char *resolved, size_t resolved_sz) {
     return 0;
 }
 
+/* Case-insensitive ".gb" / ".gbc" / ".sgb" suffix test. */
+static int is_rom_name(const char *name) {
+    static const char *const exts[] = { ".gb", ".gbc", ".sgb" };
+    size_t n = name ? strlen(name) : 0;
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+        size_t e = strlen(exts[i]);
+        if (n <= e) continue;
+        const char *tail = name + (n - e);
+        size_t j = 0;
+        for (; j < e; j++) {
+            char a = tail[j];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+            if (a != exts[i][j]) break;
+        }
+        if (j == e) return 1;
+    }
+    return 0;
+}
+
+/* First ROM in `dir` that this build accepts, resolved into `resolved`.
+ * Lowest filename first, so the choice is stable rather than directory-order.
+ * verify_rom is the gate, so a folder of unrelated carts cannot be picked up
+ * by accident — only the one this binary was recompiled from. */
+static int find_acceptable_rom_in_dir(const char *dir, char *resolved, size_t resolved_sz) {
+    DIR *d;
+    struct dirent *ent;
+    char names[64][256];
+    int count = 0;
+    if (!dir || !dir[0]) return 0;
+    d = opendir(dir);
+    if (!d) return 0;
+    while ((ent = readdir(d)) != NULL && count < (int)(sizeof(names) / sizeof(names[0]))) {
+        if (!is_rom_name(ent->d_name)) continue;
+        snprintf(names[count], sizeof(names[count]), "%s", ent->d_name);
+        count++;
+    }
+    closedir(d);
+    for (int i = 1; i < count; i++) {
+        char tmp[256];
+        int j = i;
+        snprintf(tmp, sizeof(tmp), "%s", names[i]);
+        while (j > 0 && strcmp(names[j - 1], tmp) > 0) {
+            snprintf(names[j], sizeof(names[j]), "%s", names[j - 1]);
+            j--;
+        }
+        snprintf(names[j], sizeof(names[j]), "%s", tmp);
+    }
+    for (int i = 0; i < count; i++) {
+        char candidate[600];
+        size_t dn = strlen(dir);
+        snprintf(candidate, sizeof(candidate), "%s%s%s", dir,
+                 (dn && (dir[dn - 1] == '/' || dir[dn - 1] == '\\')) ? "" : "/",
+                 names[i]);
+        int ok;
+        s_verify_quiet = 1;
+        ok = verify_rom(candidate, resolved, resolved_sz);
+        s_verify_quiet = 0;
+        if (ok) return 1;
+    }
+    return 0;
+}
+
 const char *launcher_get_rom_path(void) {
     if (s_rom_path[0]) return s_rom_path;
 
@@ -378,6 +454,26 @@ const char *launcher_get_rom_path(void) {
             snprintf(s_rom_path, sizeof(s_rom_path), "%s", resolved);
             if (rc == 2) rom_cfg_write(s_rom_path);  /* cache the patched ROM */
             printf("[Launcher] ROM: %s (cached)\n", s_rom_path);
+            return s_rom_path;
+        }
+    }
+
+    /* A ROM the player dropped beside the program, or under roms/. The Linux
+     * AppRun already seeded rom.cfg this way for AppImages only and only in
+     * shell; doing it here gives the Windows zip, the plain tarball and the
+     * .app bundle the same behaviour, and covers an AppImage started without
+     * its AppRun. */
+    {
+        char resolved[512];
+        char roms_dir[600];
+        /* gb_host_state_dir() returns "" for "the process working directory". */
+        const char *base = s_state_dir[0] ? s_state_dir : "./";
+        snprintf(roms_dir, sizeof(roms_dir), "%sroms", base);
+        if (find_acceptable_rom_in_dir(base, resolved, sizeof(resolved)) ||
+            find_acceptable_rom_in_dir(roms_dir, resolved, sizeof(resolved))) {
+            snprintf(s_rom_path, sizeof(s_rom_path), "%s", resolved);
+            rom_cfg_write(s_rom_path);
+            printf("[Launcher] ROM: %s (found beside the program)\n", s_rom_path);
             return s_rom_path;
         }
     }

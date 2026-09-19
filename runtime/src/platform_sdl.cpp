@@ -121,6 +121,18 @@ static int g_color_correction = 0;
 static bool g_smooth_lcd_transitions = true;
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
+/* Headless (GBRECOMP_HEADLESS=1): dummy SDL video/audio, no window, no GL —
+ * but UNLIKE plain benchmark mode the SDL event queue is still drained
+ * through handle_runtime_event(), so a debug client can inject keystrokes
+ * and exercise the real binding layer with nothing on screen. */
+static bool g_headless_mode = false;
+/* Set by gb_platform_inject_sdl_event(). Forces the next poll to drain the
+ * queue even in a mode that normally skips it, so an injected event is
+ * never stranded (benchmark mode, or a frame the launcher owns). */
+static bool g_injected_event_pending = false;
+/* The context the live poll loop last ran with, so the paused pump can hand
+ * events to the same handler with the same context. */
+static GBContext* g_last_poll_ctx = NULL;
 /* Tri-state fullscreen: 0 off (windowed), 1 borderless
  * (SDL_WINDOW_FULLSCREEN_DESKTOP), 2 exclusive (SDL_WINDOW_FULLSCREEN, real
  * display-mode change). Mirrors recomp-ui's universal "video.fullscreen"
@@ -607,6 +619,14 @@ static bool env_flag_enabled(const char* name) {
            strcmp(value, "YES") == 0 ||
            strcmp(value, "on") == 0 ||
            strcmp(value, "ON") == 0;
+}
+
+/* Headless is requested purely by environment so every game inherits it without
+ * a per-title flag. It implies benchmark mode (no window, no GL, no pacing, no
+ * audio device) and additionally keeps the SDL event queue drained, which is
+ * what makes an injected keystroke take the ordinary path. */
+static bool headless_requested(void) {
+    return env_flag_enabled("GBRECOMP_HEADLESS");
 }
 
 /* Default fullscreen mode for a fresh install / "Reset to Defaults".
@@ -5038,7 +5058,9 @@ extern "C" int gb_platform_preboot_launcher(void) {
     s_preboot_done = 1;
 
 #ifdef RECOMP_LAUNCHER
-    g_benchmark_mode = g_benchmark_mode || env_flag_enabled("GBRECOMP_BENCHMARK");
+    g_headless_mode = g_headless_mode || headless_requested();
+    g_benchmark_mode = g_benchmark_mode || g_headless_mode ||
+                       env_flag_enabled("GBRECOMP_BENCHMARK");
     if (!g_benchmark_mode &&
         g_script_count == 0 && g_dump_count == 0 &&
         g_dump_present_count == 0 && g_dump_cycle_count == 0 &&
@@ -5054,7 +5076,9 @@ extern "C" int gb_platform_preboot_launcher(void) {
 }
 
 bool gb_platform_init(int scale) {
-    g_benchmark_mode = g_benchmark_mode || env_flag_enabled("GBRECOMP_BENCHMARK");
+    g_headless_mode = g_headless_mode || headless_requested();
+    g_benchmark_mode = g_benchmark_mode || g_headless_mode ||
+                       env_flag_enabled("GBRECOMP_BENCHMARK");
     g_scale = scale;
     if (g_scale < 1) g_scale = 1;
     if (g_scale > 8) g_scale = 8;
@@ -5091,9 +5115,17 @@ bool gb_platform_init(int scale) {
         if (!SDL_getenv("SDL_AUDIODRIVER")) {
             SDL_setenv("SDL_AUDIODRIVER", "dummy", 0);
         }
-        if (SDL_Init(SDL_INIT_TIMER) < 0) {
-            fprintf(stderr, "[SDL] SDL_Init failed in benchmark mode: %s\n", SDL_GetError());
+        /* Headless additionally needs SDL_INIT_EVENTS: the queue is what a
+         * debug client injects into and gb_platform_poll_events() drains. */
+        const Uint32 subsystems =
+            SDL_INIT_TIMER | (g_headless_mode ? (Uint32)SDL_INIT_EVENTS : 0u);
+        if (SDL_Init(subsystems) < 0) {
+            fprintf(stderr, "[SDL] SDL_Init failed in %s mode: %s\n",
+                    g_headless_mode ? "headless" : "benchmark", SDL_GetError());
             return false;
+        }
+        if (g_headless_mode) {
+            fprintf(stderr, "[SDL] headless: no window, event queue live\n");
         }
         load_runtime_preferences();
         g_last_frame_time = SDL_GetTicks();
@@ -5586,7 +5618,109 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
     return true;
 }
 
+/* ---- Debug-server event injection -------------------------------------- *
+ * One entry point for every synthetic input. It pushes a real SDL_Event into
+ * the real queue, so the code under test (binding capture, binding resolution,
+ * the runtime UI hook, the joypad mapping, ImGui) is byte-for-byte the code a
+ * physical keystroke runs. Nothing here consults the OS foreground window, so
+ * it works headless (SDL_VIDEODRIVER=dummy) and in an unfocused window alike. */
+
+/* The window an injected event should be addressed to. In the game that is the
+ * runtime's own window; during the pre-boot launcher the runtime has none yet,
+ * so fall back to the only window SDL has open. An id of 0 is left alone --
+ * handlers that compare against a window id treat it as "not mine". */
+static Uint32 injection_window_id(void) {
+    if (g_window) return SDL_GetWindowID(g_window);
+    SDL_Window* w = SDL_GetKeyboardFocus();
+    if (!w) w = SDL_GetMouseFocus();
+    if (!w) {
+        /* Unfocused / headless: SDL window ids are small and allocated from 1,
+         * so scan a short range rather than require focus we deliberately do
+         * not take. */
+        for (Uint32 id = 1; id <= 16 && !w; ++id) w = SDL_GetWindowFromID(id);
+    }
+    return w ? SDL_GetWindowID(w) : 0;
+}
+
+extern "C" bool gb_platform_is_headless(void) { return g_headless_mode; }
+
+extern "C" void gb_platform_pump_paused_events(void) {
+    if (g_benchmark_mode && !g_headless_mode && !g_injected_event_pending) {
+        /* Plain benchmark mode has no window and nothing to pump. */
+        return;
+    }
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        /* Historic pause-loop escape hatches, kept verbatim. */
+        if (event.type == SDL_QUIT) exit(0);
+        if (event.type == SDL_KEYDOWN &&
+            event.key.keysym.sym == SDLK_ESCAPE) exit(0);
+        if (ImGui::GetCurrentContext() != NULL) {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+        }
+        /* Same handler the running loop uses: an injected key resolves through
+         * the real binding tables even with the guest halted. */
+        if (!handle_runtime_event(&event, g_last_poll_ctx)) exit(0);
+    }
+    g_injected_event_pending = false;
+}
+
+extern "C" int gb_platform_inject_sdl_event(const void* sdl_event) {
+    if (!sdl_event) return 0;
+    SDL_Event ev = *(const SDL_Event*)sdl_event;
+    const Uint32 wid = injection_window_id();
+
+    switch (ev.type) {
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+            if (!ev.key.windowID) ev.key.windowID = wid;
+            ev.key.state = (ev.type == SDL_KEYDOWN) ? SDL_PRESSED : SDL_RELEASED;
+            if (!ev.key.timestamp) ev.key.timestamp = SDL_GetTicks();
+            break;
+        case SDL_MOUSEMOTION:
+            if (!ev.motion.windowID) ev.motion.windowID = wid;
+            if (!ev.motion.timestamp) ev.motion.timestamp = SDL_GetTicks();
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP:
+            if (!ev.button.windowID) ev.button.windowID = wid;
+            ev.button.state =
+                (ev.type == SDL_MOUSEBUTTONDOWN) ? SDL_PRESSED : SDL_RELEASED;
+            if (!ev.button.timestamp) ev.button.timestamp = SDL_GetTicks();
+            break;
+        case SDL_MOUSEWHEEL:
+            if (!ev.wheel.windowID) ev.wheel.windowID = wid;
+            if (!ev.wheel.timestamp) ev.wheel.timestamp = SDL_GetTicks();
+            break;
+        case SDL_TEXTINPUT:
+            if (!ev.text.windowID) ev.text.windowID = wid;
+            if (!ev.text.timestamp) ev.text.timestamp = SDL_GetTicks();
+            break;
+        default:
+            break;
+    }
+
+    /* Keep SDL's own cursor position in step, for a UI that samples
+     * SDL_GetMouseState() rather than reading the event. Skipped for a
+     * GB_PLATFORM_SYNTHETIC_MOUSE_ID pointer: warping drags the REAL cursor
+     * across the user's desktop, which is exactly what a headless probe is
+     * supposed to stop doing. */
+    if (ev.type == SDL_MOUSEMOTION && wid &&
+        ev.motion.which != GB_PLATFORM_SYNTHETIC_MOUSE_ID) {
+        SDL_Window* w = SDL_GetWindowFromID(wid);
+        if (w) SDL_WarpMouseInWindow(w, ev.motion.x, ev.motion.y);
+    }
+
+    if (SDL_PushEvent(&ev) <= 0) {
+        fprintf(stderr, "[SDL] inject failed: %s\n", SDL_GetError());
+        return 0;
+    }
+    g_injected_event_pending = true;
+    return 1;
+}
+
 bool gb_platform_poll_events(GBContext* ctx) {
+    g_last_poll_ctx = ctx;
     /* Drain inbound BGB packets and apply them to the live serial state. */
     gb_serial_link_tick(ctx);
 
@@ -5600,7 +5734,15 @@ bool gb_platform_poll_events(GBContext* ctx) {
 
     SDL_Event event;
 
-    if (!g_benchmark_mode) {
+    /* Drain the queue whenever there is anything to drain. Headless runs have
+     * no window but still carry injected events, and plain benchmark mode skips
+     * the drain for speed — so an injection forces one pass either way. A
+     * debug-injected event therefore always reaches handle_runtime_event(), the
+     * same function a real keystroke reaches, with no focus and no window. */
+    const bool drain_events =
+        !g_benchmark_mode || g_headless_mode || g_injected_event_pending;
+    g_injected_event_pending = false;
+    if (drain_events) {
         while (SDL_PollEvent(&event)) {
             if (ImGui::GetCurrentContext() != NULL) {
                 ImGui_ImplSDL2_ProcessEvent(&event);
@@ -6386,6 +6528,10 @@ bool gb_platform_poll_events(GBContext* ctx) {
 }
 
 void gb_platform_set_input_script(const char* script) { (void)script; }
+
+bool gb_platform_is_headless(void) { return false; }
+int gb_platform_inject_sdl_event(const void* sdl_event) { (void)sdl_event; return 0; }
+void gb_platform_pump_paused_events(void) {}
 
 void gb_platform_set_input_record_file(const char* path) { (void)path; }
 void gb_platform_set_benchmark_mode(bool enabled) { (void)enabled; }

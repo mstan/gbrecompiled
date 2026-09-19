@@ -89,6 +89,54 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id);
 void gb_platform_set_benchmark_mode(bool enabled);
 
 /**
+ * @brief True when the run is headless (GBRECOMP_HEADLESS): dummy SDL video and
+ *        audio drivers, no window and no GL, but the SDL event queue is still
+ *        drained through the ordinary handler so injected events behave exactly
+ *        as they do in a windowed run.
+ */
+bool gb_platform_is_headless(void);
+
+/**
+ * @brief Push a fully-formed SDL_Event into the queue the runtime consumes.
+ *
+ * @param sdl_event  Pointer to a populated `SDL_Event` (declared void* so this
+ *                   header stays SDL-free). The window id of the event is
+ *                   stamped with the runtime's own window when the caller left
+ *                   it zero, so ImGui and the launcher accept it.
+ *
+ * The event lands in the SAME queue `gb_platform_poll_events()` drains, so the
+ * binding-resolution, runtime-UI and joypad code under test is identical to a
+ * real keystroke. The next poll drains the queue even in benchmark mode, so an
+ * injected event is never stranded. Returns 1 when the event was queued.
+ *
+ * No window focus is required: nothing on the handling path consults the OS
+ * foreground window or SDL_GetKeyboardState().
+ */
+/**
+ * @brief `which` id marking a synthetic pointer event.
+ *
+ * A mouse motion carrying this device id is delivered to the UI but does NOT
+ * drag the host cursor (no SDL_WarpMouseInWindow), so a probe never disturbs
+ * the machine it runs on. Any other id warps, for a UI that polls
+ * SDL_GetMouseState() instead of reading the event.
+ */
+#define GB_PLATFORM_SYNTHETIC_MOUSE_ID 0x67420001u
+
+int gb_platform_inject_sdl_event(const void* sdl_event);
+
+/**
+ * @brief Drain the SDL queue through the ordinary handler while the debug
+ *        server holds the game paused.
+ *
+ * The pause loop used to poll the queue itself and throw everything away, so a
+ * key pressed (or injected) while paused was simply lost. Routing it through
+ * the same handler the running loop uses means a binding capture armed over
+ * TCP can be completed over TCP, at a frame boundary, with no guest running.
+ * SDL_QUIT and a real Escape keep their historic meaning: exit the runner.
+ */
+void gb_platform_pump_paused_events(void);
+
+/**
  * @brief Enable or disable the launcher return action in the runtime menu.
  */
 void gb_platform_set_launcher_return_enabled(bool enabled);

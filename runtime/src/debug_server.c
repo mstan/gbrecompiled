@@ -1520,19 +1520,45 @@ static void sdl_event_common(int id, const char *json, const char *default_type)
     }
 
     if (!strcmp(type, "text")) {
-        SDL_Event ev;
-        SDL_zero(ev);
-        ev.type = SDL_TEXTINPUT;
-        if (!json_get_str(json, "text", ev.text.text, sizeof(ev.text.text))) {
+        /* SDL_TextInputEvent.text is 32 bytes, so one event carries at most 31
+         * of them: asking for a file path silently delivered its first 31
+         * characters and the probe had no way to tell. Send as many events as
+         * the string needs -- a text field appends each one, so the field ends
+         * up with exactly what was asked for. Splits fall on a UTF-8 character
+         * boundary; a run of continuation bytes longer than the chunk cannot
+         * occur in valid UTF-8, but the loop still makes progress if it does. */
+        char text[1024];
+        if (!json_get_str(json, "text", text, sizeof(text))) {
             send_err(id, "sdl_event: text requires a text argument");
             return;
         }
-        pushed = gb_platform_inject_sdl_event(&ev);
-        char esc[256];
-        json_escape(ev.text.text, esc, sizeof(esc));
+        const size_t chunk_max = sizeof(((SDL_TextInputEvent *)0)->text) - 1;
+        const size_t len = strlen(text);
+        size_t at = 0;
+        int events = 0;
+        pushed = 1;
+        do {
+            SDL_Event ev;
+            size_t n = len - at;
+            if (n > chunk_max) {
+                n = chunk_max;
+                /* Back off to a lead byte so no sequence is cut in half. */
+                while (n > 0 && ((unsigned char)text[at + n] & 0xC0) == 0x80) --n;
+                if (n == 0) n = chunk_max;
+            }
+            SDL_zero(ev);
+            ev.type = SDL_TEXTINPUT;
+            memcpy(ev.text.text, text + at, n);
+            ev.text.text[n] = '\0';
+            if (!gb_platform_inject_sdl_event(&ev)) pushed = 0;
+            ++events;
+            at += n;
+        } while (at < len);
+        char esc[1100];
+        json_escape(text, esc, sizeof(esc));
         send_fmt("{\"id\":%d,\"ok\":%s,\"type\":\"text\",\"text\":\"%s\","
-                 "\"pushed\":%d,\"frame\":%llu}",
-                 id, pushed ? "true" : "false", esc, pushed,
+                 "\"events\":%d,\"pushed\":%d,\"frame\":%llu}",
+                 id, pushed ? "true" : "false", esc, events, pushed,
                  (unsigned long long)s_frame_count);
         return;
     }

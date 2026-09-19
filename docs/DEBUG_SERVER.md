@@ -171,9 +171,12 @@ against wherever the pointer happened to be.
 
 ### `type:"text"`
 
-`text` (str) — an `SDL_TEXTINPUT` event, for a UI text field (the launcher's
-nickname and Join-Direct fields). Remember that the request parser does not
-process escapes.
+`text` (str) — `SDL_TEXTINPUT`, for a UI text field (the launcher's nickname
+and Join-Direct fields, or the built-in ROM browser's Folder/File boxes).
+`SDL_TextInputEvent.text` holds 31 characters, so anything longer is split
+across as many events as it needs — the reply's `events` count says how many —
+and a text field appends them, so a full file path arrives intact. Splits fall
+on UTF-8 boundaries. Remember that the request parser does not process escapes.
 
 ### Replies
 

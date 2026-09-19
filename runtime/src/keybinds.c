@@ -161,6 +161,52 @@ static void load_ini(const char *path) {
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
+/* One physical key drives exactly one Game Boy button. A legacy keybinds.ini can
+ * name the same key for two buttons; keep the button whose key differs from the
+ * shipped default (the one the user deliberately claimed), else the one listed
+ * first, and unbind the rest. Same rule as sanitise_binding_conflicts() in
+ * platform_sdl.cpp, which owns the modern runtime_prefs.ini bindings. */
+static void sanitise_conflicts(void) {
+    static const GBKeybinds defaults = {
+        .a      = SDL_SCANCODE_Z,
+        .b      = SDL_SCANCODE_X,
+        .select = SDL_SCANCODE_RSHIFT,
+        .start  = SDL_SCANCODE_RETURN,
+        .up     = SDL_SCANCODE_UP,
+        .down   = SDL_SCANCODE_DOWN,
+        .left   = SDL_SCANCODE_LEFT,
+        .right  = SDL_SCANCODE_RIGHT,
+        .turbo  = SDL_SCANCODE_TAB,
+    };
+
+    for (const ButtonDef *bd = s_buttons; bd->name; bd++) {
+        /* Snapshot the code: the drop loop below can clear this very slot when
+         * another button is the better claimant, and comparing against a
+         * cleared slot would silently stop matching. */
+        const SDL_Scancode code = *(SDL_Scancode *)((char *)&s_binds + bd->offset);
+        if (code == SDL_SCANCODE_UNKNOWN) continue;
+
+        const ButtonDef *keep = bd;
+        int keep_claimed = (code != *(const SDL_Scancode *)((const char *)&defaults + bd->offset));
+
+        for (const ButtonDef *other = s_buttons; other->name; other++) {
+            if (other == bd) continue;
+            if (*(SDL_Scancode *)((char *)&s_binds + other->offset) != code) continue;
+            int claimed = (code != *(const SDL_Scancode *)((const char *)&defaults + other->offset));
+            if (claimed && !keep_claimed) { keep = other; keep_claimed = claimed; }
+        }
+
+        for (const ButtonDef *other = s_buttons; other->name; other++) {
+            if (other == keep) continue;
+            SDL_Scancode *osc = (SDL_Scancode *)((char *)&s_binds + other->offset);
+            if (*osc != code) continue;
+            printf("[Keybinds] Conflict: \"%s\" drove both %s and %s; kept %s, dropped %s\n",
+                   scancode_to_name(code), keep->name, other->name, keep->name, other->name);
+            *osc = SDL_SCANCODE_UNKNOWN;
+        }
+    }
+}
+
 void keybinds_init(const char *exe_path) {
     derive_ini_path(exe_path);
 
@@ -168,6 +214,7 @@ void keybinds_init(const char *exe_path) {
     if (test) {
         fclose(test);
         load_ini(s_ini_path);
+        sanitise_conflicts();
     } else {
         write_defaults(s_ini_path);
     }

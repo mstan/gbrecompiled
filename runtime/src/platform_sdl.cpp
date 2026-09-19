@@ -363,6 +363,11 @@ static uint64_t g_present_count = 0;
 static GBContext* g_registered_ctx = NULL;
 static GBInputBinding g_keyboard_bindings[GB_INPUT_ACTION_COUNT][2] = {};
 static GBInputBinding g_controller_bindings[GB_INPUT_ACTION_COUNT][2] = {};
+/* Snapshot of the shipped defaults, filled by set_default_input_bindings().
+ * sanitise_binding_conflicts() uses it to tell a slot the player explicitly
+ * claimed from one that merely still holds its factory value. */
+static GBInputBinding g_default_keyboard_bindings[GB_INPUT_ACTION_COUNT][2] = {};
+static GBInputBinding g_default_controller_bindings[GB_INPUT_ACTION_COUNT][2] = {};
 static bool g_keyboard_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
 static bool g_controller_button_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
 static bool g_controller_axis_binding_pressed[GB_INPUT_ACTION_COUNT][2] = {};
@@ -419,6 +424,12 @@ static void reset_audio_output_buffer(bool preserve_stats);
 static char* trim_ascii(char* text);
 static void update_effective_joypad_state(void);
 static void save_runtime_preferences(void);
+static void binding_to_config_value(const GBInputBinding& binding, char* out, size_t out_size);
+static int clear_conflicting_bindings(GBBindingCaptureDevice device,
+                                      GBInputAction keep_action,
+                                      int keep_slot,
+                                      const GBInputBinding& binding,
+                                      bool log_drops);
 static bool save_savestate_slot(GBContext* ctx, int slot);
 static bool load_savestate_slot(GBContext* ctx, int slot);
 static bool delete_savestate_slot(GBContext* ctx, int slot);
@@ -930,6 +941,14 @@ static void assign_binding_slot(GBBindingCaptureDevice device,
         return;
     }
 
+    /* One physical input drives exactly one action. Before this slot takes the
+     * binding, drop the same physical input from every other action/slot of the
+     * same device, so a key the player just claimed cannot keep silently firing
+     * whatever it used to be a (usually defaulted) secondary binding for. This
+     * is the fix for "rebind A to the A key and jumping also walks left": key A
+     * shipped as the secondary binding of LEFT. */
+    clear_conflicting_bindings(device, action, slot, binding, true);
+
     if (device == GB_CAPTURE_DEVICE_KEYBOARD) {
         g_keyboard_bindings[action][slot] = binding;
         g_keyboard_binding_pressed[action][slot] = false;
@@ -1174,6 +1193,72 @@ static bool binding_active_for_axis_value(const GBInputBinding& binding, Sint16 
     return false;
 }
 
+static bool bindings_identical(const GBInputBinding& a, const GBInputBinding& b) {
+    return a.kind == b.kind && a.code == b.code;
+}
+
+static GBInputBinding* binding_table_for_device(GBBindingCaptureDevice device) {
+    if (device == GB_CAPTURE_DEVICE_KEYBOARD) {
+        return &g_keyboard_bindings[0][0];
+    }
+    if (device == GB_CAPTURE_DEVICE_CONTROLLER) {
+        return &g_controller_bindings[0][0];
+    }
+    return NULL;
+}
+
+/* Clear `binding` out of every action/slot of `device` except (keep_action,
+ * keep_slot), so one physical input drives exactly one action. Returns how many
+ * slots were cleared. An unbound / invalid binding is a no-op, so "Clear" never
+ * cascades. A physical input is the (kind, code) pair; axis + and axis - on the
+ * same axis are deliberately NOT the same input, being opposite directions of
+ * one stick that legitimately drive two actions. */
+static int clear_conflicting_bindings(GBBindingCaptureDevice device,
+                                      GBInputAction keep_action,
+                                      int keep_slot,
+                                      const GBInputBinding& binding,
+                                      bool log_drops) {
+    GBInputBinding* table = binding_table_for_device(device);
+    if (!table || !binding_is_valid(binding)) {
+        return 0;
+    }
+
+    const bool keyboard = (device == GB_CAPTURE_DEVICE_KEYBOARD);
+    int cleared = 0;
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        for (int slot = 0; slot < 2; slot++) {
+            if (action == (int)keep_action && slot == keep_slot) {
+                continue;
+            }
+            GBInputBinding& existing = table[action * 2 + slot];
+            if (!bindings_identical(existing, binding)) {
+                continue;
+            }
+
+            if (log_drops) {
+                fprintf(stderr,
+                        "[SDL] Input conflict: %s \"%s\" was also bound to %s slot %d; cleared it "
+                        "(it now drives %s only)\n",
+                        keyboard ? "key" : "controller input",
+                        binding_display_label(binding).c_str(),
+                        g_input_action_names[action],
+                        slot + 1,
+                        g_input_action_names[keep_action]);
+            }
+
+            existing = make_binding(GB_INPUT_BINDING_NONE, 0);
+            if (keyboard) {
+                g_keyboard_binding_pressed[action][slot] = false;
+            } else {
+                g_controller_button_binding_pressed[action][slot] = false;
+                g_controller_axis_binding_pressed[action][slot] = false;
+            }
+            cleared++;
+        }
+    }
+    return cleared;
+}
+
 static void set_default_audio_preferences(void) {
     g_audio_output_enabled = true;
     g_audio_muted = false;
@@ -1232,7 +1317,107 @@ static void set_default_input_bindings(void) {
     g_controller_bindings[GB_INPUT_ACTION_TOGGLE_MENU][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_LEFTSTICK);
     g_controller_bindings[GB_INPUT_ACTION_TOGGLE_MENU][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
 
+    memcpy(g_default_keyboard_bindings, g_keyboard_bindings, sizeof(g_default_keyboard_bindings));
+    memcpy(g_default_controller_bindings, g_controller_bindings, sizeof(g_default_controller_bindings));
+
     clear_all_binding_pressed_state();
+}
+
+/* Sanitise a bindings table loaded from disk so every physical input appears at
+ * most once. Files written before the conflict rule existed can bind one key to
+ * two actions -- the defaults fill slot 1 with WASD/JK, and the rebinding UIs
+ * used to write slot 0 without clearing anything -- which made the key silently
+ * drive both.
+ *
+ * runtime_prefs.ini carries no edit timestamps and is written in a fixed key
+ * order, so "the action the user most recently edited" is NOT derivable from the
+ * file. The documented fallback is used instead:
+ *   1. a slot holding something OTHER than its factory default beats a slot that
+ *      still holds its default (the player claimed the first one on purpose),
+ *   2. then slot 0 beats slot 1 (slot 0 is what both rebinding UIs write),
+ *   3. then the lower action index wins, purely so the result is deterministic.
+ * Everything dropped is logged. */
+static int sanitise_binding_conflicts(GBInputBinding table[GB_INPUT_ACTION_COUNT][2],
+                                      const GBInputBinding defaults[GB_INPUT_ACTION_COUNT][2],
+                                      const char* device_label) {
+    int dropped = 0;
+    for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+        for (int slot = 0; slot < 2; slot++) {
+            /* Copy: the drop loop below can clear this very slot when another
+             * slot is the better claimant. */
+            const GBInputBinding binding = table[action][slot];
+            if (!binding_is_valid(binding)) {
+                continue;
+            }
+
+            int best_action = action;
+            int best_slot = slot;
+            bool best_claimed = !bindings_identical(binding, defaults[action][slot]);
+
+            for (int other_action = 0; other_action < GB_INPUT_ACTION_COUNT; other_action++) {
+                for (int other_slot = 0; other_slot < 2; other_slot++) {
+                    if (other_action == best_action && other_slot == best_slot) {
+                        continue;
+                    }
+                    if (!bindings_identical(table[other_action][other_slot], binding)) {
+                        continue;
+                    }
+
+                    const bool claimed =
+                        !bindings_identical(binding, defaults[other_action][other_slot]);
+                    bool wins;
+                    if (claimed != best_claimed) {
+                        wins = claimed;
+                    } else if (other_slot != best_slot) {
+                        wins = (other_slot < best_slot);
+                    } else {
+                        wins = (other_action < best_action);
+                    }
+
+                    if (wins) {
+                        best_action = other_action;
+                        best_slot = other_slot;
+                        best_claimed = claimed;
+                    }
+                }
+            }
+
+            for (int other_action = 0; other_action < GB_INPUT_ACTION_COUNT; other_action++) {
+                for (int other_slot = 0; other_slot < 2; other_slot++) {
+                    if (other_action == best_action && other_slot == best_slot) {
+                        continue;
+                    }
+                    if (!bindings_identical(table[other_action][other_slot], binding)) {
+                        continue;
+                    }
+                    fprintf(stderr,
+                            "[SDL] Input conflict in saved prefs: %s \"%s\" drove both %s slot %d "
+                            "and %s slot %d; kept %s slot %d, dropped the other\n",
+                            device_label,
+                            binding_display_label(binding).c_str(),
+                            g_input_action_names[best_action],
+                            best_slot + 1,
+                            g_input_action_names[other_action],
+                            other_slot + 1,
+                            g_input_action_names[best_action],
+                            best_slot + 1);
+                    table[other_action][other_slot] = make_binding(GB_INPUT_BINDING_NONE, 0);
+                    dropped++;
+                }
+            }
+        }
+    }
+    return dropped;
+}
+
+static int sanitise_all_binding_conflicts(void) {
+    int dropped = sanitise_binding_conflicts(g_keyboard_bindings, g_default_keyboard_bindings, "key");
+    dropped += sanitise_binding_conflicts(g_controller_bindings, g_default_controller_bindings,
+                                          "controller input");
+    if (dropped > 0) {
+        clear_all_binding_pressed_state();
+    }
+    return dropped;
 }
 
 static std::string runtime_preferences_path(void) {
@@ -1253,6 +1438,80 @@ static std::string runtime_preferences_path(void) {
 // recomp-ui launcher "Widescreen (experimental)" toggle, mirrored to the
 // video.widescreen pref. Drives the opt-in extended view via gb_ws_set_cli_request.
 static int g_pref_widescreen = 0;
+
+/* Rewrite only the keyboard.* / controller.* value lines of an existing prefs
+ * file, leaving every other line byte-identical. A full save_runtime_preferences()
+ * is not safe this early in gb_platform_init(): the border list, shader list and
+ * window state have not been populated yet, so it would drop those keys. */
+static void rewrite_binding_lines_in_place(const std::string& path) {
+    if (path.empty()) {
+        return;
+    }
+
+    FILE* file = fopen(path.c_str(), "rb");
+    if (!file) {
+        return;
+    }
+    std::string text;
+    char chunk[4096];
+    size_t got = 0;
+    while ((got = fread(chunk, 1, sizeof(chunk), file)) > 0) {
+        text.append(chunk, got);
+    }
+    fclose(file);
+
+    std::string out;
+    out.reserve(text.size() + 64);
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        const bool last = (eol == std::string::npos);
+        std::string body = text.substr(pos, last ? std::string::npos : eol - pos);
+        std::string cr;
+        if (!body.empty() && body[body.size() - 1] == '\r') {
+            cr = "\r";
+            body.erase(body.size() - 1);
+        }
+
+        const bool keyboard = body.compare(0, 9, "keyboard.") == 0;
+        const bool controller = body.compare(0, 11, "controller.") == 0;
+        const size_t equals = body.find('=');
+        if ((keyboard || controller) && equals != std::string::npos) {
+            const std::string key = body.substr(0, equals);
+            const size_t dot = key.rfind('.');
+            const size_t prefix = keyboard ? 9 : 11;
+            if (dot != std::string::npos && dot > prefix) {
+                const std::string name = key.substr(prefix, dot - prefix);
+                const int slot = atoi(key.c_str() + dot + 1);
+                GBInputAction action = GB_INPUT_ACTION_RIGHT;
+                if (slot >= 0 && slot < 2 && parse_input_action_name(name.c_str(), &action)) {
+                    char value[64];
+                    binding_to_config_value(keyboard ? g_keyboard_bindings[action][slot]
+                                                     : g_controller_bindings[action][slot],
+                                            value, sizeof(value));
+                    body = key + "=" + value;
+                }
+            }
+        }
+
+        out += body;
+        out += cr;
+        if (!last) {
+            out += '\n';
+        }
+        if (last) {
+            break;
+        }
+        pos = eol + 1;
+    }
+
+    file = fopen(path.c_str(), "wb");
+    if (!file) {
+        return;
+    }
+    fwrite(out.data(), 1, out.size(), file);
+    fclose(file);
+}
 
 static void load_runtime_preferences(void) {
     set_default_audio_preferences();
@@ -1503,6 +1762,14 @@ static void load_runtime_preferences(void) {
             fclose(file);
         }
     }
+
+    /* Files written before the one-key-one-action rule existed can bind the same
+     * physical input to two actions. Fix the in-memory tables, then write the
+     * corrected binding lines back so the file itself is sanitised too. */
+    if (sanitise_all_binding_conflicts() > 0) {
+        rewrite_binding_lines_in_place(path);
+    }
+
     update_effective_joypad_state();
 }
 

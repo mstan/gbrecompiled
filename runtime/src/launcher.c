@@ -401,11 +401,15 @@ static int is_rom_name(const char *name) {
 /* First ROM in `dir` that this build accepts, resolved into `resolved`.
  * Lowest filename first, so the choice is stable rather than directory-order.
  * verify_rom is the gate, so a folder of unrelated carts cannot be picked up
- * by accident — only the one this binary was recompiled from. */
+ * by accident — only the one this binary was recompiled from. Past
+ * ROM_SCAN_MAX candidates in one directory the scan stops looking; that is a
+ * ROM library, not a game folder, and the launcher's Browse is the surface for
+ * one of those. */
+#define ROM_SCAN_MAX 256
 static int find_acceptable_rom_in_dir(const char *dir, char *resolved, size_t resolved_sz) {
     DIR *d;
     struct dirent *ent;
-    char names[64][256];
+    static char names[ROM_SCAN_MAX][256];
     int count = 0;
     if (!dir || !dir[0]) return 0;
     d = opendir(dir);

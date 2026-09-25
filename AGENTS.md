@@ -80,6 +80,16 @@ If debugging a game-specific issue, prefer keeping:
 - the recorded input in `logs/<name>.input`
 
 ## Interpreter Fallback Workflow
+
+For games using `exhaustive_rom`, verify the generated all-bank maps and native
+instruction comparisons directly. Do not use progressively longer gameplay as
+the entry-discovery strategy: ROM coverage is independent of observed execution.
+Audit writable-code initialization/patch sites separately and test those programs
+against single-step interpretation without shared RAM shortcuts. A fatal guard
+for unknown RAM is not evidence that all reachable RAM programs are covered.
+[shantaerecomp](https://github.com/vibecodekun/shantaerecomp) has examples:
+`tools/audit_whole_rom.py`, `tools/audit_ram_coverage.py`, `whole_rom_check`,
+and `ram_native_check`.
 Interpreter fallback is already instrumented. Use that signal.
 
 Start here:

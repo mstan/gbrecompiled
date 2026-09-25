@@ -2182,6 +2182,7 @@ void gb_daa(GBContext* ctx) {
  * ========================================================================== */
 
 void gb_ret(GBContext* ctx) { ctx->pc = gb_pop16(ctx); }
+
 void gbrt_jump_hl(GBContext* ctx) { ctx->pc = ctx->hl; }
 void gb_rst(GBContext* ctx, uint8_t vec) { gb_push16(ctx, ctx->pc); ctx->pc = vec; }
 
@@ -3439,7 +3440,14 @@ static void gb_tick_internal(GBContext* ctx, uint32_t cycles, bool instruction_b
         }
     }
     
-    if ((system_cycles > 0 && (ctx->cycles & 0xFF) < system_cycles) ||
+    /* Catch the PPU up as soon as it reaches a mode boundary (where STAT and
+     * VBlank interrupts are raised), so compiled code sees an interrupt at the
+     * end of the instruction it became pending in -- not only at the periodic
+     * 256-cycle sync or the next return to the dispatcher. */
+    bool ppu_event_due = ctx->ppu &&
+        (ctx->cycles - ctx->last_sync_cycles) >=
+            ppu_cycles_until_event((const GBPPU*)ctx->ppu, ctx->config.model == GB_MODEL_CGB);
+    if ((system_cycles > 0 && (ctx->cycles & 0xFF) < system_cycles) || ppu_event_due ||
         (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) {
         gb_sync(ctx);
         if (ctx->frame_done || (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) ctx->stopped = 1;
@@ -3618,7 +3626,7 @@ uint32_t gb_step(GBContext* ctx) {
     }
     
     /* Handle HALT bug by falling back to interpreter for the next instruction */
-    if (ctx->halt_bug) {
+    if (ctx->halt_bug && !ctx->config.compiled_halt_bug) {
         gb_interpret(ctx, ctx->pc);
         return 0; /* Cycle counting handled by interpreter */
     }
@@ -3677,7 +3685,7 @@ uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
     ctx->single_step_mode = 1;
     ctx->used_dispatch_fallback = 0;
 
-    if (mode == GB_EXECUTION_INTERPRETER || ctx->halt_bug) {
+    if (mode == GB_EXECUTION_INTERPRETER || (ctx->halt_bug && !ctx->config.compiled_halt_bug)) {
         gb_interpret(ctx, ctx->pc);
     } else {
         gbrt_dispatch(ctx, ctx->pc);

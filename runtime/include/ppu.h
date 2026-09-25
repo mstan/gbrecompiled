@@ -263,6 +263,35 @@ void ppu_reload_cgb_compat_palette(GBPPU* ppu, const GBContext* ctx);
 void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles);
 
 /**
+ * @brief Cycles from the last ppu_tick until the current mode ends
+ *
+ * Mode transitions are where STAT/VBlank interrupts and LY changes happen,
+ * so the caller catches the PPU up once this many cycles have elapsed.
+ * Lengths mirror ppu_tick(). UINT32_MAX while the LCD is off.
+ */
+static inline uint32_t ppu_cycles_until_event(const GBPPU* ppu, bool cgb_hw) {
+    if (!(ppu->lcdc & LCDC_LCD_ENABLE)) {
+        return UINT32_MAX;
+    }
+    uint32_t len;
+    switch (ppu->mode) {
+        case PPU_MODE_OAM:
+            len = (uint32_t)CYCLES_OAM_SCAN - (ppu->lcd_on_first_line ? 2u : 0u);
+            break;
+        case PPU_MODE_DRAW:
+            len = (uint32_t)CYCLES_PIXEL_DRAW;
+            break;
+        case PPU_MODE_HBLANK:
+            len = (uint32_t)CYCLES_HBLANK - (ppu->lcd_on_first_line ? (cgb_hw ? 8u : 7u) : 0u);
+            break;
+        default:
+            len = (uint32_t)CYCLES_SCANLINE;
+            break;
+    }
+    return ppu->mode_cycles >= len ? 0 : len - ppu->mode_cycles;
+}
+
+/**
  * @brief Read LCD register
  */
 uint8_t ppu_read_register(GBPPU* ppu, uint16_t addr);

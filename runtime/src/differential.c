@@ -46,11 +46,39 @@ static uint16_t gb_diff_current_bank(const GBContext* ctx) {
     return (ctx->pc < 0x4000) ? 0 : ctx->rom_bank;
 }
 
+/* Diagnostic backing bytes, not CPU bus reads: gb_read8 can advance the PPU,
+ * consume device state, or invoke game hooks. Looking ahead across $7FFF must
+ * not change just one side of the comparison before the instruction runs. */
+static uint8_t gb_diff_peek8(const GBContext* ctx, uint16_t addr) {
+    if (ctx->boot_rom_active && ctx->boot_rom && addr < ctx->boot_rom_size &&
+        (addr < 0x100 || addr >= 0x200)) return ctx->boot_rom[addr];
+    if (addr < 0x8000) {
+        size_t bank = addr < 0x4000 ? 0 : ctx->rom_bank;
+        if (addr < 0x4000 && ctx->mbc_type >= 1 && ctx->mbc_type <= 3 && ctx->mbc_mode == 1)
+            bank = (size_t)ctx->rom_bank_upper << 5;
+        size_t offset = bank * 0x4000 + (addr & 0x3FFF);
+        return ctx->rom && offset < ctx->rom_size ? ctx->rom[offset] : 0xFF;
+    }
+    if (addr < 0xA000) return ctx->vram[(ctx->vram_bank & 1) * VRAM_SIZE + addr - 0x8000];
+    if (addr < 0xC000) {
+        size_t offset = (size_t)ctx->ram_bank * 0x2000 + addr - 0xA000;
+        return ctx->eram && offset < ctx->eram_size ? ctx->eram[offset] : 0xFF;
+    }
+    if (addr >= 0xE000 && addr < 0xFE00) addr -= 0x2000;
+    if (addr < 0xD000) return ctx->wram[addr - 0xC000];
+    if (addr < 0xE000) {
+        unsigned bank = ctx->wram_bank & 7;
+        return ctx->wram[(bank ? bank : 1) * 0x1000 + addr - 0xD000];
+    }
+    if (addr < 0xFEA0) return ctx->oam[addr - 0xFE00];
+    if (addr < 0xFF00) return 0xFF;
+    if (addr < 0xFF80) return ctx->io[addr - 0xFF00];
+    if (addr < 0xFFFF) return ctx->hram[addr - 0xFF80];
+    return ctx->io[0x80];
+}
+
 static void gb_diff_read_opcode_bytes(const GBContext* ctx, uint8_t bytes[3]) {
-    GBContext* mutable_ctx = (GBContext*)ctx;
-    bytes[0] = gb_read8(mutable_ctx, ctx->pc);
-    bytes[1] = gb_read8(mutable_ctx, (uint16_t)(ctx->pc + 1));
-    bytes[2] = gb_read8(mutable_ctx, (uint16_t)(ctx->pc + 2));
+    for (unsigned i = 0; i < 3; ++i) bytes[i] = gb_diff_peek8(ctx, (uint16_t)(ctx->pc + i));
 }
 
 static void gb_diff_print_state(FILE* stream, const char* label, const GBContext* ctx) {
@@ -98,11 +126,9 @@ static void gb_diff_print_code_bytes(FILE* stream,
                                      const GBContext* ctx,
                                      uint16_t addr,
                                      size_t count) {
-    GBContext* mutable_ctx = (GBContext*)ctx;
-
     fprintf(stream, "[DIFF] %s bytes at %03X:%04X:", label, gb_diff_current_bank(ctx), addr);
     for (size_t i = 0; i < count; i++) {
-        fprintf(stream, " %02X", gb_read8(mutable_ctx, (uint16_t)(addr + i)));
+        fprintf(stream, " %02X", gb_diff_peek8(ctx, (uint16_t)(addr + i)));
     }
     fputc('\n', stream);
 }
@@ -823,7 +849,7 @@ bool gb_run_differential(GBContext* generated_ctx,
         }
     }
 
-    fprintf(stderr,
+    if (!effective.quiet) fprintf(stderr,
             "[DIFF] Matched generated and interpreter execution for %" PRIu64 " steps / %" PRIu64 " frames\n",
             executed_steps,
             frames_completed);

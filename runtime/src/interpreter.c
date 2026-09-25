@@ -71,10 +71,9 @@ static const uint8_t CB_OPCODE_CYCLES[256] = {
  * read-modify-write: tick-before puts BOTH the read and the write at the end,
  * which is correct for the write (the timing-critical access) but late for the
  * read -- a known whole-instruction-granularity approximation (blargg mem_timing
- * read-modify-write may still fail). Stack/control ops (PUSH/POP/CALL/RET/
- * LD (nn),SP) keep the tail tick for now: their multi-byte accesses target the
- * stack (RAM/HRAM), never PPU/IO, so intra-instruction sampling is moot here;
- * revisit if mem_timing demands it. CB (0xCB) is classified inside its case
+ * read-modify-write may still fail). RET uses separate stack-read phases below:
+ * DMA can release the stack bus during the instruction. Other stack/control
+ * operations still use a tail tick. CB (0xCB) is classified inside its case
  * (only (HL) variants touch memory), not via this table. See interpreter.log. */
 static const uint8_t MEM_TICK_BEFORE[256] = {
     /* 0x00-0x0F */   0,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,0,0,
@@ -104,8 +103,8 @@ static const uint8_t MEM_TICK_BEFORE[256] = {
 #define READ8(ctx) gb_read8(ctx, ctx->pc++)
 #define READ16(ctx) (ctx->pc += 2, gb_read16(ctx, ctx->pc - 2))
 
-/* Match generated [[imm_override]] arithmetic when a reviewed site falls
- * back to the interpreter. Sequence the operand read before the callback. */
+/* Match generated [[imm_override]] arithmetic and LD r,n when a reviewed site
+ * falls back to the interpreter. Sequence the operand read before the callback. */
 static uint8_t read_alu_immediate(GBContext *ctx) {
     uint16_t pc=ctx->pc-1;
     uint8_t value=READ8(ctx);
@@ -251,9 +250,11 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
          */
 
 #if GBRT_RAM_HLE
-        if ((ctx->pc >= 0xFF00 && ctx->pc < 0xFF80 && gbrt_try_execute_highmem_stub(ctx, ctx->pc)) ||
+        /* Differential single stepping must use the actual instruction decoder,
+         * not the same RAM shortcuts as generated execution. */
+        if (!ctx->single_step_mode && ((ctx->pc >= 0xFF00 && ctx->pc < 0xFF80 && gbrt_try_execute_highmem_stub(ctx, ctx->pc)) ||
             (ctx->pc >= 0xFF80 && ctx->pc <= 0xFFFE && gbrt_try_execute_hram_stub(ctx, ctx->pc)) ||
-            (ctx->pc >= 0xC000 && ctx->pc < 0xFFFF && gbrt_try_execute_ram_stub(ctx, ctx->pc))) {
+            (ctx->pc >= 0xC000 && ctx->pc < 0xFFFF && gbrt_try_execute_ram_stub(ctx, ctx->pc)))) {
             if (ctx->single_step_mode) {
                 goto finish;
             }
@@ -309,13 +310,13 @@ void gb_interpret(GBContext* ctx, uint16_t addr) {
             case 0x10: gb_stop(ctx); ctx->pc++; break; /* STOP 0 */
             
             /* 8-bit Loads */
-            case 0x06: ctx->b = READ8(ctx); break; /* LD B,n */
-            case 0x0E: ctx->c = READ8(ctx); break; /* LD C,n */
-            case 0x16: ctx->d = READ8(ctx); break; /* LD D,n */
-            case 0x1E: ctx->e = READ8(ctx); break; /* LD E,n */
-            case 0x26: ctx->h = READ8(ctx); break; /* LD H,n */
-            case 0x2E: ctx->l = READ8(ctx); break; /* LD L,n */
-            case 0x3E: ctx->a = READ8(ctx); break; /* LD A,n */
+            case 0x06: ctx->b = read_alu_immediate(ctx); break; /* LD B,n */
+            case 0x0E: ctx->c = read_alu_immediate(ctx); break; /* LD C,n */
+            case 0x16: ctx->d = read_alu_immediate(ctx); break; /* LD D,n */
+            case 0x1E: ctx->e = read_alu_immediate(ctx); break; /* LD E,n */
+            case 0x26: ctx->h = read_alu_immediate(ctx); break; /* LD H,n */
+            case 0x2E: ctx->l = read_alu_immediate(ctx); break; /* LD L,n */
+            case 0x3E: ctx->a = read_alu_immediate(ctx); break; /* LD A,n */
             
             /* Complete LD r, r' instructions (0x40-0x7F) */
             /* LD B, r */

@@ -20,7 +20,7 @@
 #ifndef GBRT_HLE
 #define GBRT_HLE 0
 #endif
-#define STATE_VERSION 2u
+#define STATE_VERSION 3u
 #define STATE_LIMIT (64u * 1024u * 1024u)
 #define WRAM_BYTES 0x8000u
 #define VRAM_BYTES 0x4000u
@@ -28,6 +28,7 @@
 #define HRAM_BYTES 0x7fu
 #define IO_BYTES 0x81u
 
+GBGameState gb_game_state;
 static const GBSnapshotExtension* state_extension;
 bool gb_snapshot_set_extension(const GBSnapshotExtension* extension) {
     if (extension && (!extension->id || !extension->id[0] || strlen(extension->id) >= 64 ||
@@ -47,6 +48,7 @@ typedef struct {
     uint32_t raw_size, compressed_size, checksum;
     uint8_t rom_hash[32], bios_hash[32];
     uint32_t extension_version, extension_size;
+    uint32_t wram_ext_size, game_size;
     char extension_id[64];
 } GBStateHeader;
 
@@ -79,6 +81,10 @@ static bool state_header(GBContext* ctx, GBStateHeader* h) {
     h->gba_mode = ctx->gba_mode;
     h->core_size = sizeof(GBSavestateCoreState);
     h->eram_size = (uint32_t)ctx->eram_size;
+    if (ctx->wram_ext_size > STATE_LIMIT || (ctx->wram_ext_size && !ctx->wram_ext) ||
+        gb_game_state.size > STATE_LIMIT || (gb_game_state.size && (!gb_game_state.save || !gb_game_state.load))) return false;
+    h->wram_ext_size = ctx->wram_ext_size;
+    h->game_size = (uint32_t)gb_game_state.size;
     h->ppu_size = ctx->ppu ? sizeof(GBPPU) : 0;
     h->apu_size = ctx->apu ? (uint32_t)gb_audio_state_size() : 0;
     h->sgb_size = ctx->sgb ? (uint32_t)gb_sgb_state_size() : 0;
@@ -91,7 +97,7 @@ static bool state_header(GBContext* ctx, GBStateHeader* h) {
         strcpy(h->extension_id, state_extension->id);
     }
     size_t raw = h->core_size + (size_t)h->eram_size + WRAM_BYTES + VRAM_BYTES +
-        OAM_BYTES + HRAM_BYTES + IO_BYTES + h->ppu_size + h->apu_size + h->sgb_size + h->ir_size + h->extension_size;
+        OAM_BYTES + HRAM_BYTES + IO_BYTES + h->ppu_size + h->apu_size + h->sgb_size + h->ir_size + h->extension_size + h->wram_ext_size + h->game_size;
     if (raw > STATE_LIMIT) return false;
     h->raw_size = (uint32_t)raw;
     memcpy(h->rom_hash, ctx->rom_sha256, 32);
@@ -130,6 +136,9 @@ bool gb_snapshot_serialize(GBContext* ctx, uint8_t** data, size_t* size) {
     if (ok && h.ir_size) ok = gb_ir_save_state(ctx->ir, cursor, h.ir_size);
     cursor += h.ir_size;
     if (ok && h.extension_size) ok = state_extension->save(ctx, cursor, h.extension_size);
+    cursor += h.extension_size;
+    put_bytes(&cursor, ctx->wram_ext, h.wram_ext_size);
+    if (ok && h.game_size) gb_game_state.save(ctx, cursor);
     uLongf compressed_size = compressBound(h.raw_size);
     uint8_t* packed = ok ? (uint8_t*)malloc(sizeof(h) + compressed_size) : NULL;
     ok = packed && compress2(packed + sizeof(h), &compressed_size, raw, h.raw_size,
@@ -176,6 +185,8 @@ bool gb_snapshot_deserialize(GBContext* ctx, const uint8_t* data, size_t size) {
     const uint8_t* sgb = apu + h.apu_size;
     const uint8_t* ir = sgb + h.sgb_size;
     const uint8_t* extension = ir + h.ir_size;
+    const uint8_t* wram_ext = extension + h.extension_size;
+    const uint8_t* game = wram_ext + h.wram_ext_size;
     if (ok && h.extension_size) ok = state_extension->validate(ctx, extension, h.extension_size);
     /* Stage any component whose validation/allocation can fail before commit. */
     GBSgbState* staged_sgb = NULL;
@@ -212,6 +223,8 @@ bool gb_snapshot_deserialize(GBContext* ctx, const uint8_t* data, size_t size) {
         gb_ws_reapply(ctx);
         if (gb_custom_reset) gb_custom_reset(ctx);
         if (h.extension_size) state_extension->restore(ctx, extension, h.extension_size);
+        if (h.wram_ext_size) memcpy(ctx->wram_ext, wram_ext, h.wram_ext_size);
+        if (h.game_size) gb_game_state.load(ctx, game);
     }
     gb_sgb_destroy(staged_sgb);
     gb_ir_destroy(staged_ir);
@@ -255,7 +268,34 @@ bool gb_context_load_state_file(GBContext* ctx, const char* path) {
     ok = data && fread(data, 1, (size_t)size, file) == (size_t)size;
     fclose(file);
     if (ok) ok = gb_snapshot_deserialize(ctx, data, (size_t)size);
+    if (ok && gb_game_state.file_loaded) gb_game_state.file_loaded(ctx);
     free(data);
     if (ok) gb_rewind_clear(ctx);
     return ok;
 }
+
+/* Same-build slots used by preemptive frames and Restart Game. */
+size_t gb_state_size(const GBContext* ctx) {
+    GBStateHeader h;
+    return state_header((GBContext*)ctx, &h) ? sizeof(uint64_t) + sizeof(h) + compressBound(h.raw_size) : 0;
+}
+bool gb_state_save(const GBContext* ctx, void* out) {
+    if (!out) return false;
+    uint8_t* blob = NULL; size_t size = 0;
+    uint64_t stored = 0;
+    if (gb_snapshot_serialize((GBContext*)ctx, &blob, &size)) {
+        stored = size; memcpy((uint8_t*)out + sizeof(stored), blob, size);
+    }
+    memcpy(out, &stored, sizeof(stored)); free(blob);
+    return stored != 0;
+}
+bool gb_state_load(GBContext* ctx, const void* in) {
+    if (!in) return false;
+    uint64_t size; memcpy(&size, in, sizeof(size));
+    size_t capacity = gb_state_size(ctx);
+    if (capacity >= sizeof(size) && size && size <= capacity - sizeof(size))
+        return gb_snapshot_deserialize(ctx, (const uint8_t*)in + sizeof(size), (size_t)size);
+    return false;
+}
+bool gb_state_save_no_picture(const GBContext* ctx, void* out) { return gb_state_save(ctx, out); }
+bool gb_state_load_no_picture(GBContext* ctx, const void* in) { return gb_state_load(ctx, in); }

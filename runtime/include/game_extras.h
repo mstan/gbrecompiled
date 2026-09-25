@@ -119,6 +119,15 @@ const char *game_get_name(void);
  * Mario Land) override this to "gb" in their extras.c. */
 const char *game_get_platform(void);
 
+/* Default hardware mode for this cart before any saved per-game choice, as a
+ * GBHardwareModePref value (gbrt.h). A saved menu choice still wins.
+ * Default: GB_HARDWARE_MODE_AUTO (derive from the cart header). */
+int game_default_hardware_mode(void);
+
+/* Preemptive frames (platform_sdl.h) for this game before the player sets
+ * any. Default: 0 (off). */
+int game_default_preemptive_frames(void);
+
 /* Handle a CLI argument. Return 1 if consumed, 0 to ignore. */
 int game_handle_arg(const char *arg, const char *next_arg);
 

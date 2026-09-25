@@ -2704,6 +2704,23 @@ void gb_daa(GBContext* ctx) {
  * ========================================================================== */
 
 void gb_ret(GBContext* ctx) { ctx->pc = gb_pop16(ctx); }
+
+void gb_ret_timed(GBContext* ctx, uint32_t cycles) {
+    /* The opcode fetch (and conditional decision) precede the stack reads.
+     * Shantae's HRAM DMA wait ends four cycles before DMA releases WRAM:
+     * popping before the fetch incorrectly reads FF FF as the return PC.
+     * Match SameBoy's ret/cycle_read ordering, without adding instruction time.
+     * EI delay advances once per instruction, not once per bus phase. */
+    uint8_t ime_pending = ctx->ime_pending;
+    ctx->ime_pending = 0;
+    gb_tick(ctx, cycles - 12);
+    uint16_t target = gb_read8(ctx, ctx->sp++);
+    gb_tick(ctx, 4);
+    target |= (uint16_t)gb_read8(ctx, ctx->sp++) << 8;
+    ctx->pc = target;
+    ctx->ime_pending = ime_pending;
+    gb_tick(ctx, 8);
+}
 void gbrt_jump_hl(GBContext* ctx) { ctx->pc = ctx->hl; }
 void gb_rst(GBContext* ctx, uint8_t vec) { gb_push16(ctx, ctx->pc); ctx->pc = vec; }
 
@@ -3941,7 +3958,14 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
         }
     }
     
-    if ((system_cycles > 0 && (ctx->cycles & 0xFF) < system_cycles) ||
+    /* Catch the PPU up as soon as it reaches a mode boundary (where STAT and
+     * VBlank interrupts are raised), so compiled code sees an interrupt at the
+     * end of the instruction it became pending in -- not only at the periodic
+     * 256-cycle sync or the next return to the dispatcher. */
+    bool ppu_event_due = ctx->ppu &&
+        (ctx->cycles - ctx->last_sync_cycles) >=
+            ppu_cycles_until_event((const GBPPU*)ctx->ppu, ctx->config.model == GB_MODEL_CGB);
+    if ((system_cycles > 0 && (ctx->cycles & 0xFF) < system_cycles) || ppu_event_due ||
         (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) {
         gb_sync(ctx);
         if (ctx->frame_done || (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F))) ctx->stopped = 1;
@@ -4103,7 +4127,7 @@ uint32_t gb_step(GBContext* ctx) {
     }
     
     /* Handle HALT bug by falling back to interpreter for the next instruction */
-    if (ctx->halt_bug) {
+    if (ctx->halt_bug && !ctx->config.compiled_halt_bug) {
         gb_interpret(ctx, ctx->pc);
         return 0; /* Cycle counting handled by interpreter */
     }
@@ -4162,7 +4186,7 @@ uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
     ctx->single_step_mode = 1;
     ctx->used_dispatch_fallback = 0;
 
-    if (mode == GB_EXECUTION_INTERPRETER || ctx->halt_bug) {
+    if (mode == GB_EXECUTION_INTERPRETER || (ctx->halt_bug && !ctx->config.compiled_halt_bug)) {
         gb_interpret(ctx, ctx->pc);
     } else {
         gbrt_dispatch(ctx, ctx->pc);

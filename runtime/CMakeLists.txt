@@ -13,6 +13,7 @@ add_library(gbrt STATIC
     src/psg_shadow.c
     src/color_lut.c
     src/debug_server.c
+    src/rewind.c
     # Default game hooks — one strong symbol per TU so a partial extras.c
     # overrides cleanly (no multiple-definition, no weak-symbol reliance).
     src/game_defaults/game_default_on_init.c
@@ -26,6 +27,8 @@ add_library(gbrt STATIC
     src/game_defaults/game_default_get_name.c
     src/game_defaults/game_default_get_platform.c
     src/game_defaults/game_default_handle_arg.c
+    src/game_defaults/game_default_hardware_mode.c
+    src/game_defaults/game_default_preemptive_frames.c
     src/game_defaults/game_default_get_expected_crc32.c
     src/game_defaults/game_default_get_valid_crcs.c
     src/game_defaults/game_default_extended_view.c

@@ -60,6 +60,14 @@ char *gb_host_asset_path(const char *leaf, char *out, size_t out_size);
  * ordinary callers get a value cached on first use. */
 void gb_host_paths_reset(void);
 
+/* Start this program again (the .AppImage for an AppImage) with the same
+ * arguments and this process's environment, with `set_name`=`set_value` added
+ * and `unset_name` removed (either may be NULL). The new process runs on its
+ * own; call it as this one exits. Returns 1 if it started. Windows and Linux
+ * only: gb_host_can_relaunch() says whether it can work here. */
+int gb_host_relaunch(const char *set_name, const char *set_value, const char *unset_name);
+int gb_host_can_relaunch(void);
+
 #ifdef __cplusplus
 }
 #endif

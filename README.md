@@ -58,10 +58,13 @@ For isolated test instances, `GBRECOMP_DEBUG_PORT` chooses a TCP debug port
 - **Cart-border cache** — SGB border decoded once and cached to disk so non-SGB modes can still display it.
 - **Pocket / Light palette presets**, **Show FPS overlay**, **audio settings**, **input remapping** with controller support and per-profile labels (Xbox / PlayStation / Nintendo / Generic).
 - **Savestates** with multi-slot UI.
+- **Cheats** — libretro-database `.cht` files (GameShark RAM writes each frame, Game Genie ROM patches) in `cheats/` beside the game's other state: a build of one game reads every `.cht` there and in `cheats/<save id>/`; a build that loads games reads `cheats/<game id>/` and the `.cht` files named after that id. **Reload Cheats** reads them again without a restart (`runtime/src/cheats.c`).
 
 ### Launcher infrastructure
 - **Multi-ROM launcher** with a graphical picker, missing-ROM tagging, and `--game <id>` headless launch.
-- **Single-cart auto-start** — when a launcher has exactly one game registered, the picker is skipped and the cart boots straight up. Esc menu's "Return to Launcher" is replaced with "Restart Game" so you can reboot the cart from inside the menu.
+- **Single-cart auto-start** — when a launcher has exactly one game registered, the picker is skipped and the cart boots straight up.
+- **Restart Game, Return to Launcher, Quit** — in the Esc menu's System section (press twice) and the settings window's footer (with a confirmation). Restart Game puts the machine back as it was before its first frame, in place, keeping the cart's battery RAM (`gb_before_first_frame` keeps that state). Return to Launcher hands exit code 64 to a launcher that started the game; in a build whose recomp-ui launcher runs before the game, the program starts again with `GBRECOMP_LAUNCHER=1` once this one has saved and closed.
+- **Menus hold the game** — while the Esc menu or the settings window is open the game waits, silent (Pause in Menu, `ui.pause_in_menu`), and gets no keys or buttons; shortcuts do not fire, including while typing into a filter field. Game Dimming and Menu Opacity (`ui.menu_dim`, `ui.menu_opacity`) set how much the menus cover the game.
 - **`--prefix-symbols`** flag on `gbrecomp` so multiple carts can be linked into one binary without symbol collisions.
 - **Native asset-loader integration** — ROM data is bundled into the binary as compressed sections that get extracted into `assets/<id>/` on first boot.
 - **`roms/` subfolder convention** — user-supplied ROMs live at `roms/<id>.<ext>` next to the binary.

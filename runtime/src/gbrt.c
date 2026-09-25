@@ -1,4 +1,5 @@
 #include "gbrt.h"
+#include "game_extras.h"
 #include "ppu.h"
 #include "gb_widescreen.h"
 #include "gb_custom_view.h"
@@ -237,6 +238,7 @@ typedef struct {
 
 #define GBSAVESTATE_MAGIC 0x56534247u /* 'GBSV' */
 #define GBSAVESTATE_VERSION 1u
+#define GBSAVESTATE_WRAM_EXT_MAGIC 0x58575247u /* 'GRWX', optional trailer */
 
 static int gbrt_compare_hotspots_desc(const GBInterpreterHotspot* lhs,
                                       const GBInterpreterHotspot* rhs) {
@@ -944,6 +946,31 @@ uint8_t gbrt_imm_override8(GBContext* ctx, uint8_t bank, uint16_t pc, uint8_t or
     return gbrt_imm_override_hook ? gbrt_imm_override_hook(ctx, bank, pc, orig) : orig;
 }
 
+GBFrameHoldHook gb_frame_hold_hook = NULL;
+uint32_t gb_frame_hold_limit = 2u * 70224u;
+
+bool gb_frame_hold_at_vblank(GBContext* ctx) {
+    if (ctx->frame_hold.active) return true;
+    if (ctx->frame_hold.released) {
+        ctx->frame_hold.released = 0;
+        return false;
+    }
+    if (!gb_frame_hold_hook) return false;
+    if (!gb_frame_hold_hook(ctx)) {
+        ctx->frame_hold.suspended = 0;   /* a frame finished on its own */
+        return false;
+    }
+    /* A frame that outran the limit was not a lag frame but a longer job such
+     * as a screen load; let those run at their own pace. */
+    if (ctx->frame_hold.suspended) return false;
+    ctx->frame_hold.active = 1;
+    ctx->frame_hold.cycles = 0;
+    ctx->frame_hold.holds++;
+    return true;
+}
+
+GBStepHook gb_step_hook = NULL;
+
 GBContext* gb_context_create(const GBConfig* config) {
     gbrt_load_ppu_trace_config();
 
@@ -1018,7 +1045,8 @@ void gb_context_destroy(GBContext* ctx) {
     free(ctx->oam);
     free(ctx->hram);
     free(ctx->io);
-    
+    free(ctx->wram_ext);
+
     if (ctx->eram) free(ctx->eram);
     
     if (ctx->ppu) free(ctx->ppu);
@@ -1028,6 +1056,63 @@ void gb_context_destroy(GBContext* ctx) {
     if (ctx->rom) free(ctx->rom);
     if (ctx->boot_rom) free(ctx->boot_rom);
     free(ctx);
+}
+
+bool gb_context_set_wram_extension(GBContext* ctx, uint8_t bank, uint16_t mapped, uint32_t size) {
+    if (!ctx || bank < 1 || bank > 7 || mapped > 0x1E00 || mapped > size) return false;
+    uint8_t* data = (uint8_t*)calloc(1, size ? size : 1);
+    if (!data) return false;
+    free(ctx->wram_ext);
+    ctx->wram_ext = data;
+    ctx->wram_ext_size = size;
+    ctx->wram_ext_mapped = mapped;
+    ctx->wram_ext_bank = bank;
+    ctx->wram_ext_cart_mapped = 0;
+    ctx->wram_ext_cart_offset = 0;
+    ctx->wram_ext_bank2 = 0;
+    ctx->wram_ext_mapped2 = 0;
+    ctx->wram_ext_offset2 = 0;
+    return true;
+}
+
+bool gb_context_map_wram_extension(GBContext* ctx, uint16_t mapped, uint16_t cart_mapped,
+                                   uint32_t cart_offset) {
+    if (!ctx || !ctx->wram_ext || mapped > 0x1E00 || mapped > ctx->wram_ext_size ||
+        cart_mapped > 0x2000 || cart_offset > ctx->wram_ext_size ||
+        cart_mapped > ctx->wram_ext_size - cart_offset)
+        return false;
+    ctx->wram_ext_mapped = mapped;
+    ctx->wram_ext_cart_mapped = cart_mapped;
+    ctx->wram_ext_cart_offset = cart_offset;
+    return true;
+}
+
+bool gb_context_map_wram_extension_bank(GBContext* ctx, uint8_t bank, uint16_t mapped,
+                                        uint32_t offset) {
+    if (!ctx || !ctx->wram_ext || bank < 1 || bank > 7 || bank == ctx->wram_ext_bank ||
+        mapped > 0x1E00 || offset > ctx->wram_ext_size || mapped > ctx->wram_ext_size - offset)
+        return false;
+    ctx->wram_ext_bank2 = mapped ? bank : 0;
+    ctx->wram_ext_mapped2 = mapped;
+    ctx->wram_ext_offset2 = mapped ? offset : 0;
+    return true;
+}
+
+/* The extension byte behind 0xE000+ in the current bank, or NULL for the echo. */
+static inline uint8_t* gb_wram_ext_at(GBContext* ctx, uint16_t addr) {
+    uint16_t offset = (uint16_t)(addr - 0xE000);
+    if (!ctx->wram_ext) return NULL;
+    if (ctx->wram_bank == ctx->wram_ext_bank)
+        return offset < ctx->wram_ext_mapped ? ctx->wram_ext + offset : NULL;
+    return ctx->wram_bank == ctx->wram_ext_bank2 && offset < ctx->wram_ext_mapped2
+               ? ctx->wram_ext + ctx->wram_ext_offset2 + offset : NULL;
+}
+
+/* The extension byte behind 0xA000+ in the current bank, or NULL for cartridge RAM. */
+static inline uint8_t* gb_wram_ext_cart_at(GBContext* ctx, uint16_t addr) {
+    uint16_t offset = (uint16_t)(addr - 0xA000);
+    return ctx->wram_ext && ctx->wram_bank == ctx->wram_ext_bank && offset < ctx->wram_ext_cart_mapped
+               ? ctx->wram_ext + ctx->wram_ext_cart_offset + offset : NULL;
 }
 
 void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
@@ -1065,6 +1150,7 @@ void gb_context_reset(GBContext* ctx, bool skip_bootrom) {
     ctx->single_step_mode = 0;
     ctx->cgb_double_speed = 0;
     memset(&ctx->serial_transfer, 0, sizeof(ctx->serial_transfer));
+    memset(&ctx->frame_hold, 0, sizeof(ctx->frame_hold));
     ctx->last_joypad = 0xFF;
     ctx->used_dispatch_fallback = 0;
     ctx->dispatch_fallback_bank = 0;
@@ -1310,6 +1396,15 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size) {
     bool cart_supports_cgb = ctx->config.cartridge_supports_cgb;
     bool cart_requires_cgb = ctx->config.cartridge_requires_cgb;
 
+    /* Nothing chosen yet: let the game ask for a mode (e.g. GBA for carts
+     * with GBA-only extras). An explicit choice or the override below wins. */
+    if (ctx->hardware_mode_pref == GB_HARDWARE_MODE_AUTO) {
+        int game_pref = game_default_hardware_mode();
+        if (game_pref > GB_HARDWARE_MODE_AUTO && game_pref <= GB_HARDWARE_MODE_GBA) {
+            ctx->hardware_mode_pref = (GBHardwareModePref)game_pref;
+        }
+    }
+
     /* Config override: GBRT_HARDWARE_MODE forces the hardware/SGB mode for this
      * cart regardless of the platform's per-game pref. Works headless (benchmark)
      * too, since it's read here in the runtime. Values: auto|dmg|sgb|cgb|gba.
@@ -1535,6 +1630,13 @@ bool gb_context_save_state_file(GBContext* ctx, const char* path) {
     if (success) success = gbrt_write_exact(file, ctx->io, IO_SIZE + 1u);
     if (success && header.ppu_size > 0) success = gbrt_write_exact(file, ctx->ppu, sizeof(GBPPU));
     if (success && apu_state_size > 0) success = gbrt_write_exact(file, apu_state, apu_state_size);
+    /* Optional trailer, after the fixed parts so version 1 files stay
+     * readable both ways: the WRAM extension (gb_context_set_wram_extension). */
+    if (success && ctx->wram_ext_size > 0) {
+        const uint32_t ext_header[2] = {GBSAVESTATE_WRAM_EXT_MAGIC, ctx->wram_ext_size};
+        success = gbrt_write_exact(file, ext_header, sizeof(ext_header)) &&
+                  gbrt_write_exact(file, ctx->wram_ext, ctx->wram_ext_size);
+    }
 
     if (!success) {
         fprintf(stderr, "[GBRT] Failed to write savestate: %s\n", path);
@@ -1658,11 +1760,25 @@ bool gb_context_load_state_file(GBContext* ctx, const char* path) {
         apu_data = malloc(header.apu_size);
         success = apu_data != NULL && gbrt_read_exact(file, apu_data, header.apu_size);
     }
+    /* The optional WRAM extension trailer. A file without one, or from a
+     * build with another size, loads what it has and zeroes the rest. */
+    uint8_t* ext_data = NULL;
+    if (success && ctx->wram_ext_size > 0) {
+        uint32_t ext_header[2];
+        ext_data = (uint8_t*)calloc(1, ctx->wram_ext_size);
+        success = ext_data != NULL;
+        if (success && gbrt_read_exact(file, ext_header, sizeof(ext_header)) &&
+            ext_header[0] == GBSAVESTATE_WRAM_EXT_MAGIC) {
+            const uint32_t n = ext_header[1] < ctx->wram_ext_size ? ext_header[1] : ctx->wram_ext_size;
+            success = gbrt_read_exact(file, ext_data, n);
+        }
+    }
 
     fclose(file);
 
     if (!success) {
         fprintf(stderr, "[GBRT] Failed to load savestate data: %s\n", path);
+        free(ext_data);
         free(eram_data);
         free(wram_data);
         free(vram_data);
@@ -1683,6 +1799,7 @@ bool gb_context_load_state_file(GBContext* ctx, const char* path) {
     if (header.ppu_size > 0 && ctx->ppu) memcpy(ctx->ppu, ppu_data, header.ppu_size);
     if (header.apu_size > 0 && ctx->apu && !gb_audio_load_state(ctx->apu, apu_data, header.apu_size)) {
         fprintf(stderr, "[GBRT] Failed to restore APU state from savestate: %s\n", path);
+        free(ext_data);
         free(eram_data);
         free(wram_data);
         free(vram_data);
@@ -1693,13 +1810,17 @@ bool gb_context_load_state_file(GBContext* ctx, const char* path) {
         free(apu_data);
         return false;
     }
+    if (ext_data) memcpy(ctx->wram_ext, ext_data, ctx->wram_ext_size);
     gbrt_restore_core_state(ctx, &core_state);
     /* Widescreen margins are host presentation state: the whole-struct PPU
      * restore above overwrote them with whatever was saved, so re-apply the
      * live geometry (and reset the sidecar; it repopulates at the next DMA). */
     gb_ws_reapply(ctx);
     if (gb_custom_reset) gb_custom_reset(ctx);
+    ctx->frame_hold.active = ctx->frame_hold.released = ctx->frame_hold.suspended = 0;
+    if (gb_game_state.file_loaded) gb_game_state.file_loaded(ctx);
 
+    free(ext_data);
     free(eram_data);
     free(wram_data);
     free(vram_data);
@@ -1711,6 +1832,131 @@ bool gb_context_load_state_file(GBContext* ctx, const char* path) {
 
     printf("[GBRT] Loaded state from %s\n", path);
     return true;
+}
+
+GBGameState gb_game_state;
+
+/* Byte ranges of gb_state_*, in order, each marked if it is the PPU's
+ * finished picture. The context and PPU are copied whole and their host
+ * fields put back on load. */
+#define GBRT_PPU_AT(ctx, field) ((ctx)->ppu ? (uint8_t*)(ctx)->ppu + offsetof(GBPPU, field) : NULL)
+#define GBRT_STATE_PARTS(X) \
+    X(ctx, sizeof(GBContext), 0) \
+    X(ctx->eram, ctx->eram_size, 0) \
+    X(ctx->wram, WRAM_BANK_SIZE * 8u, 0) \
+    X(ctx->vram, VRAM_SIZE * 2u, 0) \
+    X(ctx->oam, OAM_SIZE, 0) \
+    X(ctx->hram, HRAM_SIZE, 0) \
+    X(ctx->io, IO_SIZE + 1u, 0) \
+    X(ctx->wram_ext, ctx->wram_ext_size, 0) \
+    X(ctx->ppu, ctx->ppu ? offsetof(GBPPU, framebuffer) : 0, 0) \
+    X(GBRT_PPU_AT(ctx, framebuffer), \
+      ctx->ppu ? offsetof(GBPPU, bg_palette_ram) - offsetof(GBPPU, framebuffer) : 0, 1) \
+    X(GBRT_PPU_AT(ctx, bg_palette_ram), \
+      ctx->ppu ? sizeof(GBPPU) - offsetof(GBPPU, bg_palette_ram) : 0, 0) \
+    X(ctx->apu, ctx->apu ? gb_audio_state_size() : 0, 0) \
+    X(g_gbws_oam_x16, sizeof(g_gbws_oam_x16), 0) \
+    X(g_gbws_shadow_x16, sizeof(g_gbws_shadow_x16), 0) \
+    X(&g_gbws_obj_true_raw16, sizeof(g_gbws_obj_true_raw16), 0) \
+    X(&g_gbws_obj_rel8, sizeof(g_gbws_obj_rel8), 0) \
+    X(&g_gbws_obj_ctx_valid, sizeof(g_gbws_obj_ctx_valid), 0) \
+    X(&g_gbws_shadow_oam_page, sizeof(g_gbws_shadow_oam_page), 0)
+
+size_t gb_state_size(const GBContext* ctx) {
+    size_t size = 0;
+#define GBRT_STATE_SIZE(ptr, n, is_picture) size += (n);
+    GBRT_STATE_PARTS(GBRT_STATE_SIZE)
+#undef GBRT_STATE_SIZE
+    return size + gb_game_state.size;
+}
+
+static void gbrt_state_save(const GBContext* ctx, void* out, bool picture) {
+    uint8_t* p = (uint8_t*)out;
+#define GBRT_STATE_SAVE(ptr, n, is_picture) \
+    if ((n) && (picture || !(is_picture))) memcpy(p, (ptr), (n)); \
+    p += (n);
+    GBRT_STATE_PARTS(GBRT_STATE_SAVE)
+#undef GBRT_STATE_SAVE
+    if (gb_game_state.size) gb_game_state.save(ctx, p);
+}
+
+void gb_state_save(const GBContext* ctx, void* out) {
+    gbrt_state_save(ctx, out, true);
+}
+
+void gb_state_save_no_picture(const GBContext* ctx, void* out) {
+    gbrt_state_save(ctx, out, false);
+}
+
+static void gbrt_state_load(GBContext* ctx, const void* in, bool picture) {
+    const GBContext host = *ctx;
+    GBPPU* ppu = (GBPPU*)ctx->ppu;
+    const int extra_left = ppu ? ppu->view_extra_left : 0;
+    const int extra_right = ppu ? ppu->view_extra_right : 0;
+    const int stride = ppu ? ppu->view_stride : 0;
+    const uint8_t* p = (const uint8_t*)in;
+    /* The context comes first, so later parts are sized by the host's
+     * (unchanged) eram_size and component pointers restored just below. */
+    memcpy(ctx, p, sizeof(GBContext));
+    p += sizeof(GBContext);
+    ctx->config = host.config;
+    memcpy(ctx->save_id, host.save_id, sizeof(ctx->save_id));
+    ctx->hardware_mode_pref = host.hardware_mode_pref;
+    ctx->cgb_compat_palette_override = host.cgb_compat_palette_override;
+    ctx->single_step_mode = host.single_step_mode;
+    ctx->rom = host.rom;
+    ctx->rom_size = host.rom_size;
+    ctx->eram = host.eram;
+    ctx->eram_size = host.eram_size;
+    ctx->wram = host.wram;
+    ctx->vram = host.vram;
+    ctx->oam = host.oam;
+    ctx->hram = host.hram;
+    ctx->io = host.io;
+    ctx->wram_ext = host.wram_ext;
+    ctx->wram_ext_size = host.wram_ext_size;
+    ctx->wram_ext_mapped = host.wram_ext_mapped;
+    ctx->wram_ext_bank = host.wram_ext_bank;
+    ctx->wram_ext_cart_mapped = host.wram_ext_cart_mapped;
+    ctx->wram_ext_cart_offset = host.wram_ext_cart_offset;
+    ctx->wram_ext_bank2 = host.wram_ext_bank2;
+    ctx->wram_ext_mapped2 = host.wram_ext_mapped2;
+    ctx->wram_ext_offset2 = host.wram_ext_offset2;
+    ctx->boot_rom = host.boot_rom;
+    ctx->boot_rom_size = host.boot_rom_size;
+    ctx->ppu = host.ppu;
+    ctx->apu = host.apu;
+    ctx->timer = host.timer;
+    ctx->serial = host.serial;
+    ctx->joypad = host.joypad;
+    ctx->sgb = host.sgb;
+    ctx->ir = host.ir;
+    ctx->platform = host.platform;
+    ctx->callbacks = host.callbacks;
+    ctx->trace_file = host.trace_file;
+    ctx->trace_entries_enabled = host.trace_entries_enabled;
+    ctx->ppu_trace_file = host.ppu_trace_file;
+#define GBRT_STATE_LOAD(ptr, n, is_picture) \
+    if ((void*)(ptr) != (void*)ctx) { \
+        if ((n) && (picture || !(is_picture))) memcpy((void*)(ptr), p, (n)); \
+        p += (n); \
+    }
+    GBRT_STATE_PARTS(GBRT_STATE_LOAD)
+#undef GBRT_STATE_LOAD
+    if (ppu) {
+        ppu->view_extra_left = extra_left;
+        ppu->view_extra_right = extra_right;
+        ppu->view_stride = stride;
+    }
+    if (gb_game_state.size) gb_game_state.load(ctx, p);
+}
+
+void gb_state_load(GBContext* ctx, const void* in) {
+    gbrt_state_load(ctx, in, true);
+}
+
+void gb_state_load_no_picture(GBContext* ctx, const void* in) {
+    gbrt_state_load(ctx, in, false);
 }
 
 static uint8_t gb_direct_read_dma_source(GBContext* ctx, uint16_t addr) {
@@ -1895,6 +2141,8 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
     
     /* External RAM / RTC (0xA000-0xBFFF) */
     if (addr < 0xC000) {
+        const uint8_t* ext = gb_wram_ext_cart_at(ctx, addr);
+        if (ext) return gb_custom_read_override ? gb_custom_read_override(ctx, addr, *ext) : *ext;
         /* Pocket Camera register mode (RAM bank >= 0x10) — accessible without RAM enable */
         if (ctx->mbc_type == 0xFC && ctx->ram_bank >= 0x10) {
             uint16_t reg_addr = addr - 0xA000;
@@ -1951,7 +2199,11 @@ uint8_t gb_read8(GBContext* ctx, uint16_t addr) {
         uint8_t value = ctx->wram[(ctx->wram_bank * WRAM_BANK_SIZE) + (addr - 0xD000)];
         return gb_custom_read_override ? gb_custom_read_override(ctx, addr, value) : value;
     }
-    if (addr < 0xFE00) return gb_read8(ctx, addr - 0x2000);
+    if (addr < 0xFE00) {
+        const uint8_t* ext = gb_wram_ext_at(ctx, addr);
+        if (ext) return gb_custom_read_override ? gb_custom_read_override(ctx, addr, *ext) : *ext;
+        return gb_read8(ctx, addr - 0x2000);
+    }
     if (addr < 0xFEA0) {
         gb_sync(ctx);
         uint8_t stat = ctx->io[0x41] & 3;
@@ -2246,6 +2498,11 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         return;
     }
     if (addr < 0xC000) {
+        uint8_t* ext = gb_wram_ext_cart_at(ctx, addr);
+        if (ext) {
+            *ext = value;
+            return;
+        }
         /* Pocket Camera register writes (RAM bank >= 0x10) — accessible without RAM enable */
         if (ctx->mbc_type == 0xFC && ctx->ram_bank >= 0x10) {
             uint16_t reg_addr = addr - 0xA000;
@@ -2322,7 +2579,12 @@ void gb_write8(GBContext* ctx, uint16_t addr, uint8_t value) {
         if (g_gbws_active) gb_ws_wram_write_tap(ctx, addr, value);
         return;
     }
-    if (addr < 0xFE00) { gb_write8(ctx, addr - 0x2000, value); return; }
+    if (addr < 0xFE00) {
+        uint8_t* ext = gb_wram_ext_at(ctx, addr);
+        if (ext) *ext = value;
+        else gb_write8(ctx, addr - 0x2000, value);
+        return;
+    }
     if (addr < 0xFEA0) {
         gb_sync(ctx);
         /* OAM is not CPU-accessible during modes 2 and 3. */
@@ -3860,6 +4122,22 @@ static bool gb_stop_should_resume(GBContext* ctx) {
     return (gb_read8(ctx, 0xFF00) & 0x0F) != 0x0F;
 }
 
+/* During a frame hold the global cycle counter stands still, so the PPU,
+ * timers, APU and serial port wait; only the CPU and its OAM DMA advance. */
+static void gb_frame_hold_tick(GBContext* ctx, uint32_t cpu_cycles, uint32_t system_cycles) {
+    gb_dma_tick(ctx, cpu_cycles);
+    ctx->frame_hold.cycles += system_cycles;
+    bool limit = ctx->frame_hold.cycles >= gb_frame_hold_limit;
+    if (ctx->halted || limit || !gb_frame_hold_hook || !gb_frame_hold_hook(ctx)) {
+        ctx->frame_hold.active = 0;
+        ctx->frame_hold.released = 1;
+        ctx->frame_hold.limit_hits += limit;
+        ctx->frame_hold.suspended = limit;
+    }
+    if (ctx->ime && (ctx->io[0x0F] & ctx->io[0x80] & 0x1F)) ctx->stopped = 1;
+    if (ctx->ime_pending) { if (--ctx->ime_pending == 0) ctx->ime = 1; }
+}
+
 void gb_tick(GBContext* ctx, uint32_t cycles) {
     static uint32_t last_log = 0;
     uint32_t cpu_cycles = cycles;
@@ -3874,6 +4152,11 @@ void gb_tick(GBContext* ctx, uint32_t cycles) {
             }
             exit(0);
         }
+    }
+
+    if (__builtin_expect(ctx->frame_hold.active, 0)) {
+        gb_frame_hold_tick(ctx, cpu_cycles, system_cycles);
+        return;
     }
 
     if (gbrt_trace_enabled && ctx->cycles - last_log >= 10000) {
@@ -4132,6 +4415,7 @@ uint32_t gb_step(GBContext* ctx) {
         return 0; /* Cycle counting handled by interpreter */
     }
 
+    if (gb_step_hook && !ctx->halt_bug) gb_step_hook(ctx);
     uint32_t start = ctx->cycles;
     gbrt_dispatch(ctx, ctx->pc);
     return ctx->cycles - start;
@@ -4186,6 +4470,7 @@ uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
     ctx->single_step_mode = 1;
     ctx->used_dispatch_fallback = 0;
 
+    if (gb_step_hook && !ctx->halt_bug) gb_step_hook(ctx);
     if (mode == GB_EXECUTION_INTERPRETER || (ctx->halt_bug && !ctx->config.compiled_halt_bug)) {
         gb_interpret(ctx, ctx->pc);
     } else {
@@ -4196,9 +4481,13 @@ uint32_t gb_debug_step(GBContext* ctx, GBExecutionMode mode) {
     return ctx->cycles - start;
 }
 
+void (*gb_before_first_frame)(GBContext* ctx) = NULL;
+
 void gb_reset_frame(GBContext* ctx) {
     if (ctx->frame_done || ctx->frame_cycles > 0) {
         ctx->completed_frames++;
+    } else if (ctx->completed_frames == 0 && gb_before_first_frame) {
+        gb_before_first_frame(ctx);
     }
     ctx->frame_done = 0;
     ctx->frame_cycles = 0;

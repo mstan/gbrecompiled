@@ -224,9 +224,111 @@ void gb_platform_get_timing_info(GBPlatformTimingInfo* out);
 uint8_t gb_platform_get_joypad(void);
 
 /**
- * @brief Wait for vsync / frame timing
+ * @brief Wait for vsync / frame timing. Also runs preemptive frames (below)
+ * once a whole frame has completed, just before the next one runs.
  */
 void gb_platform_vsync(uint32_t frame_cycles);
+
+/* Preemptive frames, RetroArch's latency reduction: an input change is
+ * replayed into the last N frames, so the game sees it N frames sooner. The
+ * "Preemptive Frames" setting (emulation.preemptive_frames) picks N; without
+ * one, game_default_preemptive_frames() does. */
+#define GB_PREEMPT_MAX_FRAMES 4
+/* Frames re-run for input changes so far (for tests). */
+uint64_t gb_platform_preempt_replays(void);
+
+/* Rewind, RetroArch's: the state before each frame goes into a
+ * delta-compressed buffer (rewind.h); holding the Rewind key runs the frames
+ * again newest first. Settings: emulation.rewind, rewind_granularity (frames
+ * between states) and rewind_buffer_mb. */
+typedef struct GBPlatformRewindInfo {
+    bool enabled;
+    unsigned states;      /* states in the buffer */
+    size_t used;          /* bytes of patches */
+    size_t capacity;      /* 0 until the buffer exists */
+    size_t state_size;    /* bytes per state, whole */
+} GBPlatformRewindInfo;
+/* Holds the Rewind key for the next `frames` frames, as if pressed (the
+ * debug server's `rewind`). 0 lets go. */
+void gb_platform_rewind_hold(int frames);
+void gb_platform_get_rewind_info(GBPlatformRewindInfo* out);
+
+/* Speed shortcuts: Fast Forward (Hold) and Fast Forward (a toggle, formerly
+ * Max Speed, hence max_speed / speed.max_percent) run the game at
+ * speed.fast_forward_percent / speed.max_percent (0 = Unlimited, no frame
+ * limiter). Above 100% V-Sync is off, and the sound at speeds other than 100%
+ * follows audio.fast_forward. */
+typedef struct GBPlatformSpeedInfo {
+    int effective_percent;   /* the speed frames are paced to, 0 = Unlimited */
+    int fast_forward_percent;/* the shortcuts' speeds, 0 = Unlimited */
+    int max_percent;
+    double guest_fps;        /* game frames per second, measured */
+    bool fast_forward;       /* Fast Forward (Hold) held, by key or debug server */
+    bool max_speed;          /* Fast Forward (the toggle) on */
+    bool vsync;              /* the V-Sync setting */
+    int swap_interval;       /* what presents use now */
+    int audio_mode;          /* 0 mute, 1 normal pitch, 2 sped up */
+    double audio_step;       /* game samples per sample played, measured */
+    double present_ms;       /* the last present, including any V-Sync wait */
+    bool frameskip;          /* the Fast-Forward Frame Skip setting */
+    uint64_t frames_skipped; /* frames it has not drawn since launch */
+} GBPlatformSpeedInfo;
+/* Holds Fast Forward (Hold) and sets Fast Forward (the toggle), V-Sync, Speed % and the
+ * shortcuts' speeds (110-1000, 0 = Unlimited; not saved), as the keys and the
+ * menu do (the debug server's `speed`); -1 leaves one as it is. */
+void gb_platform_set_speed(int fast_forward, int max_speed, int vsync, int percent,
+                           int fast_forward_percent, int max_percent);
+void gb_platform_get_speed_info(GBPlatformSpeedInfo* out);
+
+/* The window and the frame presented in it (the debug server's `window`). */
+typedef struct GBPlatformWindowInfo {
+    int window_width, window_height;   /* the window, or the windowed size without one */
+    int view_width, view_height;       /* the view of the last presented frame */
+    /* The last frame showed a custom view's native 160 x 144 picture on its
+     * own (gb_custom_native_scaling), in the game rect below. */
+    int native_presented;
+    /* The picture it presented: the view, the part of it gb_custom_fit kept,
+     * or the native picture, and its rect in the window. */
+    int picture_width, picture_height;
+    int game_x, game_y, game_width, game_height;
+    int scaling_mode;                  /* 0 Pixel Perfect, 1 Aspect Fit, 2 Aspect Fill, 3 Stretch */
+    int fullscreen;                    /* 0 off, 1 borderless, 2 exclusive */
+} GBPlatformWindowInfo;
+/* Resizes a windowed (or absent) window and sets the scaling mode, as the
+ * menu does but without saving; <= 0 / -1 leaves one as it is. A custom view
+ * resolves against the new size on the next present. */
+void gb_platform_set_window(int width, int height, int scaling_mode);
+void gb_platform_get_window_info(GBPlatformWindowInfo* out);
+
+/* The menus (the debug server's `menu`): the runtime menu Escape opens and
+ * the settings window, and whether the game waits behind them. */
+typedef struct GBPlatformMenuInfo {
+    bool main_open;
+    bool settings_open;
+    bool game_held;          /* a menu is open and Pause in Menu is on */
+    bool pause_in_menu;
+    int dim_percent;         /* Game Dimming */
+    int opacity_percent;     /* Menu Opacity */
+} GBPlatformMenuInfo;
+/* Opens "main" or "settings", or closes both with "none" (NULL leaves them),
+ * and sets Pause in Menu (0/1), Game Dimming and Menu Opacity (0-100) without
+ * saving (-1 leaves one as it is). */
+void gb_platform_set_menu(const char* open, int pause_in_menu, int dim_percent, int opacity_percent);
+void gb_platform_get_menu_info(GBPlatformMenuInfo* out);
+
+/* Leaves the game as the menus' Quit ("quit") or Return to Launcher
+ * ("launcher") do. False for anything else. */
+bool gb_platform_leave_game(const char* to);
+
+/* Writes the next presented window, menus and shaders included, to `path` as
+ * PNG (the debug server's `window_screenshot`); frames need not advance, as
+ * a menu keeps presenting. False without a window. */
+bool gb_platform_request_window_shot(const char* path);
+
+/* Restart Game: the machine goes back to how it was before its first frame,
+ * at the next frame boundary; the cart's battery RAM stays as it is now.
+ * False when there is no such state (no frame has started yet). */
+bool gb_platform_restart_game(void);
 
 /**
  * @brief Query whether slow-frame presentation smoothing is enabled

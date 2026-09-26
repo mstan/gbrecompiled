@@ -334,38 +334,55 @@ static void write_byte(uint16_t addr, uint8_t val)
  * intercepted by a game module's gb_custom_read_override, cannot trip a
  * watchpoint and cannot advance any emulated state -- and it can reach banks
  * the guest does not currently have mapped (VRAM bank 1's BG attribute map,
- * WRAM banks 2-7, any ROM/ERAM bank). Pass -1 for a bank to use the live one. */
-static uint8_t peek_byte(uint16_t addr, int rom_bank, int ram_bank,
-                         int wram_bank, int vram_bank)
+ * WRAM banks 2-7, any ROM/ERAM bank). Pass -1 for a bank to use the live one.
+ * NULL where nothing backs the address. */
+static uint8_t *bank_byte(uint16_t addr, int rom_bank, int ram_bank,
+                          int wram_bank, int vram_bank)
 {
     GBContext *c = s_ctx;
-    if (!c) return 0;
+    if (!c) return NULL;
     if (rom_bank  < 0) rom_bank  = (int)c->rom_bank;
     if (ram_bank  < 0) ram_bank  = (int)c->ram_bank;
     if (wram_bank < 0) wram_bank = (int)c->wram_bank;
     if (vram_bank < 0) vram_bank = (int)c->vram_bank;
     if (wram_bank == 0) wram_bank = 1;   /* SVBK 0 aliases bank 1 */
     if (addr < 0x4000u)
-        return c->rom && addr < c->rom_size ? c->rom[addr] : 0;
+        return c->rom && addr < c->rom_size ? &c->rom[addr] : NULL;
     if (addr < 0x8000u) {
         size_t o = (size_t)rom_bank * 0x4000u + (addr - 0x4000u);
-        return c->rom && o < c->rom_size ? c->rom[o] : 0;
+        return c->rom && o < c->rom_size ? &c->rom[o] : NULL;
     }
     if (addr < 0xA000u) {
         size_t o = (size_t)(vram_bank & 1) * VRAM_SIZE + (addr - 0x8000u);
-        return c->vram ? c->vram[o] : 0;
+        return c->vram ? &c->vram[o] : NULL;
     }
-    if (addr < 0xC000u) {
+    if (addr < 0xC000u) {   /* a WRAM extension in its bank, else cartridge RAM */
+        if (c->wram_ext && wram_bank == c->wram_ext_bank && addr - 0xA000u < c->wram_ext_cart_mapped)
+            return &c->wram_ext[c->wram_ext_cart_offset + (addr - 0xA000u)];
         size_t o = (size_t)ram_bank * 0x2000u + (addr - 0xA000u);
-        return c->eram && o < c->eram_size ? c->eram[o] : 0;
+        return c->eram && o < c->eram_size ? &c->eram[o] : NULL;
     }
-    if (addr < 0xD000u) return c->wram ? c->wram[addr - 0xC000u] : 0;
+    if (addr < 0xD000u) return c->wram ? &c->wram[addr - 0xC000u] : NULL;
     if (addr < 0xE000u)
-        return c->wram ? c->wram[(size_t)(wram_bank & 7) * 0x1000u + (addr - 0xD000u)] : 0;
-    if (addr >= 0xFE00u && addr < 0xFEA0u) return c->oam ? c->oam[addr - 0xFE00u] : 0;
-    if (addr >= 0xFF00u && addr < 0xFF80u) return c->io ? c->io[addr - 0xFF00u] : 0;
-    if (addr >= 0xFF80u && addr < 0xFFFFu) return c->hram ? c->hram[addr - 0xFF80u] : 0;
-    return 0;
+        return c->wram ? &c->wram[(size_t)(wram_bank & 7) * 0x1000u + (addr - 0xD000u)] : NULL;
+    if (addr < 0xFE00u) {   /* a WRAM extension in its bank, else the echo */
+        if (c->wram_ext && wram_bank == c->wram_ext_bank && addr - 0xE000u < c->wram_ext_mapped)
+            return &c->wram_ext[addr - 0xE000u];
+        if (c->wram_ext && wram_bank == c->wram_ext_bank2 && addr - 0xE000u < c->wram_ext_mapped2)
+            return &c->wram_ext[c->wram_ext_offset2 + (addr - 0xE000u)];
+        return bank_byte((uint16_t)(addr - 0x2000u), rom_bank, ram_bank, wram_bank, vram_bank);
+    }
+    if (addr >= 0xFE00u && addr < 0xFEA0u) return c->oam ? &c->oam[addr - 0xFE00u] : NULL;
+    if (addr >= 0xFF00u && addr < 0xFF80u) return c->io ? &c->io[addr - 0xFF00u] : NULL;
+    if (addr >= 0xFF80u && addr < 0xFFFFu) return c->hram ? &c->hram[addr - 0xFF80u] : NULL;
+    return NULL;
+}
+
+static uint8_t peek_byte(uint16_t addr, int rom_bank, int ram_bank,
+                         int wram_bank, int vram_bank)
+{
+    const uint8_t *p = bank_byte(addr, rom_bank, ram_bank, wram_bank, vram_bank);
+    return p ? *p : 0;
 }
 
 /* {"cmd":"peek","addr":"0xD000","len":256,"wram_bank":2} -- see peek_byte().
@@ -402,6 +419,35 @@ static void handle_peek(int id, const char *json)
                  id, (unsigned)((addr + offset) & 0xFFFF), offset, chunk, len, hex);
         offset += chunk;
     }
+}
+
+/* {"cmd":"poke","addr":"0xD024","hex":"00","wram_bank":4} -- peek's writing
+ * twin: straight into the backing arrays (RAM only, not ROM or I/O), so a
+ * test can edit memory the bus would refuse (during OAM DMA, a pause's usual
+ * spot) or that another bank holds, without side effects. */
+static void handle_poke(int id, const char *json)
+{
+    char addr_str[32], hex_str[1024];
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    if (!json_get_str(json, "addr", addr_str, sizeof(addr_str)) ||
+        !json_get_str(json, "hex", hex_str, sizeof(hex_str))) {
+        send_err(id, "missing addr or hex");
+        return;
+    }
+    uint16_t addr = (uint16_t)hex_to_u32(addr_str);
+    int ram_bank  = json_get_int(json, "ram_bank",  -1);
+    int wram_bank = json_get_int(json, "wram_bank", -1);
+    int vram_bank = json_get_int(json, "vram_bank", -1);
+    int written = 0;
+    for (int i = 0; hex_str[i] && hex_str[i + 1]; i += 2, ++written) {
+        uint16_t at = (uint16_t)(addr + written);
+        uint8_t *p = at >= 0x8000u && (at < 0xFF00u || at >= 0xFF80u)
+                         ? bank_byte(at, -1, ram_bank, wram_bank, vram_bank) : NULL;
+        if (!p) { send_err(id, "not RAM"); return; }
+        char byte_hex[3] = { hex_str[i], hex_str[i + 1], '\0' };
+        *p = (uint8_t)strtoul(byte_hex, NULL, 16);
+    }
+    send_ok(id);
 }
 
 /* ---- Command handlers ---- */
@@ -937,6 +983,119 @@ static void handle_load_state(int id, const char *json)
              id, esc, (unsigned long long)s_frame_count);
 }
 
+/* Hold the Rewind key for the next `frames` frames (default 0: just report).
+ * Each such frame runs from the state before the previous one shown, as with
+ * the key held; `step` then runs them. Replies with what the buffer holds. */
+static void handle_rewind(int id, const char *json)
+{
+    int frames = json_get_int(json, "frames", 0);
+    if (frames < 0) frames = 0;
+    gb_platform_rewind_hold(frames);
+    GBPlatformRewindInfo info;
+    gb_platform_get_rewind_info(&info);
+    send_fmt("{\"id\":%d,\"ok\":true,\"frames\":%d,\"enabled\":%s,\"states\":%u,"
+             "\"used\":%llu,\"capacity\":%llu,\"state_size\":%llu}",
+             id, frames, info.enabled ? "true" : "false", info.states,
+             (unsigned long long)info.used, (unsigned long long)info.capacity,
+             (unsigned long long)info.state_size);
+}
+
+/* Hold Fast Forward (Hold), set Fast Forward (the toggle, once Max Speed) and
+ * V-Sync ({fast_forward}, {max_speed}, {vsync}: 1 on, 0 off), Speed %
+ * ({percent}, 10-500) and the
+ * shortcuts' speeds ({fast_forward_percent}, {max_percent}: 110-1000, 0 =
+ * Unlimited); absent leaves one as it is. Then report the speed the game is
+ * paced to and runs at, and how its sound is resampled. */
+static void handle_speed(int id, const char *json)
+{
+    gb_platform_set_speed(json_get_int(json, "fast_forward", -1),
+                          json_get_int(json, "max_speed", -1),
+                          json_get_int(json, "vsync", -1),
+                          json_get_int(json, "percent", -1),
+                          json_get_int(json, "fast_forward_percent", -1),
+                          json_get_int(json, "max_percent", -1));
+    GBPlatformSpeedInfo info;
+    gb_platform_get_speed_info(&info);
+    send_fmt("{\"id\":%d,\"ok\":true,\"effective_percent\":%d,\"fast_forward_percent\":%d,"
+             "\"max_percent\":%d,\"guest_fps\":%.1f,\"fast_forward\":%s,"
+             "\"max_speed\":%s,\"vsync\":%s,\"swap_interval\":%d,\"audio_mode\":%d,"
+             "\"audio_step\":%.4f,\"present_ms\":%.3f,\"frameskip\":%s,\"frames_skipped\":%llu}",
+             id, info.effective_percent, info.fast_forward_percent, info.max_percent,
+             info.guest_fps, info.fast_forward ? "true" : "false",
+             info.max_speed ? "true" : "false", info.vsync ? "true" : "false",
+             info.swap_interval, info.audio_mode, info.audio_step, info.present_ms,
+             info.frameskip ? "true" : "false", (unsigned long long)info.frames_skipped);
+}
+
+/* Resize a windowed window ({width}, {height}) and set the scaling mode
+ * ({scaling_mode} 0-3); absent leaves one as it is. Then report the window
+ * and the last presented frame, which a filled custom view resolves on the
+ * next present. */
+static void handle_window(int id, const char *json)
+{
+    gb_platform_set_window(json_get_int(json, "width", -1), json_get_int(json, "height", -1),
+                           json_get_int(json, "scaling_mode", -1));
+    GBPlatformWindowInfo info;
+    gb_platform_get_window_info(&info);
+    send_fmt("{\"id\":%d,\"ok\":true,\"window_width\":%d,\"window_height\":%d,"
+             "\"view_width\":%d,\"view_height\":%d,\"native_presented\":%s,\"picture_width\":%d,"
+             "\"picture_height\":%d,\"game_x\":%d,\"game_y\":%d,\"game_width\":%d,\"game_height\":%d,"
+             "\"scaling_mode\":%d,\"fullscreen\":%d}",
+             id, info.window_width, info.window_height, info.view_width, info.view_height,
+             info.native_presented ? "true" : "false", info.picture_width, info.picture_height,
+             info.game_x, info.game_y, info.game_width, info.game_height, info.scaling_mode,
+             info.fullscreen);
+}
+
+/* Open a menu ({open}: "main" the Escape menu, "settings" the settings
+ * window, "shaders" it at Shader Presets, "none" closes them), set
+ * {pause_in_menu} (0|1), {dim_percent} (Game Dimming) and {opacity_percent}
+ * (Menu Opacity, 0-100), unsaved; absent leaves one as it is. {leave}: "quit"
+ * or "launcher" does what the menus' Quit / Return to Launcher do. Then report
+ * the menus and whether the game is held. Frames do not advance while it is
+ * held, so `step` waits until the menu closes. */
+static void handle_menu(int id, const char *json)
+{
+    char open[16], leave[16];
+    if (json_get_str(json, "leave", leave, sizeof(leave)) && !gb_platform_leave_game(leave)) {
+        send_err(id, "leave: quit, or launcher where there is one");
+        return;
+    }
+    const char *which = json_get_str(json, "open", open, sizeof(open));
+    gb_platform_set_menu(which, json_get_int(json, "pause_in_menu", -1),
+                         json_get_int(json, "dim_percent", -1),
+                         json_get_int(json, "opacity_percent", -1));
+    GBPlatformMenuInfo info;
+    gb_platform_get_menu_info(&info);
+    send_fmt("{\"id\":%d,\"ok\":true,\"main_open\":%s,\"settings_open\":%s,\"game_held\":%s,"
+             "\"pause_in_menu\":%s,\"dim_percent\":%d,\"opacity_percent\":%d}",
+             id, info.main_open ? "true" : "false", info.settings_open ? "true" : "false",
+             info.game_held ? "true" : "false", info.pause_in_menu ? "true" : "false",
+             info.dim_percent, info.opacity_percent);
+}
+
+/* The next presented window, menus and shader included, as PNG at {path}.
+ * Written at the next present: a menu keeps presenting with frames held; a
+ * `pause`d runner writes it when it runs again. */
+static void handle_window_screenshot(int id, const char *json)
+{
+    char path[1024];
+    if (!json_get_str(json, "path", path, sizeof(path)) || !gb_platform_request_window_shot(path)) {
+        send_err(id, "needs {path} and a window");
+        return;
+    }
+    send_ok(id);
+}
+
+/* Restart Game: the machine goes back to before its first frame at the next
+ * frame boundary, the cart's battery RAM kept. */
+static void handle_restart(int id, const char *json)
+{
+    (void)json;
+    if (!gb_platform_restart_game()) { send_err(id, "no boot state to restart from"); return; }
+    send_ok(id);
+}
+
 static void handle_save_slot_path(int id, const char *json)
 {
     if (!s_ctx) { send_err(id, "no context"); return; }
@@ -963,7 +1122,8 @@ static void handle_save_slot_path(int id, const char *json)
  * (no platform, or a headless run that has not reached its first present) we
  * compose one here through the same custom render hook so the reply is still
  * what the user would see. */
-static uint32_t s_shot_buf[GB_CUSTOM_FRAME_SIZE];
+static uint32_t *s_shot_buf;   /* grows to the largest view composed */
+static size_t s_shot_capacity;
 
 static int compose_presented_fallback(const uint32_t **out, int *w, int *h)
 {
@@ -980,15 +1140,15 @@ static int compose_presented_fallback(const uint32_t **out, int *w, int *h)
 
     int width = gb_custom_width > 0 ? gb_custom_width : native_w;
     if (width > GB_CUSTOM_MAX_WIDTH) width = GB_CUSTOM_MAX_WIDTH;
-    if (!gb_custom_render(s_ctx, s_shot_buf, width, native)) {
-        /* Compositor declined this frame -- pillarbox the native image the
-         * same way the platform does, so the reply matches the screen. */
-        for (int i = 0; i < width * GB_SCREEN_HEIGHT; i++) s_shot_buf[i] = 0xFF000000u;
-        for (int y = 0; y < GB_SCREEN_HEIGHT; y++)
-            memcpy(s_shot_buf + (size_t)y * width + (width - native_w) / 2,
-                   native + (size_t)y * native_w,
-                   (size_t)native_w * sizeof(uint32_t));
+    *h = gb_custom_height;
+    size_t pixels = (size_t)width * gb_custom_height;
+    if (pixels > s_shot_capacity) {
+        uint32_t *grown = (uint32_t *)realloc(s_shot_buf, pixels * sizeof(*grown));
+        if (!grown) return 0;
+        s_shot_buf = grown;
+        s_shot_capacity = pixels;
     }
+    gb_custom_compose_frame(s_ctx, s_shot_buf, width, native, native_w);
     *out = s_shot_buf;
     *w = width;
     return 1;
@@ -1693,6 +1853,7 @@ static const CmdEntry s_commands[] = {
     { "read_ram",          "read up to 256 bytes through gb_read8 (live banks, side effects)",           handle_read_ram },
     { "dump_ram",          "streamed hex dump through gb_read8, 256 bytes per line",                     handle_dump_ram },
     { "peek",              "read backing arrays directly with explicit ROM/ERAM/WRAM/VRAM banks",        handle_peek },
+    { "poke",              "write RAM's backing arrays directly with explicit ERAM/WRAM/VRAM banks",      handle_poke },
     { "write_ram",         "debug poke: one byte (val) or a run (hex)",                                  handle_write_ram },
     { "read_oam",          "one decoded sprite (index) or all 160 OAM bytes",                            handle_read_oam },
     { "read_vram",         "read 0x8000-0x9FFF from the current VRAM bank",                              handle_read_vram },
@@ -1711,6 +1872,12 @@ static const CmdEntry s_commands[] = {
     { "save_state",        "save state to {path} or the runtime's own {slot:N} file",                    handle_save_state },
     { "load_state",        "load state from {path} or {slot:N}, with the in-game post-load hooks",       handle_load_state },
     { "save_slot_path",    "resolve the <save_id>.stateN file for a slot without touching it",           handle_save_slot_path },
+    { "rewind",            "hold Rewind for the next N frames (default 0); reports the rewind buffer",    handle_rewind },
+    { "speed",             "hold Fast Forward (Hold), set the Fast Forward toggle {max_speed} / V-Sync {0|1}, Speed % {percent}, shortcut speeds {fast_forward_percent,max_percent} (0 = Unlimited); reports it", handle_speed },
+    { "window",            "resize a windowed window {width,height}, set {scaling_mode}; reports it and the presented size", handle_window },
+    { "menu",              "open a menu {open: main|settings|shaders|none}, set {pause_in_menu} / {dim_percent} / {opacity_percent}, {leave: quit|launcher}; reports them and whether the game is held", handle_menu },
+    { "window_screenshot", "write the next presented window (menus, shader) to {path} as PNG",          handle_window_screenshot },
+    { "restart",           "Restart Game: back to before the first frame at the next frame boundary, battery RAM kept", handle_restart },
     { "screenshot",        "write the presented frame; .png gives PNG, anything else PPM",               handle_screenshot },
     { "pause",             "pause at the next frame boundary",                                           handle_pause },
     { "continue",          "resume; also cancels a pending step / run_to_frame",                         handle_continue },

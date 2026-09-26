@@ -83,6 +83,46 @@ the present-counter resync in `gb_platform_load_state_path()`. Skipping the
 custom reset leaves the compositor deriving margins from the old timeline and
 the next composed frame is wrong.
 
+## Rewind
+
+| Command | Args | Reply | Notes |
+|---|---|---|---|
+| `rewind` | `frames` (int, default 0) | `frames`, `enabled`, `states`, `used`, `capacity`, `state_size` | Holds the Rewind key for the next `frames` frames, then lets go; `step` runs them. `0` only reports the buffer. |
+
+Each held frame loads the newest state in the rewind buffer and runs the frame
+from it, as holding the key does; the first also passes over the state of the
+frame on screen, so it shows the one before. The frame runs with the current
+input: to land exactly on an earlier frame of a scripted run, `set_input` that
+frame's buttons before the last rewind step. `used` is bytes of patches (one per
+state after the newest, which is kept whole), `capacity` is 0 until the buffer
+exists, and `state_size` is the whole state's size. Rewind runs from
+`gb_platform_vsync()`, so `--benchmark` runs have none.
+
+## Speed
+
+| Command | Args | Reply | Notes |
+|---|---|---|---|
+| `speed` | `fast_forward`, `max_speed`, `vsync` (int 0/1 each), `percent` (int 10-500), `fast_forward_percent`, `max_percent` (int 110-1000, 0 = Unlimited); absent leaves it | `effective_percent`, `fast_forward_percent`, `max_percent`, `guest_fps`, `fast_forward`, `max_speed`, `vsync`, `swap_interval`, `audio_mode`, `audio_step`, `present_ms`, `frameskip`, `frames_skipped` | Holds Fast Forward (Hold) (until `fast_forward:0`) and sets Fast Forward (the toggle, once called Max Speed, hence `max_speed` / `max_percent`), the V-Sync setting, the menu's Speed % and the shortcuts' speeds, as the keys and menu do (the speeds are not saved). No args only reports. |
+
+The shortcuts' speeds are the `speed.fast_forward_percent` and
+`speed.max_percent` prefs, where 0 is Unlimited: no frame limiter at all
+(RetroArch's Fast-Forward Rate 0), and `effective_percent` is 0 while it is in
+effect. `guest_fps` is the game frames run per second, measured twice a
+second. `swap_interval` is what presents use now: V-Sync is off above 100%.
+`audio_mode` is the `audio.fast_forward` pref (0 mute, 1 normal pitch, 2 sped
+up) and `audio_step` the game samples per sample played that the sound is
+resampled with, measured from the real frame times; `present_ms` is the last
+present, V-Sync wait included. `frameskip` is the
+`speed.fast_forward_frameskip` pref (RetroArch's Fast-Forward Frame Skip, on
+by default): above 100% a frame is drawn only once a display refresh period
+has passed since the last one. `frames_skipped` counts the frames it has not
+drawn since launch; they still run and count as frames. The skip needs a GL
+window, so `--benchmark` runs draw every frame.
+
+| Command | Args | Reply | Notes |
+|---|---|---|---|
+| `window` | `width`, `height` (int, together), `scaling_mode` (int 0-3); absent leaves it | `window_width`, `window_height`, `view_width`, `view_height`, `native_presented`, `picture_width`, `picture_height`, `game_x`, `game_y`, `game_width`, `game_height`, `scaling_mode`, `fullscreen` | Resizes the window while windowed (or the windowed size a headless run resolves against) and sets the scaling mode, without saving either. `view_*` is the view of the last presented frame: a custom view that fills the window (`gb_custom_requested_width` -1) resolves the new size on the next present, so `step` before reading it back. `native_presented` is true when that frame was a custom view's native 160x144 picture presented on its own (`gb_custom_native_scaling`; `screenshot` is then 160x144), `picture_*` is the size of the picture presented (the view, the part of it a `gb_custom_fit` hook kept, or 160x144) and `game_*` its rect in the window. |
+
 ## Input
 
 Button arguments accept two spellings, interchangeably:
@@ -265,6 +305,21 @@ opt-in. Making the launcher itself headless needs a recomp-ui change -- guarding
 that one `SDL_RaiseWindow` behind the same SDL hint would be enough.
 ---
 
+## Menus
+
+The runtime menu (Escape) and the settings window. While either is open the
+game gets no input and no shortcut fires; with Pause in Menu on (the
+`ui.pause_in_menu` pref, default 1) the game also waits in
+`gb_platform_vsync`, presenting its last frame, so `step` and `run_to_frame`
+do not finish until the menu closes. The menus' hold keeps draining the SDL
+queue, so `sdl_event` / `key` / `mouse` (above) drive them while it lasts.
+
+| Command | Args | Reply | Notes |
+|---|---|---|---|
+| `menu` | `open` (`main`, `settings`, `shaders`: the settings window at Shader Presets, `none`), `pause_in_menu` (int 0/1), `dim_percent`, `opacity_percent` (int 0-100), `leave` (`quit` or `launcher`); absent leaves it | `main_open`, `settings_open`, `game_held`, `pause_in_menu`, `dim_percent`, `opacity_percent` | Opens or closes the menus and sets Pause in Menu, Game Dimming and Menu Opacity without saving. `leave` does what the menus' Quit / Return to Launcher do (the latter errors where there is no launcher to return to). |
+| `window_screenshot` | `path` (str) | `ok` | Writes the next presented window as PNG: the menus and the shader preset included, unlike `screenshot`. Frames need not advance; a menu keeps presenting while it holds the game. |
+| `restart` | — | `ok` | Restart Game: the machine goes back to how it was before its first frame (kept by `gb_before_first_frame`) at the next frame boundary, with the cart's battery RAM as it is now, flushed to disk first. Errors before the first frame has started. |
+
 ## Screen capture
 
 | Command | Args | Reply | Notes |
@@ -288,6 +343,7 @@ that one `SDL_RaiseWindow` behind the same SDL hint would be enough.
 | `read_ram` | `addr` (hex str), `len` (int, default 1, clamped 1-256) | `addr`, `len`, `hex` | Goes through `gb_read8` — sees the live bank and any custom read override, and can trip watchpoints. |
 | `dump_ram` | `addr` (hex str), `len` (int, default 256, clamped 1-8192) | **streams** `addr`, `offset`, `len`, `hex` per 256-byte chunk | Same read path as `read_ram`. |
 | `peek` | `addr` (hex str), `len` (default 256, clamped 1-8192), `rom_bank`, `ram_bank`, `wram_bank`, `vram_bank` (int, default -1 = live bank) | **streams** `addr`, `offset`, `len`, `total`, `hex` | Reads the backing arrays directly: bypasses `gb_read8`, watchpoints and custom read overrides, and can name a bank that is not currently mapped. `SVBK 0` aliases WRAM bank 1. |
+| `poke` | `addr` (hex str), `hex` (bytes), `ram_bank`, `wram_bank`, `vram_bank` (int, default -1 = live bank) | `ok` | `peek`'s writing twin for RAM (VRAM, cartridge RAM, WRAM and its extension, OAM, HRAM; not ROM or I/O): writes the backing arrays with no side effects. `write_ram` goes through the bus, which refuses everything but HRAM during OAM DMA, where a pause often lands. |
 | `write_ram` | `addr` (hex str) plus `hex` (byte run) or `val` (single byte) | `ok` | Debug poke through `gb_write8`. |
 | `read_vram` | `addr` (hex str), `len` (default 16, clamped 1-256) | `addr`, `len`, `hex` | 0x8000-0x9FFF only; bytes outside read as 0. Current VRAM bank only — use `peek` for a specific bank. |
 | `read_oam` | `index` (int, default -1) | with a valid index: `index`, `y`, `x`, `tile`, `flags`; otherwise `count`, `hex` (all 160 bytes) | |

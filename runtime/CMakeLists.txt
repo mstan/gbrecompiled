@@ -13,6 +13,7 @@ add_library(gbrt STATIC
     src/psg_shadow.c
     src/color_lut.c
     src/debug_server.c
+    src/rewind.c
     # Default game hooks — one strong symbol per TU so a partial extras.c
     # overrides cleanly (no multiple-definition, no weak-symbol reliance).
     src/game_defaults/game_default_on_init.c
@@ -26,6 +27,8 @@ add_library(gbrt STATIC
     src/game_defaults/game_default_get_name.c
     src/game_defaults/game_default_get_platform.c
     src/game_defaults/game_default_handle_arg.c
+    src/game_defaults/game_default_hardware_mode.c
+    src/game_defaults/game_default_preemptive_frames.c
     src/game_defaults/game_default_get_expected_crc32.c
     src/game_defaults/game_default_get_valid_crcs.c
     src/game_defaults/game_default_extended_view.c
@@ -44,6 +47,9 @@ add_library(gbrt STATIC
     src/cheats.c
     src/relay_client.c
     src/shader_pipeline.cpp
+    src/librashader_chain.cpp
+    src/slang_preset.cpp
+    src/gl_program_cache.cpp
     src/gb_printer.c
     src/gb_asset_loader.c
     src/gb_sha1.c
@@ -54,6 +60,12 @@ add_library(gbrt STATIC
 # pthread for the BGB link recv thread
 find_package(Threads REQUIRED)
 target_link_libraries(gbrt PUBLIC Threads::Threads)
+
+# librashader (src/librashader_chain.cpp) is opened at run time, never linked:
+# only the loader's dlopen needs a library, and only off Windows.
+if(CMAKE_DL_LIBS)
+    target_link_libraries(gbrt PUBLIC ${CMAKE_DL_LIBS})
+endif()
 
 # Online netplay relay client (rendezvous-server HTTP, via libcurl). OFF by
 # default: linking libcurl drags in its whole TLS/HTTP2/HTTP3/SSH/brotli DLL
@@ -215,9 +227,10 @@ if(SDL2_FOUND)
     endif()
 endif()
 
-# Winsock for debug server TCP; comdlg32 for the launcher's file picker (GetOpenFileName)
+# Winsock for debug server TCP; comdlg32 for the launcher's file picker (GetOpenFileName);
+# shell32 for the Recycle Bin (gb_host_trash)
 if(WIN32)
-    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32)
+    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32 shell32)
 endif()
 
 # ---------------------------------------------------------------------------

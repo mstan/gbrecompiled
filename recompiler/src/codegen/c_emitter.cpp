@@ -4,6 +4,8 @@
  */
 
 #include "recompiler/codegen/c_emitter.h"
+#include "recompiler/ir/ir_builder.h"
+#include "recompiler/codegen/exhaustive.h"
 #include "gb_sha1.h"
 #include "gb_sha256.h"
 #include <iomanip>
@@ -970,7 +972,8 @@ static bool block_has_external_predecessor(const ir::BasicBlock& block,
 }
 
 static std::set<uint16_t> collect_dispatchable_pcs_for_body(const ir::Program& program,
-                                                            const EmittedBody& body) {
+                                                            const EmittedBody& body,
+                                                            bool every_instruction) {
     std::set<uint16_t> dispatchable_pcs;
     std::set<uint16_t> available_pcs;
     std::set<uint32_t> current_body_blocks;
@@ -993,7 +996,7 @@ static std::set<uint16_t> collect_dispatchable_pcs_for_body(const ir::Program& p
 
         const ir::BasicBlock& block = block_it->second;
         available_pcs.insert(block.start_address);
-        if (body.may_switch_rom_bank) {
+        if (body.may_switch_rom_bank || every_instruction) {
             dispatchable_pcs.insert(block.start_address);
         } else if (block.is_entry ||
                    block_has_external_predecessor(block, current_body_blocks)) {
@@ -1002,6 +1005,9 @@ static std::set<uint16_t> collect_dispatchable_pcs_for_body(const ir::Program& p
         for (const auto& instr : block.instructions) {
             if (instr.has_source_location) {
                 available_pcs.insert(instr.source_address);
+                if (every_instruction) {
+                    dispatchable_pcs.insert(instr.source_address);
+                }
             }
         }
     }
@@ -1194,11 +1200,48 @@ static std::vector<EmittedBody> build_emitted_bodies(
     return bodies;
 }
 
-/* Operand expression for an ALU-immediate instruction: normally the literal,
- * but at a config-declared [[imm_override]] site route it through the runtime
- * hook so an opt-in layer (e.g. widescreen) can widen the value. */
+/* Code copied from ROM into RAM (a RAM overlay) may have its 8-bit data
+ * operands patched by the game -- e.g. the OAM DMA routine's source page.
+ * Those operands are read live, as the CPU would fetch them, and the overlay
+ * guard skips their bytes; opcodes and branch operands stay guarded. */
+static bool has_live_imm8_operand(const ir::IRInstruction& instr) {
+    if (!instr.has_source_location || instr.source_address < 0x8000 ||
+        instr.src.type != ir::OperandType::IMM8) {
+        return false;
+    }
+    switch (instr.opcode) {
+        case ir::Opcode::MOV_REG_IMM8:
+        case ir::Opcode::ADD8: case ir::Opcode::ADC8:
+        case ir::Opcode::SUB8: case ir::Opcode::SBC8:
+        case ir::Opcode::AND8: case ir::Opcode::OR8:
+        case ir::Opcode::XOR8: case ir::Opcode::CP8:
+            return true;
+        case ir::Opcode::STORE8:
+            return instr.dst.type == ir::OperandType::REG16;   // LD (HL),n
+        default:
+            return false;
+    }
+}
+
+static std::string imm8_operand(const ir::IRInstruction& instr) {
+    char buf[48];
+    if (has_live_imm8_operand(instr)) {
+        snprintf(buf, sizeof(buf), "gb_read8(ctx, 0x%04x)",
+                 (unsigned)((instr.source_address + 1) & 0xFFFF));
+    } else {
+        snprintf(buf, sizeof(buf), "0x%02x", (unsigned)instr.src.value.imm8);
+    }
+    return std::string(buf);
+}
+
+/* Operand expression for an ALU-immediate or LD r,n8 instruction: normally the
+ * literal, but at a config-declared [[imm_override]] site route it through the
+ * runtime hook so an opt-in layer (e.g. widescreen) can change the value. */
 static std::string alu_imm_operand(const GeneratorOptions& options,
                                    const ir::IRInstruction& instr) {
+    if (has_live_imm8_operand(instr)) {
+        return imm8_operand(instr);
+    }
     char buf[64];
     uint32_t key = (static_cast<uint32_t>(instr.source_bank) << 16) |
                    instr.source_address;
@@ -1219,7 +1262,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                                 uint32_t group_cycles,
                                 bool is_last_in_group,
                                 const EmittedBody* current_body,
-                                const std::set<std::string>& inlineable_functions);
+                                const std::set<std::string>& inlineable_functions, unsigned live_operand_length = 0);
 
 static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& instr, 
                                 const ir::Program& program, int indent, 
@@ -1228,7 +1271,8 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                                 uint32_t group_cycles,
                                 bool is_last_in_group,
                                 const EmittedBody* current_body = nullptr,
-                                const std::set<std::string>& inlineable_functions = {}) {
+                                const std::set<std::string>& inlineable_functions = {}, unsigned live_operand_length) {
+    const bool live_operands = live_operand_length != 0;
     auto emit_indent = [&out, indent]() {
         for (int i = 0; i < indent; i++) out << "    ";
     };
@@ -1264,6 +1308,16 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         return;  // Comment-only instruction
     }
     
+    // A sequential path can reach a window edge without returning to dispatch.
+    // Let the exhaustive entry fetch operands from the correct live window.
+    if (options.exhaustive_rom && current_body && instr.has_source_location &&
+        instr.source_address < 0x8000 && (instr.source_address & 0x3FFF) >= 0x3FFE) {
+        emit_indent();
+        out << "ctx->pc = " << instr.source_address << "; " << options.output_prefix
+            << "_exhaustive_step(ctx); return;\n";
+        return;
+    }
+
     // Sub-instruction memory timing: for plain load/store/IO opcodes the bus access
     // happens on the instruction's LAST M-cycle on hardware, but the generated code
     // emits the access first and the cycle tick afterwards (tail) -- so the access
@@ -1286,7 +1340,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         (instr.opcode == ir::Opcode::LOAD8     || instr.opcode == ir::Opcode::STORE8 ||
          instr.opcode == ir::Opcode::IO_READ   || instr.opcode == ir::Opcode::IO_READ_C ||
          instr.opcode == ir::Opcode::IO_WRITE  || instr.opcode == ir::Opcode::IO_WRITE_C ||
-         instr.opcode == ir::Opcode::STORE16   || is_alu_hl_read || is_bit_hl);
+         is_alu_hl_read || is_bit_hl);
     if (tick_before_access) {
         if (next_pc_val != 0) {
             emit_indent();
@@ -1331,14 +1385,13 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             break;
             
         case ir::Opcode::MOV_REG_IMM8:
-            out << "ctx->" << reg8_names[instr.dst.value.reg8] 
-                << " = 0x" << std::hex << std::setfill('0') << std::setw(2) 
-                << (int)instr.src.value.imm8 << std::dec << ";\n";
+            out << "ctx->" << reg8_names[instr.dst.value.reg8]
+                << " = " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ";\n";
             break;
             
         case ir::Opcode::MOV_REG_IMM16:
             out << "ctx->" << reg16_names[instr.dst.value.reg16] 
-                << " = " << format_memory_address(program, instr.src.value.imm16, instr.source_bank)
+                << " = " << (live_operands ? (live_operand_length == 3 ? "gb_read16(ctx, fetch)" : "(0xFF00u + gb_read8(ctx, fetch))") : format_memory_address(program, instr.src.value.imm16, instr.source_bank))
                 << ";\n";
             break;
             
@@ -1348,7 +1401,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
             if (instr.src.type == ir::OperandType::IMM16) {
                 out << "ctx->" << dst_name << " = gb_read8(ctx, "
-                    << format_memory_address(program, instr.src.value.imm16, instr.source_bank) << ");\n";
+                    << (live_operands ? (live_operand_length == 3 ? "gb_read16(ctx, fetch)" : "(0xFF00u + gb_read8(ctx, fetch))") : format_memory_address(program, instr.src.value.imm16, instr.source_bank)) << ");\n";
             } else if (instr.src.type == ir::OperandType::REG16) {
                 out << "ctx->" << dst_name << " = gb_read8(ctx, ctx->" 
                     << reg16_names[instr.src.value.reg16] << ");\n";
@@ -1364,22 +1417,22 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         case ir::Opcode::STORE8:
             if (instr.dst.type == ir::OperandType::IMM16) {
                 if (instr.src.type == ir::OperandType::IMM8) {
-                    out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
+                    out << "gb_write8(ctx, " << (live_operands ? (live_operand_length == 3 ? "gb_read16(ctx, fetch)" : "(0xFF00u + gb_read8(ctx, fetch))") : format_memory_address(program, instr.dst.value.imm16, instr.source_bank))
                         << ", 0x" << std::setw(2) << (int)instr.src.value.imm8 << ");\n";
                 } else {
                     const char* src_name = get_reg8_name(instr.src.value.reg8);
                     if (src_name) {
-                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
+                        out << "gb_write8(ctx, " << (live_operands ? (live_operand_length == 3 ? "gb_read16(ctx, fetch)" : "(0xFF00u + gb_read8(ctx, fetch))") : format_memory_address(program, instr.dst.value.imm16, instr.source_bank))
                             << ", ctx->" << src_name << ");\n";
                     } else {
-                        out << "gb_write8(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
+                        out << "gb_write8(ctx, " << (live_operands ? (live_operand_length == 3 ? "gb_read16(ctx, fetch)" : "(0xFF00u + gb_read8(ctx, fetch))") : format_memory_address(program, instr.dst.value.imm16, instr.source_bank))
                             << ", ctx->a);\n";
                     }
                 }
             } else if (instr.dst.type == ir::OperandType::REG16) {
                 if (instr.src.type == ir::OperandType::IMM8) {
                     out << "gb_write8(ctx, ctx->" << reg16_names[instr.dst.value.reg16]
-                        << ", 0x" << std::hex << std::setw(2) << (int)instr.src.value.imm8 << std::dec << ");\n";
+                        << ", " << (live_operands ? "gb_read8(ctx, fetch)" : imm8_operand(instr)) << ");\n";
                 } else {
                     const char* src_name = get_reg8_name(instr.src.value.reg8);
                     if (src_name) {
@@ -1395,7 +1448,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::ADD8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_add8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_add8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_add8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1405,7 +1458,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::ADC8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_adc8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_adc8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_adc8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1415,7 +1468,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SUB8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_sub8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_sub8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_sub8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1425,7 +1478,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::SBC8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_sbc8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_sbc8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_sbc8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1435,7 +1488,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::AND8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_and8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_and8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_and8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1445,7 +1498,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::OR8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_or8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_or8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_or8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1455,7 +1508,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::XOR8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_xor8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_xor8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_xor8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1465,7 +1518,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::CP8:
             if (instr.src.type == ir::OperandType::IMM8) {
-                out << "gb_cp8(ctx, " << alu_imm_operand(options, instr) << ");\n";
+                out << "gb_cp8(ctx, " << (live_operands ? "gb_read8(ctx, fetch)" : alu_imm_operand(options, instr)) << ");\n";
             } else if (instr.src.value.reg8 == 6) {
                 out << "gb_cp8(ctx, gb_read8(ctx, ctx->hl));\n";
             } else {
@@ -1506,7 +1559,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             break;
             
         case ir::Opcode::ADD_SP_IMM8:
-            out << "gb_add_sp(ctx, " << (int)instr.src.value.offset << ");\n";
+            out << "gb_add_sp(ctx, " << (live_operands ? "(int8_t)gb_read8(ctx, fetch)" : std::to_string((int)instr.src.value.offset)) << ");\n";
                 break;
                 
             case ir::Opcode::PUSH16:
@@ -1904,11 +1957,9 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         }
             
         case ir::Opcode::RET:
-            out << "gb_ret(ctx);\n";
             if (options.emit_cycle_counting && group_cycles > 0) {
-                emit_indent();
-                out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
-            }
+                out << "gb_ret_timed(ctx, " << (int)group_cycles << ");\n";
+            } else out << "gb_ret(ctx);\n";
             emit_indent();
             out << "return;\n";
             break;
@@ -1919,10 +1970,9 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                                (instr.src.value.condition == 1) ? "ctx->f_z" :
                                (instr.src.value.condition == 2) ? "!ctx->f_c" : "ctx->f_c";
             out << "if (" << expr << ") {\n";
-            emit_indent(); out << "    gb_ret(ctx);\n";
             if (options.emit_cycle_counting) {
-                emit_indent(); out << "    gb_tick(ctx, 20); /* RET_CC cycles always 20 if taken */\n";
-            }
+                emit_indent(); out << "    gb_ret_timed(ctx, 20);\n";
+            } else { emit_indent(); out << "    gb_ret(ctx);\n"; }
             emit_indent(); out << "    return;\n";
             emit_indent(); out << "} /* " << cond << " */\n";
             // Not taken: update PC and tick
@@ -1938,10 +1988,10 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::RETI:
             out << "ctx->ime = 1;\n";
-            emit_indent(); out << "gb_ret(ctx);\n";
+            emit_indent();
             if (options.emit_cycle_counting && group_cycles > 0) {
-                emit_indent(); out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
-            }
+                out << "gb_ret_timed(ctx, " << (int)group_cycles << ");\n";
+            } else out << "gb_ret(ctx);\n";
             emit_indent(); out << "return;\n";
             break;
             
@@ -2131,7 +2181,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         // === I/O Port Operations ===
         case ir::Opcode::IO_READ:
             // LDH A,(n) - read from 0xFF00 + immediate offset
-            out << "ctx->a = gb_read8(ctx, " << format_io_offset_address(program, instr.src.value.imm8, instr.source_bank) << ");\n";
+            out << "ctx->a = gb_read8(ctx, " << (live_operands ? "(0xFF00u + gb_read8(ctx, fetch))" : format_io_offset_address(program, instr.src.value.imm8, instr.source_bank)) << ");\n";
             break;
             
         case ir::Opcode::IO_READ_C:
@@ -2141,7 +2191,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             
         case ir::Opcode::IO_WRITE:
             // LDH (n),A - write to 0xFF00 + immediate offset
-            out << "gb_write8(ctx, " << format_io_offset_address(program, instr.dst.value.imm8, instr.source_bank) << ", ctx->a);\n";
+            out << "gb_write8(ctx, " << (live_operands ? "(0xFF00u + gb_read8(ctx, fetch))" : format_io_offset_address(program, instr.dst.value.imm8, instr.source_bank)) << ", ctx->a);\n";
             break;
             
         case ir::Opcode::IO_WRITE_C:
@@ -2239,12 +2289,12 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             break;
             
         case ir::Opcode::LD_HL_SP_N:
-            out << "gb_ld_hl_sp_n(ctx, " << (int)instr.src.value.offset << ");\n";
+            out << "gb_ld_hl_sp_n(ctx, " << (live_operands ? "(int8_t)gb_read8(ctx, fetch)" : std::to_string((int)instr.src.value.offset)) << ");\n";
             break;
             
         case ir::Opcode::STORE16:
             // LD (nn),SP - store 16-bit register to memory
-            out << "gb_write16(ctx, " << format_memory_address(program, instr.dst.value.imm16, instr.source_bank)
+            out << "gb_write16(ctx, " << (live_operands ? (live_operand_length == 3 ? "gb_read16(ctx, fetch)" : "(0xFF00u + gb_read8(ctx, fetch))") : format_memory_address(program, instr.dst.value.imm16, instr.source_bank))
                 << ", ctx->" << reg16_names[instr.src.value.reg16] << ");\n";
             break;
             
@@ -2295,6 +2345,69 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
             out << "if (ctx->single_step_mode) return;\n";
         }
     }
+}
+
+std::string emit_exhaustive_instruction(const Instruction& instruction,
+                                       const GeneratorOptions& options,
+                                       bool halt_bug, bool live_operands) {
+    using T = InstructionType;
+    std::ostringstream out;
+    const auto& ins = instruction;
+    if (ins.type == T::UNDEFINED) {
+        out << "    fprintf(stderr, \"[NATIVE] Illegal opcode at %03X:%04X\\n\", ctx->rom_bank, ctx->pc); abort();\n";
+        return out.str();
+    }
+    if (live_operands) {
+        out << "    const uint16_t fetch = ctx->pc + " << (halt_bug ? 0 : 1) << ";\n";
+        if (ins.is_jump || ins.is_call) {
+            out << "    const uint8_t operand8 = gb_read8(ctx, fetch);\n";
+            if (ins.length == 3)
+                out << "    const uint16_t operand16 = operand8 | (gb_read8(ctx, fetch + 1) << 8);\n";
+        }
+    }
+    out << "    ctx->pc += " << unsigned(ins.length - (halt_bug ? 1 : 0)) << ";\n";
+    if (halt_bug) out << "    ctx->halt_bug = 0;\n";
+    const char* conditions[] = {"!ctx->f_z", "ctx->f_z", "!ctx->f_c", "ctx->f_c"};
+    const std::string target = live_operands ? "operand16" : std::to_string(ins.imm16);
+    const std::string offset = live_operands ? "(int8_t)operand8" : std::to_string(int(ins.offset));
+    const bool control = ins.is_jump || ins.is_call || ins.is_return;
+    if (control) {
+        if (ins.is_conditional) out << "    if (" << conditions[unsigned(ins.condition)] << ") {\n";
+        switch (ins.type) {
+            case T::JP_NN: case T::JP_CC_NN: out << "    ctx->pc = " << target << ";\n"; break;
+            case T::JR_N: case T::JR_CC_N: out << "    ctx->pc += " << offset << ";\n"; break;
+            case T::JP_HL: out << "    gbrt_jump_hl(ctx);\n"; break;
+            case T::CALL_NN: case T::CALL_CC_NN:
+                out << "    gb_push16(ctx, ctx->pc); ctx->pc = " << target << ";\n"; break;
+            case T::RST:
+                out << "    gb_push16(ctx, ctx->pc); ctx->pc = " << unsigned(ins.rst_vector) << ";\n"; break;
+            case T::RET: case T::RET_CC: break;
+            case T::RETI: out << "    ctx->ime = 1;\n"; break;
+            default: throw std::runtime_error("Unhandled exhaustive control instruction");
+        }
+        out << (ins.is_return ? "    gb_ret_timed(ctx, " : "    gb_tick(ctx, ")
+            << unsigned(ins.is_conditional ? ins.cycles_branch : ins.cycles) << ");\n";
+        if (ins.is_conditional) out << "    } else { gb_tick(ctx, " << unsigned(ins.cycles) << "); }\n";
+    } else if (ins.type == T::HALT) {
+        out << "    if (!ctx->ime && (gb_read8(ctx, 0xFFFF) & gb_read8(ctx, 0xFF0F) & 0x1F)) ctx->halt_bug = 1;\n"
+               "    else gb_halt(ctx);\n    gb_tick(ctx, 4);\n";
+    } else if (ins.type == T::STOP) {
+        out << "    gb_stop(ctx); gb_tick(ctx, 4);\n";
+    } else {
+        ir::BuilderOptions builder_options;
+        builder_options.emit_comments = false;
+        ir::IRBuilder builder(builder_options);
+        ir::BasicBlock block;
+        builder.lower_instruction(ins, block);
+        ir::Program empty_program;
+        for (const auto& ir_instruction : block.instructions) {
+            emit_ir_instruction(out, ir_instruction, empty_program, 1, options,
+                                0, ir_instruction.cycles, false, nullptr, {}, live_operands ? ins.length : 0);
+        }
+        if (out.str().find("Unhandled opcode") != std::string::npos)
+            throw std::runtime_error("Unhandled exhaustive data instruction");
+    }
+    return out.str();
 }
 
 GeneratedOutput generate_output(const ir::Program& program,
@@ -2502,12 +2615,18 @@ GeneratedOutput generate_output(const ir::Program& program,
         internal_header_ss << "void " << emitted_function_name(options, func.name)
                            << "(GBContext* ctx);\n";
     }
+    if (options.exhaustive_rom) {
+        internal_header_ss << "void " << options.output_prefix << "_exhaustive_step(GBContext* ctx);\n";
+        internal_header_ss << "void " << options.output_prefix << "_uncovered(GBContext* ctx);\n";
+    }
     internal_header_ss << "\n#endif\n";
     output.extra_files.push_back({
         internal_header_file,
         internal_header_ss.str(),
         false,
     });
+
+    if (options.exhaustive_rom) append_exhaustive_rom(output, rom_data, rom_size, options);
 
     std::vector<const ir::Function*> sorted_functions;
     sorted_functions.reserve(program.functions.size());
@@ -2723,7 +2842,7 @@ GeneratedOutput generate_output(const ir::Program& program,
 
             const ir::BasicBlock& block = block_it->second;
             available_pcs.insert(block.start_address);
-            if (func.may_switch_rom_bank) {
+            if (func.may_switch_rom_bank || options.resumable_instructions) {
                 dispatchable_pcs.insert(block.start_address);
             } else if (block.is_entry ||
                        block_has_external_predecessor(block, current_function_blocks)) {
@@ -2732,6 +2851,9 @@ GeneratedOutput generate_output(const ir::Program& program,
             for (const auto& instr : block.instructions) {
                 if (instr.has_source_location) {
                     available_pcs.insert(instr.source_address);
+                    if (options.resumable_instructions) {
+                        dispatchable_pcs.insert(instr.source_address);
+                    }
                 }
             }
         }
@@ -2824,6 +2946,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         uint16_t ram_addr = 0;
         std::vector<uint8_t> bytes;
         std::vector<uint16_t> dispatch_addrs;
+        std::set<uint16_t> live_operand_addrs;   // not guarded: read live
     };
 
     std::vector<CompiledRamOverlay> compiled_ram_overlays;
@@ -2848,6 +2971,19 @@ GeneratedOutput generate_output(const ir::Program& program,
 
         if (compiled_overlay.dispatch_addrs.empty()) {
             continue;
+        }
+
+        // Operand bytes the compiled code reads live are free to change.
+        for (const auto& [block_id, block] : program.blocks) {
+            (void)block_id;
+            for (const auto& ir_instr : block.instructions) {
+                if (has_live_imm8_operand(ir_instr) &&
+                    ir_instr.source_address >= overlay.ram_addr &&
+                    static_cast<uint32_t>(ir_instr.source_address) + 1 < overlay_end) {
+                    compiled_overlay.live_operand_addrs.insert(
+                        static_cast<uint16_t>(ir_instr.source_address + 1));
+                }
+            }
         }
 
         std::sort(compiled_overlay.dispatch_addrs.begin(), compiled_overlay.dispatch_addrs.end());
@@ -2963,7 +3099,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                             << "(ctx); break;\n";
                 }
             }
-            page_ss << "                default: gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr); break;\n";
+            page_ss << "                default: " << (options.exhaustive_rom ? options.output_prefix + "_uncovered(ctx)" : "gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr)") << "; break;\n";
             page_ss << "            }\n";
             page_ss << "            break;\n";
         }
@@ -3000,6 +3136,11 @@ GeneratedOutput generate_output(const ir::Program& program,
 
             source_ss << "static uint8_t " << match_name << "(GBContext* ctx) {\n";
             for (size_t byte_index = 0; byte_index < overlay.bytes.size(); ++byte_index) {
+                const uint16_t byte_addr = static_cast<uint16_t>(overlay.ram_addr + byte_index);
+                if (overlay.live_operand_addrs.count(byte_addr)) {
+                    source_ss << "    /* " << hex_literal(byte_addr, 4) << ": operand read live */\n";
+                    continue;
+                }
                 source_ss << "    if (gb_read8(ctx, "
                           << hex_literal(static_cast<uint32_t>(overlay.ram_addr + byte_index), 4)
                           << ") != "
@@ -3042,7 +3183,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     }
 
     for (auto& [page, page_ss] : dispatch_page_sources) {
-        page_ss << "        default: gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr); break;\n";
+        page_ss << "        default: " << (options.exhaustive_rom ? options.output_prefix + "_uncovered(ctx)" : "gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr)") << "; break;\n";
         page_ss << "    }\n";
         page_ss << "}\n\n";
         const std::string page_source = page_ss.str();
@@ -3065,6 +3206,12 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "        addr = ctx->pc;\n";
     source_ss << "        uint8_t bank = ctx->rom_bank;\n";
     source_ss << "        if (addr < 0x4000) bank = 0;\n";
+    if (options.exhaustive_rom) {
+        source_ss << "        if (addr < 0x8000 && (ctx->halt_bug || (addr >= 0x4000 && bank == 0) || (addr & 0x3FFF) >= 0x3FFE)) {\n";
+        source_ss << "            " << options.output_prefix << "_exhaustive_step(ctx);\n";
+        source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
+        source_ss << "            continue;\n        }\n";
+    }
     source_ss << "        if (game_dispatch_override(ctx, addr)) {\n";
     source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
     source_ss << "            continue;\n";
@@ -3078,6 +3225,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "        if (gbrt_trace_enabled) {\n";
     source_ss << "            fprintf(stderr, \"[TRACE] Dispatch 0x%04X (Bank %d)\\n\", addr, bank);\n";
     source_ss << "        }\n";
+    if (!options.exhaustive_rom) {
     source_ss << "        if (gbrt_try_execute_hram_stub(ctx, addr)) {\n";
     source_ss << "            if (ctx->single_step_mode) break;\n";
     source_ss << "            continue;\n";
@@ -3090,6 +3238,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
     source_ss << "            continue;\n";
     source_ss << "        }\n";
+    }
     if (!compiled_ram_overlays.empty()) {
         source_ss << "        if (" << module_link_name(options, "try_dispatch_compiled_ram_overlay")
                   << "(ctx, addr, bank)) {\n";
@@ -3100,8 +3249,11 @@ GeneratedOutput generate_output(const ir::Program& program,
     // HRAM is writable at runtime; only known overlays matched above may use
     // compiled code from this region.
     source_ss << "        if (addr >= 0xFF80 && addr <= 0xFFFE) {\n";
-    source_ss << "            gbrt_note_dispatch_fallback(ctx, bank, addr);\n";
-    source_ss << "            gb_interpret(ctx, addr);\n";
+    if (options.exhaustive_rom) source_ss << "            " << options.output_prefix << "_uncovered(ctx);\n";
+    else {
+        source_ss << "            gbrt_note_dispatch_fallback(ctx, bank, addr);\n";
+        source_ss << "            gb_interpret(ctx, addr);\n";
+    }
     source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
     source_ss << "            continue;\n";
     source_ss << "        }\n";
@@ -3111,7 +3263,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                   << (int)page << std::dec << ": "
                   << dispatch_page_name(page) << "(ctx, addr, bank); break;\n";
     }
-    source_ss << "            default: gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr); break;\n";
+    source_ss << "            default: " << (options.exhaustive_rom ? options.output_prefix + "_uncovered(ctx)" : "gbrt_note_dispatch_fallback(ctx, bank, addr); gb_interpret(ctx, addr)") << "; break;\n";
     source_ss << "        }\n";
     source_ss << "        if (ctx->single_step_mode) break;\n";
     source_ss << "    }\n";
@@ -3176,13 +3328,22 @@ GeneratedOutput generate_output(const ir::Program& program,
             if (it == program.blocks.end()) continue;
             block_labels_by_addr[it->second.start_address] = it->second.label;
         }
-        std::set<uint16_t> dispatchable_pcs = collect_dispatchable_pcs_for_body(program, body);
+        std::set<uint16_t> dispatchable_pcs =
+            collect_dispatchable_pcs_for_body(program, body, options.resumable_instructions);
         auto wrapper_pcs_it = wrapper_dispatchable_pcs_by_body_name.find(body.name);
         if (wrapper_pcs_it != wrapper_dispatchable_pcs_by_body_name.end()) {
             dispatchable_pcs.insert(wrapper_pcs_it->second.begin(), wrapper_pcs_it->second.end());
         }
+        // Blocks are emitted in address order, so the switch can only be skipped
+        // when the entry is also the first block; a loop head placed below the
+        // entry (e.g. JR back to a POP before it) would otherwise run first.
+        const bool entry_is_first_block =
+            !sorted_block_ids.empty() &&
+            program.blocks.count(sorted_block_ids.front()) &&
+            program.blocks.at(sorted_block_ids.front()).start_address == body.entry_address;
         const bool entry_only_resume =
-            dispatchable_pcs.size() == 1 && *dispatchable_pcs.begin() == body.entry_address;
+            dispatchable_pcs.size() == 1 && *dispatchable_pcs.begin() == body.entry_address &&
+            entry_is_first_block;
 
         if (!entry_only_resume) {
             func_ss << "    switch (ctx->pc) {\n";
@@ -3443,6 +3604,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "        .enable_bootrom = false,\n";
     source_ss << "        .enable_audio = true,\n";
     source_ss << "        .enable_serial = true,\n";
+    source_ss << "        .compiled_halt_bug = " << (options.exhaustive_rom ? "true" : "false") << ",\n";
     source_ss << "        .speed_percent = 100,\n";
     source_ss << "    };\n";
     source_ss << "    return &config;\n";
@@ -4603,8 +4765,16 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
             fs::create_directories(out_path);
         }
         
+        // Preserve timestamps for unchanged outputs: exhaustive projects contain
+        // hundreds of translation units, so rewriting headers forces a full build.
+        auto unchanged = [&](const std::string& name, const std::string& content) {
+            std::ifstream existing(out_path / name);
+            if (!existing) return false;
+            return std::string(std::istreambuf_iterator<char>(existing), {}) == content;
+        };
+
         // Write header file
-        if (!output.header_file.empty()) {
+        if (!output.header_file.empty() && !unchanged(output.header_file, output.header_content)) {
             std::ofstream header_file(out_path / output.header_file);
             if (!header_file) return false;
             header_file << output.header_content;
@@ -4612,7 +4782,7 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         }
         
         // Write source file
-        if (!output.source_file.empty()) {
+        if (!output.source_file.empty() && !unchanged(output.source_file, output.source_content)) {
             std::ofstream source_file(out_path / output.source_file);
             if (!source_file) return false;
             source_file << output.source_content;
@@ -4620,7 +4790,7 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         }
         
         // Write ROM data file
-        if (!output.rom_data_file.empty()) {
+        if (!output.rom_data_file.empty() && !unchanged(output.rom_data_file, output.rom_data_content)) {
             std::ofstream rom_file(out_path / output.rom_data_file);
             if (!rom_file) return false;
             rom_file << output.rom_data_content;
@@ -4628,7 +4798,7 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         }
         
         // Write main file
-        if (!output.main_file.empty()) {
+        if (!output.main_file.empty() && !unchanged(output.main_file, output.main_content)) {
             std::ofstream main_file(out_path / output.main_file);
             if (!main_file) return false;
             main_file << output.main_content;
@@ -4636,6 +4806,7 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         }
 
         for (const auto& extra_file : output.extra_files) {
+            if (unchanged(extra_file.filename, extra_file.content)) continue;
             std::ofstream out_file(out_path / extra_file.filename);
             if (!out_file) return false;
             out_file << extra_file.content;
@@ -4644,6 +4815,7 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         
         // Write per-bank source files
         for (const auto& [bank, fname] : output.bank_files) {
+            if (unchanged(fname, output.bank_sources.at(bank))) continue;
             std::ofstream bank_file(out_path / fname);
             if (!bank_file) return false;
             bank_file << output.bank_sources.at(bank);
@@ -4651,7 +4823,7 @@ bool write_output(const GeneratedOutput& output, const std::string& output_dir) 
         }
 
         // Write CMakeLists.txt
-        if (!output.cmake_file.empty()) {
+        if (!output.cmake_file.empty() && !unchanged(output.cmake_file, output.cmake_content)) {
             std::ofstream cmake_file(out_path / output.cmake_file);
             if (!cmake_file) return false;
             cmake_file << output.cmake_content;

@@ -110,6 +110,12 @@ struct GeneratorOptions {
     // gbrt_imm_override8() so an opt-in runtime layer can widen them;
     // with no hook installed the original immediate is returned.
     std::set<uint32_t> imm_override_sites;
+
+    // Give every compiled instruction a dispatch entry, so execution resumed
+    // at any PC (interrupt return, frame boundary) re-enters compiled code
+    // instead of the interpreter. Larger switches; off by default.
+    bool exhaustive_rom = false; // Ahead-of-time entry for every ROM byte, MBC5 <= 256 banks.
+    bool resumable_instructions = false;
 };
 
 /**

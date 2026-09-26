@@ -22,15 +22,28 @@ struct DataRegionConfig {
     uint16_t end;       // exclusive
 };
 
-// Reviewed ALU-immediate override site: the generator routes this one
+// Reviewed ALU-immediate or LD r,n8 override site: the generator routes this one
 // instruction's immediate operand through gbrt_imm_override8(ctx, bank, pc,
 // orig) at runtime instead of baking the literal. Used by opt-in enhancement
 // layers (e.g. widescreen cull-bound widening); with no runtime hook
 // installed the original immediate is returned, so behavior is unchanged.
 struct ImmOverrideConfig {
     uint8_t bank;
-    uint16_t addr;      // guest PC of the ALU-immediate instruction
+    uint16_t addr;      // guest PC of the instruction
     std::string note;
+};
+
+// Bank-0 routine that consumes inline argument bytes after the CALL and
+// returns past them. far_target: the arguments are "dw addr ; db bank" and
+// the analyzer follows that far call/jump. record_bytes > 0: the arguments are
+// a list of records of that size terminated by a zero byte; otherwise they
+// are arg_bytes long. no_return: nothing resumes after the arguments.
+struct InlineCallConfig {
+    uint16_t routine;
+    bool no_return;
+    bool far_target = true;
+    uint8_t arg_bytes = 3;
+    uint8_t record_bytes = 0;
 };
 
 struct GameConfig {
@@ -88,6 +101,18 @@ struct GameConfig {
 
     // ALU-immediate override sites (runtime-hookable immediates)
     std::vector<ImmOverrideConfig> imm_overrides;
+
+    // Inline-argument far-call routines ([[inline_call]])
+    std::vector<InlineCallConfig> inline_calls;
+    std::optional<bool> scan_inline_calls;
+    std::optional<bool> exhaustive_rom;
+    std::optional<bool> resumable_instructions;
+    std::vector<uint8_t> scan_banks;       // [options] scan_banks = [...]
+    std::optional<bool> pointer_scan;      // [options] pointer_scan
+
+    // RST vectors whose call sites are followed by an inline dw jump table
+    // ([options] jump_table_rst = [0x00, ...]); extends the built-in detection.
+    std::vector<uint8_t> jump_table_rsts;
 
     // Valid CRC32s (for multi-version ROM support, e.g. Red + Blue)
     std::vector<uint32_t> valid_crcs;

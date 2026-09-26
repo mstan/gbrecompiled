@@ -68,6 +68,15 @@ void gb_host_paths_reset(void);
 int gb_host_relaunch(const char *set_name, const char *set_value, const char *unset_name);
 int gb_host_can_relaunch(void);
 
+/* Move the file at `path` (UTF-8) to the Recycle Bin (Windows) or the
+ * desktop's Trash (Linux, the freedesktop.org trash). Returns 1 if it went
+ * there; 0 if it failed or there is none to use, leaving the file as it was.
+ * gb_host_has_trash() says whether it can work here, gb_host_trash_name()
+ * what the user knows it as ("Recycle Bin", "Trash"). */
+int gb_host_trash(const char *path);
+int gb_host_has_trash(void);
+const char *gb_host_trash_name(void);
+
 #ifdef __cplusplus
 }
 #endif

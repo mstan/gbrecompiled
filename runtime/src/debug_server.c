@@ -1048,7 +1048,7 @@ static void handle_window(int id, const char *json)
 }
 
 /* Open a menu ({open}: "main" the Escape menu, "settings" the settings
- * window, "none" closes them), set
+ * window, "shaders" it at Shader Presets, "none" closes them), set
  * {pause_in_menu} (0|1), {dim_percent} (Game Dimming) and {opacity_percent}
  * (Menu Opacity, 0-100), unsaved; absent leaves one as it is. {leave}: "quit"
  * or "launcher" does what the menus' Quit / Return to Launcher do. Then report
@@ -1875,7 +1875,7 @@ static const CmdEntry s_commands[] = {
     { "rewind",            "hold Rewind for the next N frames (default 0); reports the rewind buffer",    handle_rewind },
     { "speed",             "hold Fast Forward (Hold), set the Fast Forward toggle {max_speed} / V-Sync {0|1}, Speed % {percent}, shortcut speeds {fast_forward_percent,max_percent} (0 = Unlimited); reports it", handle_speed },
     { "window",            "resize a windowed window {width,height}, set {scaling_mode}; reports it and the presented size", handle_window },
-    { "menu",              "open a menu {open: main|settings|none}, set {pause_in_menu} / {dim_percent} / {opacity_percent}, {leave: quit|launcher}; reports them and whether the game is held", handle_menu },
+    { "menu",              "open a menu {open: main|settings|shaders|none}, set {pause_in_menu} / {dim_percent} / {opacity_percent}, {leave: quit|launcher}; reports them and whether the game is held", handle_menu },
     { "window_screenshot", "write the next presented window (menus, shader) to {path} as PNG",          handle_window_screenshot },
     { "restart",           "Restart Game: back to before the first frame at the next frame boundary, battery RAM kept", handle_restart },
     { "screenshot",        "write the presented frame; .png gives PNG, anything else PPM",               handle_screenshot },

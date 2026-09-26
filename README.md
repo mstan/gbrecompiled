@@ -36,6 +36,7 @@ Everything below is built on top of upstream `arcanite24/gb-recompiled`. Most ar
 ### Display pipeline
 - **GLES 2.0 rendering backend** with a built-in post-process shader pipeline. One binary covers desktop Mesa, Mali, Adreno — same shaders run everywhere.
 - **Shipped shader presets** (sharp / scanlines / CRT-like effects) selectable from the Esc menu's Look section. Per-game shader preference stays sticky once set.
+- **RetroArch `.slangp` presets through [librashader](https://github.com/SnowflakePowered/librashader)** (`runtime/src/librashader_chain.cpp`), opened at run time: put a `librashader.dll` / `.so` built with `--no-default-features --features runtime-opengl` and a `shaders/` folder of presets beside the binary. Picker with filter, live parameters, bezel mode, and a preset editor (the picked preset's passes changed, reordered or added to, whole presets chained, and saved as presets of your own, which can be deleted again, to the Recycle Bin on Windows; `runtime/src/slang_preset.cpp`). Needs GLES 3.0+ (ANGLE gives 3.1 when asked). On Windows a new preset is first compiled in a hidden child process, because Microsoft's HLSL optimizer under ANGLE overflows its stack on a few presets; such a preset is retried, and then run, with the optimizer off (ANGLE's `D3DCompile` is routed through the runtime for that). Compiled programs persist in `shader_cache/` (`runtime/src/gl_program_cache.cpp`). librashader's GLSL ES output needs a few patches to work under ANGLE; the Shantae repo carries them.
 
 ### Experimental custom game views
 

@@ -56,6 +56,9 @@ extern "C" void gb_debug_server_set_context(GBContext *ctx);
 #include "backends/imgui_impl_opengl3.h"
 
 #include "shader_pipeline.h"
+#include "librashader_chain.h"
+#include "slang_preset.h"
+#include "gl_program_cache.h"
 #include "game_extras.h"  /* game_draw_overlay() hook (no-op default in gbrt) */
 #include "gb_widescreen.h"
 #include "gb_custom_view.h" /* opt-in extended view: render width + arming */
@@ -87,6 +90,25 @@ static SDL_GLContext g_gl_context = NULL;
 static GLuint g_game_tex = 0;
 static GBShaderPipeline* g_shader_pipeline = NULL;
 static std::string g_active_shader_pref = "sharp";
+
+/* librashader .slangp preset (see librashader_chain.h). The path is stored
+ * relative to the shader folder when it lies inside it, so the folder can move
+ * with the executable. Parameter overrides belong to that one preset and are
+ * dropped when another is picked. Loads are queued and applied before the next
+ * frame is drawn: creating a chain rebinds GL state, which must not happen in
+ * the middle of an ImGui frame. */
+static std::string g_slang_preset_pref;
+static std::string g_slang_dir_pref;
+static std::map<std::string, float> g_slang_param_prefs;
+/* The preset the menu's edited copy (saved:.builder.slangp) was made from. */
+static std::string g_slang_builder_origin;
+static std::string g_slang_delete_status;   /* what the last Delete did, until another pick */
+static bool g_slang_fill_window = false;
+static bool g_slang_load_pending = false;
+static bool g_slang_open_section = false;
+/* Picked in the menu rather than restored at start-up: a preset that crashed
+ * a probe before is tested again only when the user asks for it again. */
+static bool g_slang_explicit = false;
 
 /* Present-time screen-color LUT (opt-in via GBCRECOMP_SCREEN; default raw =>
  * passthrough, frame byte-identical). Built lazily on first present; NULL when
@@ -1740,12 +1762,14 @@ static void load_runtime_preferences(void) {
     g_menu_opacity_percent = 100;
     g_launcher_skip_pref = -1;
     g_per_game_prefs.clear();
+    g_slang_param_prefs.clear();
+    g_slang_builder_origin.clear();
 
     const std::string path = runtime_preferences_path();
     if (!path.empty()) {
         FILE* file = fopen(path.c_str(), "r");
         if (file) {
-            char line[256];
+            char line[1024];   /* shader.slang holds a path */
             while (fgets(line, sizeof(line), file)) {
                 char* text = trim_ascii(line);
                 if (!text || !text[0] || text[0] == '#') {
@@ -1973,6 +1997,27 @@ static void load_runtime_preferences(void) {
                     g_active_shader_pref = value;
                     continue;
                 }
+                if (strcmp(key, "shader.slang") == 0) {
+                    g_slang_preset_pref = value;
+                    g_slang_load_pending = true;
+                    continue;
+                }
+                if (strcmp(key, "shader.slang_dir") == 0) {
+                    g_slang_dir_pref = value;
+                    continue;
+                }
+                if (strcmp(key, "shader.slang_builder_origin") == 0) {
+                    g_slang_builder_origin = value;
+                    continue;
+                }
+                if (strcmp(key, "shader.slang_fill_window") == 0) {
+                    g_slang_fill_window = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strncmp(key, "shader.slang_param.", 19) == 0 && key[19]) {
+                    g_slang_param_prefs[key + 19] = strtof(value, NULL);
+                    continue;
+                }
                 if (strcmp(key, "lan.enabled") == 0) {
                     g_lan_enabled_pref = (strcmp(value, "0") != 0);
                     continue;
@@ -2180,6 +2225,17 @@ static void save_runtime_preferences(void) {
     }
     if (!g_active_shader_pref.empty()) {
         fprintf(file, "shader.active=%s\n", g_active_shader_pref.c_str());
+    }
+    fprintf(file, "shader.slang=%s\n", g_slang_preset_pref.c_str());
+    if (!g_slang_dir_pref.empty()) {
+        fprintf(file, "shader.slang_dir=%s\n", g_slang_dir_pref.c_str());
+    }
+    if (!g_slang_builder_origin.empty()) {
+        fprintf(file, "shader.slang_builder_origin=%s\n", g_slang_builder_origin.c_str());
+    }
+    fprintf(file, "shader.slang_fill_window=%d\n", g_slang_fill_window ? 1 : 0);
+    for (const auto& [name, value] : g_slang_param_prefs) {
+        fprintf(file, "shader.slang_param.%s=%.9g\n", name.c_str(), (double)value);
     }
     fprintf(file, "lan.enabled=%d\n", g_lan_enabled_pref ? 1 : 0);
     if (!g_lan_uuid_pref.empty())     fprintf(file, "lan.uuid=%s\n", g_lan_uuid_pref.c_str());
@@ -3101,6 +3157,318 @@ static void update_render_filter(void) {
      * gone, so this is a no-op kept around for the existing call sites. */
 }
 
+/* ---- librashader presets ------------------------------------------------ */
+
+/* UTF-8 whatever the C++ standard (u8string is std::u8string from C++20),
+ * because that is what librashader takes a path as. */
+static std::string path_utf8(const fs::path& p) {
+    const auto s = p.u8string();
+    std::string out(s.begin(), s.end());
+    std::replace(out.begin(), out.end(), '\\', '/');
+    return out;
+}
+
+/* The folder the preset picker lists: the menu's choice, else
+ * GBRECOMP_SHADER_DIR, else shaders/ beside the executable. */
+static std::string slang_shader_dir(void) {
+    if (!g_slang_dir_pref.empty()) return g_slang_dir_pref;
+    const char* env = SDL_getenv("GBRECOMP_SHADER_DIR");
+    if (env && env[0]) return env;
+    std::error_code ec;
+    for (const char* base : { gb_host_asset_dir(), gb_host_state_dir() }) {
+        const fs::path candidate = fs::u8path(base ? base : "") / "shaders";
+        if (fs::is_directory(candidate, ec)) return path_utf8(candidate);
+    }
+    return path_utf8(fs::u8path(gb_host_asset_dir()) / "shaders");
+}
+
+/* Presets saved from the preset builder live in shader_presets/ beside the
+ * game's other state, and their setting reads "saved:<file>". The builder's
+ * working copy, which Apply writes and loads, is the hidden
+ * saved:.builder.slangp. */
+static constexpr const char* SLANG_SAVED_PREFIX = "saved:";
+static const std::string g_slang_builder_pref = std::string(SLANG_SAVED_PREFIX) + ".builder.slangp";
+
+static std::string slang_saved_dir(void) {
+    char path[1152];
+    gb_host_state_path("shader_presets", path, sizeof(path));
+    return path_utf8(fs::u8path(path));
+}
+
+static bool slang_pref_is_saved(const std::string& pref) {
+    return pref.rfind(SLANG_SAVED_PREFIX, 0) == 0;
+}
+
+static std::string slang_preset_path(const std::string& pref) {
+    if (slang_pref_is_saved(pref)) {
+        return path_utf8(fs::u8path(slang_saved_dir()) / fs::u8path(pref.substr(strlen(SLANG_SAVED_PREFIX))));
+    }
+    if (pref.empty() || fs::u8path(pref).is_absolute()) return pref;
+    return path_utf8(fs::u8path(slang_shader_dir()) / fs::u8path(pref));
+}
+
+/* What the menu calls a preset setting. */
+static std::string slang_pref_label(const std::string& pref) {
+    if (pref.empty()) return "Off";
+    if (pref == g_slang_builder_pref) {
+        return g_slang_builder_origin.empty() || g_slang_builder_origin == g_slang_builder_pref
+                   ? "Built in the menu (not saved)"
+                   : slang_pref_label(g_slang_builder_origin) + ", edited (not saved)";
+    }
+    if (!slang_pref_is_saved(pref)) return pref;
+    std::string name = pref.substr(strlen(SLANG_SAVED_PREFIX));
+    if (name.size() > 7 && name.compare(name.size() - 7, 7, ".slangp") == 0) name.resize(name.size() - 7);
+    return "Saved: " + name;
+}
+
+/* Every .slangp and .slang under the shader folder, relative to it and
+ * '/'-separated, and the presets saved from the builder (as settings). */
+static std::vector<std::string> g_slang_presets;
+static std::vector<std::string> g_slang_shaders;
+static std::vector<std::string> g_slang_saved;
+/* The Preset list: the edited copy while there is one, the saved presets,
+ * then the folder's. */
+static std::vector<std::string> g_slang_choices;
+static std::string g_slang_scanned_dir;
+static bool g_slang_scanned = false;
+
+static bool less_ci(const std::string& a, const std::string& b) {
+    return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), [](char x, char y) {
+        return std::tolower((unsigned char)x) < std::tolower((unsigned char)y);
+    });
+}
+
+static bool has_extension_ci(const std::string& leaf, const char* ext) {
+    const size_t n = strlen(ext);
+    if (leaf.size() <= n) return false;
+    for (size_t i = 0; i < n; i++) {
+        if (std::tolower((unsigned char)leaf[leaf.size() - n + i]) != ext[i]) return false;
+    }
+    return true;
+}
+
+static void slang_rebuild_choices(void) {
+    g_slang_choices.clear();
+    std::error_code ec;
+    if (fs::exists(fs::u8path(slang_preset_path(g_slang_builder_pref)), ec)) {
+        g_slang_choices.push_back(g_slang_builder_pref);
+    }
+    g_slang_choices.insert(g_slang_choices.end(), g_slang_saved.begin(), g_slang_saved.end());
+    g_slang_choices.insert(g_slang_choices.end(), g_slang_presets.begin(), g_slang_presets.end());
+}
+
+static void slang_scan_presets(void) {
+    g_slang_presets.clear();
+    g_slang_shaders.clear();
+    g_slang_saved.clear();
+    g_slang_scanned_dir = slang_shader_dir();
+    g_slang_scanned = true;
+    const fs::path root = fs::u8path(g_slang_scanned_dir);
+    std::error_code ec;
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        const std::string leaf = path_utf8(it->path().filename());
+        if (!leaf.empty() && leaf[0] == '.') {   /* .git and friends */
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        if (has_extension_ci(leaf, ".slangp")) {
+            g_slang_presets.push_back(path_utf8(it->path().lexically_relative(root)));
+        } else if (has_extension_ci(leaf, ".slang")) {
+            g_slang_shaders.push_back(path_utf8(it->path().lexically_relative(root)));
+        }
+    }
+    for (fs::directory_iterator saved(fs::u8path(slang_saved_dir()), ec); !ec && saved != fs::directory_iterator();
+         saved.increment(ec)) {
+        const std::string leaf = path_utf8(saved->path().filename());
+        if (!leaf.empty() && leaf[0] != '.' && has_extension_ci(leaf, ".slangp")) {
+            g_slang_saved.push_back(SLANG_SAVED_PREFIX + leaf);
+        }
+    }
+    std::sort(g_slang_presets.begin(), g_slang_presets.end(), less_ci);
+    std::sort(g_slang_shaders.begin(), g_slang_shaders.end(), less_ci);
+    std::sort(g_slang_saved.begin(), g_slang_saved.end(), less_ci);
+    slang_rebuild_choices();
+}
+
+static void slang_cancel_probe(void);
+static void slang_build_load(const std::string& pref);
+
+/* A preset picked in the menu, which the preset editor then shows. */
+static void slang_select(const std::string& pref) {
+    slang_cancel_probe();
+    g_slang_preset_pref = pref;
+    g_slang_param_prefs.clear();
+    g_slang_load_pending = true;
+    g_slang_explicit = true;
+    g_slang_delete_status.clear();
+    if (!pref.empty()) slang_build_load(pref);
+    save_runtime_preferences();
+}
+
+/* Probe results (see gb_lrs_probe_start), one line per preset file in the
+ * state folder: "ok|ok-unoptimized|failed <mtime> <key>" (slang_probe_key).
+ * A preset is probed again when its file changes. */
+struct SlangProbe {
+    long long mtime;
+    GBLrsProbeResult result;   /* OK, OK_UNOPTIMIZED or FAILED */
+};
+static std::map<std::string, SlangProbe> g_slang_probe_cache;
+static bool g_slang_probe_cache_loaded = false;
+static const std::pair<GBLrsProbeResult, const char*> k_slang_probe_names[] = {
+    { GB_LRS_PROBE_OK, "ok" },
+    { GB_LRS_PROBE_OK_UNOPTIMIZED, "ok-unoptimized" },
+    { GB_LRS_PROBE_FAILED, "failed" },
+};
+
+static std::string slang_probe_cache_path(void) {
+    char path[1152];
+    gb_host_state_path("librashader_probe.txt", path, sizeof(path));
+    return path;
+}
+
+static void slang_probe_cache_load(void) {
+    if (g_slang_probe_cache_loaded) return;
+    g_slang_probe_cache_loaded = true;
+    std::ifstream in(fs::u8path(slang_probe_cache_path()));
+    std::string result, preset;
+    long long mtime = 0;
+    while (in >> result >> mtime && std::getline(in >> std::ws, preset)) {
+        for (const auto& [value, name] : k_slang_probe_names) {
+            if (result == name) g_slang_probe_cache[preset] = { mtime, value };
+        }
+    }
+}
+
+static void slang_probe_cache_save(void) {
+    std::ofstream out(fs::u8path(slang_probe_cache_path()), std::ios::trunc);
+    for (const auto& [preset, entry] : g_slang_probe_cache) {
+        for (const auto& [value, name] : k_slang_probe_names) {
+            if (entry.result == value) out << name << ' ' << entry.mtime << ' ' << preset << '\n';
+        }
+    }
+}
+
+static long long slang_file_stamp(const std::string& path) {
+    std::error_code ec;
+    const auto stamp = fs::last_write_time(fs::u8path(path), ec);
+    return ec ? 0 : (long long)stamp.time_since_epoch().count();
+}
+
+/* A preset's key in the probe cache: relative to the shader folder when it
+ * lies inside it, so the verdicts outlive the folder moving (an AppImage mounts
+ * it somewhere new on every start); the path itself otherwise. */
+static std::string slang_probe_key(const std::string& path) {
+    const std::string dir = path_utf8(fs::u8path(slang_shader_dir())) + "/";
+    if (path.size() > dir.size() && path.compare(0, dir.size(), dir) == 0) return path.substr(dir.size());
+    return path;
+}
+
+/* The cached verdict for `path`, SKIPPED when there is none. */
+static GBLrsProbeResult slang_probe_result(const std::string& path) {
+    slang_probe_cache_load();
+    const auto it = g_slang_probe_cache.find(slang_probe_key(path));
+    return it == g_slang_probe_cache.end() ? GB_LRS_PROBE_SKIPPED : it->second.result;
+}
+
+static bool slang_probe_failed(const std::string& path) {
+    return slang_probe_result(path) == GB_LRS_PROBE_FAILED;
+}
+
+/* The preset that is actually running, so a choice that fails to load can
+ * fall back to it instead of being saved as the setting. */
+static std::string g_slang_running_pref;
+/* The preset a background probe is compiling, "" when none is. */
+static std::string g_slang_probing_pref;
+static void slang_cancel_probe(void) {
+    if (g_slang_probing_pref.empty()) return;
+    gb_lrs_probe_cancel();
+    g_slang_probing_pref.clear();
+}
+
+static void slang_revert(void) {
+    /* Keep the setting while librashader itself is missing, so the preset
+     * comes back with the library; otherwise go back to what is running (the
+     * menu shows why) along with that preset's parameter overrides. */
+    if (!gb_lrs_available() || g_slang_preset_pref == g_slang_running_pref) return;
+    g_slang_preset_pref = g_slang_running_pref;
+    g_slang_param_prefs.clear();
+    for (int i = 0; i < gb_lrs_param_count(); i++) {
+        const GBLrsParam* p = gb_lrs_param(i);
+        if (p->value != p->initial) g_slang_param_prefs[p->name] = p->value;
+    }
+    save_runtime_preferences();
+}
+
+static void slang_load_now(void) {
+    const std::string path = slang_preset_path(g_slang_preset_pref);
+    if (!gb_lrs_load(path.c_str(), slang_probe_result(path) == GB_LRS_PROBE_OK_UNOPTIMIZED)) {
+        slang_revert();
+        return;
+    }
+    g_slang_running_pref = g_slang_preset_pref;
+    for (const auto& [name, value] : g_slang_param_prefs) {
+        const int index = gb_lrs_find_param(name.c_str());
+        if (index >= 0) gb_lrs_set_param(index, value);
+    }
+}
+
+static void slang_apply_pending(void) {
+    if (!g_gl_context) return;
+    if (!g_slang_probing_pref.empty()) {
+        const GBLrsProbeResult result = gb_lrs_probe_poll();
+        if (result == GB_LRS_PROBE_RUNNING) return;
+        const std::string path = slang_preset_path(g_slang_probing_pref);
+        g_slang_probing_pref.clear();
+        if (result != GB_LRS_PROBE_SKIPPED) {
+            g_slang_probe_cache[slang_probe_key(path)] = { slang_file_stamp(path), result };
+            slang_probe_cache_save();
+        }
+        if (result == GB_LRS_PROBE_FAILED) slang_revert();
+        else slang_load_now();
+        return;
+    }
+    if (!g_slang_load_pending) return;
+    g_slang_load_pending = false;
+    const bool explicit_pick = g_slang_explicit;
+    g_slang_explicit = false;
+
+    const std::string path = slang_preset_path(g_slang_preset_pref);
+    if (!path.empty() && gb_lrs_available()) {
+        slang_probe_cache_load();
+        const auto it = g_slang_probe_cache.find(slang_probe_key(path));
+        const bool known = it != g_slang_probe_cache.end() && it->second.mtime == slang_file_stamp(path);
+        const bool failed = known && it->second.result == GB_LRS_PROBE_FAILED;
+        if (failed && !explicit_pick) {
+            gb_lrs_set_error((slang_pref_label(g_slang_preset_pref) + " failed a test run before, so it was "
+                              "not loaded. Pick it again to retest it.").c_str());
+            slang_revert();
+            return;
+        }
+        if ((!known || failed) && gb_lrs_probe_start(path.c_str()) == GB_LRS_PROBE_RUNNING) {
+            g_slang_probing_pref = g_slang_preset_pref;
+            return;
+        }
+    }
+    slang_load_now();
+}
+
+/* Live parameter change; the override is remembered only while it differs
+ * from what the preset loaded with. Saved when the slider is let go. */
+static void slang_set_param(int index, float value) {
+    const GBLrsParam* p = gb_lrs_param(index);
+    if (!p || !gb_lrs_set_param(index, value)) return;
+    if (p->value == p->initial) g_slang_param_prefs.erase(p->name);
+    else g_slang_param_prefs[p->name] = p->value;
+}
+
+static bool contains_ci(const std::string& hay, const std::string& needle) {
+    return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(), [](char a, char b) {
+        return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
+    }) != hay.end();
+}
+
 /* Game Dimming and Menu Opacity: the menus redraw with them while they are
  * dragged; saved when let go. */
 static void menu_look_sliders(void) {
@@ -3117,6 +3485,635 @@ static void menu_look_sliders(void) {
     slider("Menu Opacity %", &g_menu_opacity_percent,
            "How solid the menus' own backgrounds are. Lower it too to\n"
            "see the game through the menu itself.");
+}
+
+static bool slang_probe_failed(const std::string& path);
+
+/* A combo over `items` with a filter field (every word must match, any case),
+ * showing each through `label`; the picked index, or -1. With `off`, an
+ * "Off" row on top picks -2. With `mark_failed`, the rows on screen say which
+ * presets failed a test run. */
+static int slang_filtered_combo(const char* id, const char* preview, char* filter, size_t filter_size,
+                                const std::vector<std::string>& items, const std::string& current,
+                                std::string (*label)(const std::string&), bool off, bool mark_failed) {
+    if (!ImGui::BeginCombo(id, preview, ImGuiComboFlags_HeightLarge)) return -1;
+    int picked = -1;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##filter", "Filter, e.g. \"crt\" or \"handheld gbc\"", filter, filter_size);
+    std::vector<std::string> words;
+    for (const char* p = filter; *p;) {
+        while (*p == ' ') p++;
+        const char* start = p;
+        while (*p && *p != ' ') p++;
+        if (p > start) words.emplace_back(start, p);
+    }
+    std::vector<int> shown;
+    std::vector<std::string> labels;
+    int selected_row = -1;
+    for (int i = 0; i < (int)items.size(); i++) {
+        std::string text = label(items[(size_t)i]);
+        bool match = true;
+        for (const std::string& w : words) match = match && contains_ci(text, w);
+        if (!match) continue;
+        if (items[(size_t)i] == current) selected_row = (int)shown.size();
+        shown.push_back(i);
+        labels.push_back(std::move(text));
+    }
+    if (off && ImGui::Selectable("Off", current.empty())) picked = -2;
+    ImGuiListClipper clipper;
+    clipper.Begin((int)shown.size());
+    if (selected_row >= 0) clipper.IncludeItemByIndex(selected_row);
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+            const bool selected = row == selected_row;
+            const int index = shown[(size_t)row];
+            const bool failed = mark_failed && slang_probe_failed(slang_preset_path(items[(size_t)index]));
+            ImGui::PushID(row);
+            if (ImGui::Selectable(failed ? (labels[(size_t)row] + "  (failed a test run)").c_str()
+                                         : labels[(size_t)row].c_str(),
+                                  selected)) {
+                picked = index;
+            }
+            ImGui::PopID();
+            if (selected && ImGui::IsWindowAppearing()) {
+                ImGui::SetItemDefaultFocus();
+                ImGui::SetScrollHereY(0.5f);
+            }
+        }
+    }
+    ImGui::EndCombo();
+    return picked;
+}
+
+static std::string slang_plain_label(const std::string& name) {
+    return name;
+}
+
+/* ---- Preset editor ----
+ * RetroArch's Shader menu as a list, holding the passes of the preset that
+ * was picked: shader passes added one at a time and whole presets appended or
+ * prepended (slang_preset.h), each pass's filter, scale and wrap settings.
+ * Apply writes the chain to the hidden saved:.builder.slangp and loads that
+ * (through the same probe as any other preset), so the picked preset's own
+ * file is never changed; Save writes a preset of the user's own to
+ * shader_presets/ with the parameters as tuned. */
+static SlangPreset g_slang_build;
+static std::string g_slang_build_source;     /* the preset the chain came from, "" for none */
+static bool g_slang_build_loaded = false;    /* has shown a preset since start-up */
+static bool g_slang_build_edited = false;    /* differs from its source */
+static bool g_slang_build_dirty = false;     /* changed since it was applied */
+static bool g_slang_build_auto = true;       /* apply changes as they are made */
+static bool g_slang_build_open = false;      /* Edit Preset was pressed */
+static uint64_t g_slang_build_changed_ms = 0;
+static std::string g_slang_build_status;
+static char g_slang_build_name[96] = "";
+
+static void slang_build_changed(void) {
+    g_slang_build_edited = true;
+    g_slang_build_dirty = true;
+    g_slang_build_changed_ms = SDL_GetTicks64();
+    g_slang_build_status.clear();
+}
+
+/* The parameters as tuned now, as the preset's own values. */
+static void slang_build_add_tuning(SlangPreset* preset) {
+    for (const auto& [name, value] : g_slang_param_prefs) {
+        char text[32];
+        snprintf(text, sizeof(text), "%.9g", (double)value);
+        slang_preset_set_parameter(preset, name, text);
+    }
+}
+
+/* Show `pref`'s passes; the edited copy shows what it was made from. The
+ * name to save under starts as that preset's own. */
+static void slang_build_load(const std::string& pref) {
+    g_slang_build = SlangPreset{};
+    g_slang_build_status.clear();
+    std::string error;
+    if (!pref.empty() && !slang_preset_read(slang_preset_path(pref), &g_slang_build, &error)) {
+        g_slang_build_status = error;
+    }
+    g_slang_build_loaded = true;
+    g_slang_build_dirty = false;
+    g_slang_build_edited = pref == g_slang_builder_pref;
+    g_slang_build_source = g_slang_build_edited ? g_slang_builder_origin : pref;
+    const std::string& source = g_slang_build_source;
+    const size_t skip = slang_pref_is_saved(source) ? strlen(SLANG_SAVED_PREFIX) : 0;
+    snprintf(g_slang_build_name, sizeof(g_slang_build_name), "%s",
+             path_utf8(fs::u8path(source.substr(skip)).stem()).c_str());
+}
+
+static void slang_build_apply(void) {
+    std::string error;
+    if (!slang_preset_write(slang_preset_path(g_slang_builder_pref), g_slang_build, &error)) {
+        g_slang_build_status = error;
+        return;
+    }
+    slang_cancel_probe();
+    /* Parameter tuning carries over by name. */
+    g_slang_preset_pref = g_slang_builder_pref;
+    g_slang_builder_origin = g_slang_build_source;
+    g_slang_load_pending = true;
+    g_slang_explicit = true;
+    g_slang_build_dirty = false;
+    slang_rebuild_choices();
+    save_runtime_preferences();
+}
+
+/* A file name from what was typed: no path characters, no .slangp. */
+static std::string slang_file_name(const char* text) {
+    std::string name;
+    for (const char* p = text; *p; p++) {
+        const unsigned char c = (unsigned char)*p;
+        if (c >= 32 && !strchr("<>:\"/\\|?*", c)) name += (char)c;
+    }
+    const size_t b = name.find_first_not_of(" .");
+    name = b == std::string::npos ? "" : name.substr(b, name.find_last_not_of(" .") - b + 1);
+    if (has_extension_ci(name, ".slangp")) name.resize(name.size() - 7);
+    return name;
+}
+
+static void slang_build_save(const std::string& name) {
+    const std::string pref = SLANG_SAVED_PREFIX + name + ".slangp";
+    SlangPreset preset = g_slang_build;
+    slang_build_add_tuning(&preset);
+    std::string error;
+    const std::string path = slang_preset_path(pref);
+    if (!slang_preset_write(path, preset, &error)) {
+        g_slang_build_status = error;
+        return;
+    }
+    slang_cancel_probe();
+    g_slang_preset_pref = pref;
+    g_slang_param_prefs.clear();   /* in the preset now */
+    g_slang_load_pending = true;
+    g_slang_explicit = true;
+    g_slang_build_source = pref;
+    g_slang_build_edited = false;
+    g_slang_build_dirty = false;
+    g_slang_build_status = "Saved " + path + ".";
+    if (std::find(g_slang_saved.begin(), g_slang_saved.end(), pref) == g_slang_saved.end()) {
+        g_slang_saved.push_back(pref);
+        std::sort(g_slang_saved.begin(), g_slang_saved.end(), less_ci);
+        slang_rebuild_choices();
+    }
+    save_runtime_preferences();
+}
+
+/* A shader path as the list shows it: relative to the shader folder when it
+ * is in it. */
+static std::string slang_display_path(const std::string& path) {
+    const fs::path rel = fs::u8path(path).lexically_relative(fs::u8path(g_slang_scanned_dir));
+    const std::string text = path_utf8(rel);
+    return rel.empty() || text.rfind("..", 0) == 0 ? path : text;
+}
+
+static std::string lower_ascii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+/* One pass's settings, as a .slangp gives them; "Preset default" leaves one
+ * unset, for librashader's default. Returns true on a change. */
+static bool draw_slang_pass_settings(SlangPresetPass& pass) {
+    bool changed = false;
+    auto choice = [&](const char* label, const char* key, const char* const* names, const char* const* values,
+                      int count, const char* tip) {
+        const std::string current = lower_ascii(pass.get(key));
+        int index = 0;
+        for (int i = 1; i < count; i++) {
+            if (current == values[i]) index = i;
+        }
+        if (ImGui::Combo(label, &index, names, count)) {
+            pass.set(key, values[index]);
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    };
+    auto flag = [&](const char* label, const char* key, const char* tip) {
+        const std::string current = lower_ascii(pass.get(key));
+        bool on = current == "true" || current == "1";
+        if (ImGui::Checkbox(label, &on)) {
+            pass.set(key, on ? "true" : "");
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    };
+
+    {
+        static const char* const names[] = { "Preset default", "Nearest", "Linear" };
+        const std::string current = lower_ascii(pass.get("filter_linear"));
+        int index = current.empty() ? 0 : (current == "true" || current == "1") ? 2 : 1;
+        if (ImGui::Combo("Filter", &index, names, 3)) {
+            pass.set("filter_linear", index == 0 ? "" : index == 2 ? "true" : "false");
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How the next pass samples this pass's output.");
+    }
+    static const char* const scale_names[] = { "Preset default", "Source (its input)", "Viewport (the screen)",
+                                               "Absolute (pixels)" };
+    static const char* const scale_values[] = { "", "source", "viewport", "absolute" };
+    choice("Scale Type", "scale_type", scale_names, scale_values, 4,
+           "What this pass's output size is relative to. Preset default: its input.");
+    const std::string scale_type = lower_ascii(pass.get("scale_type"));
+    if (scale_type == "absolute") {
+        int pixels = atoi(pass.get("scale").c_str());
+        if (pixels <= 0) pixels = 1;
+        if (ImGui::InputInt("Size (pixels)", &pixels, 1, 16)) {
+            pass.set("scale", std::to_string(std::max(1, pixels)));
+            changed = true;
+        }
+    } else if (!scale_type.empty()) {
+        const std::string text = pass.get("scale");
+        float scale = text.empty() ? 1.0f : (float)atof(text.c_str());
+        if (ImGui::InputFloat("Scale", &scale, 0.5f, 1.0f, "%.2f")) {
+            char value[32];
+            snprintf(value, sizeof(value), "%g", (double)std::max(0.01f, scale));
+            pass.set("scale", value);
+            changed = true;
+        }
+    }
+    if (scale_type.empty() && !(pass.get("scale_type_x") + pass.get("scale_type_y")).empty()) {
+        ImGui::TextDisabled("Scaled separately in X and Y by its preset (kept as it is).");
+    }
+    static const char* const wrap_names[] = { "Preset default", "Clamp to border", "Clamp to edge", "Repeat",
+                                              "Mirrored repeat" };
+    static const char* const wrap_values[] = { "", "clamp_to_border", "clamp_to_edge", "repeat",
+                                               "mirrored_repeat" };
+    choice("Wrap Mode", "wrap_mode", wrap_names, wrap_values, 5,
+           "What the next pass reads outside this pass's output.");
+    flag("Float Framebuffer", "float_framebuffer", "Keep this pass's output in floating point.");
+    ImGui::SameLine();
+    flag("sRGB Framebuffer", "srgb_framebuffer", "Keep this pass's output in sRGB.");
+    ImGui::SameLine();
+    flag("Mipmap Input", "mipmap_input", "Give this pass mipmaps of its input.");
+    int frame_count_mod = atoi(pass.get("frame_count_mod").c_str());
+    if (ImGui::InputInt("Frame Count Mod", &frame_count_mod, 1, 10)) {
+        frame_count_mod = std::max(0, frame_count_mod);
+        pass.set("frame_count_mod", frame_count_mod ? std::to_string(frame_count_mod) : "");
+        changed = true;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The frame count this pass sees wraps at this number (0: never).");
+    char alias[64];
+    snprintf(alias, sizeof(alias), "%s", pass.get("alias").c_str());
+    if (ImGui::InputText("Alias", alias, sizeof(alias), ImGuiInputTextFlags_CharsNoBlank)) {
+        pass.set("alias", alias);
+        changed = true;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The name later passes read this pass's output by.");
+    return changed;
+}
+
+static void draw_slang_builder(void) {
+    if (!g_slang_build_loaded) slang_build_load(g_slang_preset_pref);
+    char label[96];
+    const size_t passes = g_slang_build.passes.size();
+    snprintf(label, sizeof(label), "Edit Preset (%zu pass%s)###slang_builder", passes, passes == 1 ? "" : "es");
+    if (g_slang_build_open) ImGui::SetNextItemOpen(true);
+    const bool open = ImGui::TreeNode(label);
+    if (g_slang_build_open) {
+        ImGui::SetScrollHereY(0.0f);
+        g_slang_build_open = false;
+    }
+    if (!open) return;
+    ImGui::PushTextWrapPos(0.0f);
+    const std::string& source = g_slang_build_source;
+    if (source.empty()) {
+        ImGui::Text("Editing: a preset of your own%s", passes ? " (not saved)" : "");
+    } else {
+        ImGui::Text("Editing: %s%s", slang_pref_label(source).c_str(), g_slang_build_edited ? ", changed" : "");
+    }
+    ImGui::TextDisabled("The passes of the preset you pick. Change their settings, reorder or remove them, "
+                        "or add shader passes and whole presets, as RetroArch's Shader menu does. Changes "
+                        "run as a copy, so the preset's own file stays as it is until you save.");
+    ImGui::BeginDisabled(!g_slang_build_edited || source.empty());
+    if (ImGui::Button("Undo Changes")) slang_select(source);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Go back to the preset as it is saved.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Start Empty")) {
+        g_slang_build = SlangPreset{};
+        g_slang_build_source.clear();
+        g_slang_build_name[0] = '\0';
+        slang_build_changed();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove every pass, to build a chain from nothing.");
+
+    int remove = -1, move_from = -1, move_to = -1;
+    for (int i = 0; i < (int)g_slang_build.passes.size(); i++) {
+        SlangPresetPass& pass = g_slang_build.passes[(size_t)i];
+        ImGui::PushID(i);
+        ImGui::BeginDisabled(i == 0);
+        if (ImGui::ArrowButton("##up", ImGuiDir_Up)) move_from = i, move_to = i - 1;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(i + 1 == (int)g_slang_build.passes.size());
+        if (ImGui::ArrowButton("##down", ImGuiDir_Down)) move_from = i, move_to = i + 1;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Remove")) remove = i;
+        ImGui::SameLine();
+        std::error_code ec;
+        const bool missing = !fs::exists(fs::u8path(pass.shader), ec);
+        if (ImGui::TreeNode("##pass", "%d. %s%s", i + 1, slang_display_path(pass.shader).c_str(),
+                            missing ? "  (file missing)" : "")) {
+            if (draw_slang_pass_settings(pass)) slang_build_changed();
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (move_from >= 0) {
+        std::swap(g_slang_build.passes[(size_t)move_from], g_slang_build.passes[(size_t)move_to]);
+        slang_build_changed();
+    }
+    if (remove >= 0) {
+        g_slang_build.passes.erase(g_slang_build.passes.begin() + remove);
+        slang_build_changed();
+    }
+    if (g_slang_build.passes.empty()) {
+        ImGui::TextDisabled("No passes yet: add a shader pass or a whole preset below.");
+    }
+
+    static char shader_filter[128] = "", append_filter[128] = "", prepend_filter[128] = "";
+    const int shader = slang_filtered_combo("Add Shader Pass", "Pick a .slang shader...", shader_filter,
+                                            sizeof(shader_filter), g_slang_shaders, "", slang_plain_label,
+                                            false, false);
+    if (shader >= 0) {
+        SlangPresetPass pass;
+        pass.shader = path_utf8(fs::u8path(g_slang_scanned_dir) / fs::u8path(g_slang_shaders[(size_t)shader]));
+        g_slang_build.passes.push_back(std::move(pass));
+        slang_build_changed();
+    }
+    for (const bool before : { false, true }) {
+        const int picked = slang_filtered_combo(before ? "Prepend Preset" : "Append Preset",
+                                                before ? "Put a preset's passes first..."
+                                                       : "Add a preset's passes after these...",
+                                                before ? prepend_filter : append_filter,
+                                                sizeof(append_filter), g_slang_choices, "", slang_pref_label,
+                                                false, false);
+        if (picked < 0) continue;
+        SlangPreset other;
+        std::string error;
+        if (!slang_preset_read(slang_preset_path(g_slang_choices[(size_t)picked]), &other, &error)) {
+            g_slang_build_status = error;
+            continue;
+        }
+        slang_preset_combine(&g_slang_build, other, before);
+        slang_build_changed();
+    }
+
+    ImGui::Spacing();
+    /* Whether the chain here is what the preset setting loads. */
+    const bool on = g_slang_preset_pref == g_slang_builder_pref
+                        ? !g_slang_build_dirty
+                        : !g_slang_build_edited && !source.empty() && g_slang_preset_pref == source;
+    ImGui::Checkbox("Apply Changes Automatically", &g_slang_build_auto);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Load the chain a moment after each change. Each one compiles in the\n"
+                          "background first; the current look stays until it is ready.");
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_slang_build.passes.empty() || on);
+    if (ImGui::Button("Apply")) slang_build_apply();
+    ImGui::EndDisabled();
+    if (g_slang_build_auto && g_slang_build_dirty && !g_slang_build.passes.empty() &&
+        SDL_GetTicks64() - g_slang_build_changed_ms >= 400 && !ImGui::IsAnyItemActive()) {
+        slang_build_apply();
+    }
+    if (g_slang_build_dirty && !g_slang_build.passes.empty()) {
+        ImGui::TextDisabled("Not applied yet.");
+    } else if (!on && !g_slang_build.passes.empty()) {
+        ImGui::TextDisabled("Not on now: Apply turns this chain on.");
+    } else if (on && g_slang_build_edited) {
+        ImGui::TextDisabled("Your changes are on, not saved yet.");
+    }
+
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
+    ImGui::InputTextWithHint("##save_name", "Name to save it under", g_slang_build_name, sizeof(g_slang_build_name));
+    ImGui::SameLine();
+    const std::string name = slang_file_name(g_slang_build_name);
+    std::error_code ec;
+    const bool exists = !name.empty() &&
+                        fs::exists(fs::u8path(slang_preset_path(SLANG_SAVED_PREFIX + name + ".slangp")), ec);
+    ImGui::BeginDisabled(name.empty() || g_slang_build.passes.empty());
+    if (ImGui::Button(exists ? "Overwrite Preset" : "Save Preset")) slang_build_save(name);
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Presets are saved to %s (a folder's own presets are never overwritten) and are "
+                        "listed first under Preset.", slang_saved_dir().c_str());
+    if (!g_slang_build_status.empty()) ImGui::TextWrapped("%s", g_slang_build_status.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::TreePop();
+}
+
+/* ---- Deleting presets of your own ----
+ * Only the ones in shader_presets/; a folder's presets are never touched.
+ * Deleted files go to the Recycle Bin or Trash where there is one
+ * (gb_host_trash). */
+static std::vector<std::string> g_slang_delete;   /* what the open confirmation would delete */
+
+static bool slang_delete_saved(const std::string& pref) {
+    if (!slang_pref_is_saved(pref)) return false;
+    const std::string path = slang_preset_path(pref);
+    if (g_slang_probing_pref == pref) slang_cancel_probe();
+    std::error_code ec;
+    const bool gone = gb_host_has_trash() ? gb_host_trash(path.c_str()) != 0 : fs::remove(fs::u8path(path), ec);
+    if (!gone) return false;
+    g_slang_saved.erase(std::remove(g_slang_saved.begin(), g_slang_saved.end(), pref), g_slang_saved.end());
+    if (g_slang_probe_cache.erase(slang_probe_key(path))) slang_probe_cache_save();
+    if (g_slang_preset_pref == pref) slang_select("");
+    if (g_slang_builder_origin == pref) g_slang_builder_origin.clear();
+    /* The editor keeps changes made to it, as a chain of your own. */
+    if (g_slang_build_source == pref) {
+        if (g_slang_build_edited) g_slang_build_source.clear();
+        else slang_build_load("");
+    }
+    return true;
+}
+
+static void slang_delete_confirmed(void) {
+    size_t deleted = 0;
+    std::string failed;
+    for (const std::string& pref : g_slang_delete) {
+        if (slang_delete_saved(pref)) deleted++;
+        else failed += (failed.empty() ? "" : ", ") + slang_pref_label(pref);
+    }
+    slang_rebuild_choices();
+    save_runtime_preferences();
+    g_slang_delete_status = "Deleted " + std::to_string(deleted) + (deleted == 1 ? " preset" : " presets");
+    if (deleted && gb_host_has_trash()) g_slang_delete_status += std::string(" (in the ") + gb_host_trash_name() + ")";
+    g_slang_delete_status += ".";
+    if (!failed.empty()) g_slang_delete_status += " Could not delete " + failed + ".";
+    g_slang_delete.clear();
+}
+
+static void draw_slang_delete_confirmation(void) {
+    if (!g_slang_delete.empty() && !ImGui::IsPopupOpen("###slang_delete")) ImGui::OpenPopup("###slang_delete");
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    const bool one = g_slang_delete.size() == 1;
+    if (!ImGui::BeginPopupModal(one ? "Delete this preset?###slang_delete" : "Delete your presets?###slang_delete",
+                                NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        g_slang_delete.clear();
+        return;
+    }
+    if (one) {
+        ImGui::Text("Delete %s?", slang_pref_label(g_slang_delete[0]).c_str());
+    } else {
+        ImGui::Text("Delete all %zu presets you saved?", g_slang_delete.size());
+    }
+    if (gb_host_has_trash()) {
+        ImGui::Text("Deleted presets go to the %s, where they can be restored.", gb_host_trash_name());
+    } else {
+        ImGui::TextUnformatted("This can't be undone.");
+    }
+    ImGui::TextDisabled("The presets in the shader folder stay as they are.");
+    if (ImGui::Button("Delete")) {
+        slang_delete_confirmed();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+        g_slang_delete.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+static void draw_librashader_settings(void) {
+    if (g_slang_open_section) ImGui::SetNextItemOpen(true);
+    const bool open = ImGui::CollapsingHeader("Shader Presets (librashader)");
+    if (g_slang_open_section) {
+        ImGui::SetScrollHereY(0.0f);
+        g_slang_open_section = false;
+    }
+    if (!open) return;
+
+    ImGui::PushTextWrapPos(0.0f);
+    if (!gb_lrs_available()) {
+        ImGui::TextDisabled("%s.", gb_lrs_status());
+#if defined(_WIN32)
+        ImGui::TextDisabled("Presets need librashader.dll (built with its OpenGL runtime) beside the executable.");
+#else
+        ImGui::TextDisabled("Presets need librashader.so (built with its OpenGL runtime) beside the executable.");
+#endif
+        ImGui::PopTextWrapPos();
+        return;
+    }
+    ImGui::TextDisabled("RetroArch .slangp presets. While one is on it replaces the Shader setting above.");
+
+    if (!g_slang_scanned || g_slang_scanned_dir != slang_shader_dir()) slang_scan_presets();
+
+    static char filter[128] = "";
+    const std::string preview = slang_pref_label(g_slang_preset_pref);
+    const int picked = slang_filtered_combo("Preset", preview.c_str(), filter, sizeof(filter), g_slang_choices,
+                                            g_slang_preset_pref, slang_pref_label, true, true);
+    if (picked == -2) slang_select("");
+    else if (picked >= 0) slang_select(g_slang_choices[(size_t)picked]);
+    ImGui::TextDisabled("%zu presets in %s%s", g_slang_presets.size(), g_slang_scanned_dir.c_str(),
+                        g_slang_saved.empty() ? "" : ", and the ones you saved");
+
+    if (!g_slang_preset_pref.empty()) {
+        if (ImGui::Button("Edit Preset")) {
+            /* Unless the editor holds changes, show the preset that is on. */
+            if (!g_slang_build_edited && g_slang_build_source != g_slang_preset_pref) {
+                slang_build_load(g_slang_preset_pref);
+            }
+            g_slang_build_open = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open this preset's passes below, to change how it is set up.");
+        ImGui::SameLine();
+        if (ImGui::Button("Reload")) g_slang_load_pending = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Turn Off")) slang_select("");
+        if (slang_pref_is_saved(g_slang_preset_pref) && g_slang_preset_pref != g_slang_builder_pref) {
+            ImGui::SameLine();
+            if (ImGui::Button("Delete Preset")) g_slang_delete = { g_slang_preset_pref };
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete this preset of yours.");
+        }
+    }
+    if (ImGui::Button("Rescan Folder")) slang_scan_presets();
+    if (!g_slang_saved.empty()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Delete All My Presets")) g_slang_delete = g_slang_saved;
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Delete every preset you saved, leaving the folder's own.");
+        }
+    }
+    draw_slang_delete_confirmation();
+    if (!g_slang_delete_status.empty()) ImGui::TextDisabled("%s", g_slang_delete_status.c_str());
+
+    if (ImGui::Checkbox("Preset draws the whole window", &g_slang_fill_window)) {
+        save_runtime_preferences();
+    }
+    ImGui::TextDisabled("For bezel presets (Mega Bezel, koko-aio) that draw a television around the "
+                        "picture. Others stretch to the window with this on.");
+
+    static char dir_buf[512] = "";
+    static bool dir_synced = false;
+    if (!dir_synced) {
+        snprintf(dir_buf, sizeof(dir_buf), "%s", g_slang_dir_pref.c_str());
+        dir_synced = true;
+    }
+    if (ImGui::InputTextWithHint("Shader folder", "shaders beside the game", dir_buf, sizeof(dir_buf),
+                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+        g_slang_dir_pref = dir_buf;
+        g_slang_scanned = false;
+        save_runtime_preferences();
+    }
+    ImGui::TextDisabled("Any folder of .slangp presets, such as RetroArch's shaders_slang. "
+                        "Press Enter to apply; leave empty for the default.");
+
+    if (!g_slang_probing_pref.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f),
+                           "Compiling %s in the background (%.0f s). The current look stays until it is "
+                           "ready; the largest presets take about a minute the first time.",
+                           slang_pref_label(g_slang_probing_pref).c_str(), gb_lrs_probe_seconds());
+    } else if (gb_lrs_error()[0]) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", gb_lrs_error());
+    }
+    if (gb_lrs_unoptimized()) {
+        ImGui::TextDisabled("Compiled with the HLSL optimizer off: Microsoft's shader compiler crashes on "
+                            "%s otherwise.", slang_pref_label(g_slang_running_pref).c_str());
+    }
+    ImGui::PopTextWrapPos();
+
+    const int count = gb_lrs_param_count();
+    char label[64];
+    snprintf(label, sizeof(label), "Parameters (%d)###slang_params", count);
+    if (gb_lrs_active() && count > 0 && ImGui::TreeNode(label)) {
+        if (ImGui::Button("Reset All")) {
+            for (int i = 0; i < count; i++) gb_lrs_set_param(i, gb_lrs_param(i)->initial);
+            g_slang_param_prefs.clear();
+            save_runtime_preferences();
+        }
+        for (int i = 0; i < count; i++) {
+            const GBLrsParam* p = gb_lrs_param(i);
+            if (p->maximum <= p->minimum) {   /* a heading: the range leaves nothing to set */
+                ImGui::TextDisabled("%s", p->description);
+                continue;
+            }
+            ImGui::PushID(i);
+            float value = p->value;
+            const float step = p->step;
+            const char* format = step >= 1.0f ? "%.0f" : step >= 0.1f ? "%.1f" : step >= 0.01f ? "%.2f" : "%.3f";
+            if (ImGui::SliderFloat(p->description, &value, p->minimum, p->maximum, format)) {
+                if (step > 0.0f) value = p->minimum + std::round((value - p->minimum) / step) * step;
+                slang_set_param(i, value);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) save_runtime_preferences();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("%s (default %g)", p->name, (double)p->initial);
+            }
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
+
+    draw_slang_builder();
 }
 
 /* The largest whole scale at which content fits the window, at least 1. */
@@ -3417,6 +4414,9 @@ static const RecompRuntimeUiItem g_runtime_extra_items[] = {
     { RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING, "Graphics", "LCD shader",
       "Simulate the response and subpixels of the original LCD.",
       RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "gbc.shader_preset", "Graphics", "Shader presets",
+      "Pick, build and tune RetroArch .slangp presets.",
+      RECOMP_RUNTIME_UI_ACTION, 0, 0, 0, NULL, 0, NULL },
     /* Short descriptions: the row's -/+ buttons sit over the end of them. */
     { "gbc.menu_dim", "Display", "Game dimming",
       "How dark the game gets behind a menu.",
@@ -3566,6 +4566,10 @@ static int runtime_ui_action(void*, const RecompRuntimeUiItem* item) {
     } else if (strcmp(item->key, "gbc.advanced") == 0) {
         recomp_runtime_ui_close(g_runtime_ui);
         g_show_menu = true;
+    } else if (strcmp(item->key, "gbc.shader_preset") == 0) {
+        recomp_runtime_ui_close(g_runtime_ui);
+        g_show_menu = true;
+        g_slang_open_section = true;
     } else if (strcmp(item->key, "gbc.restart") == 0) {
         if (!runtime_ui_confirmed(item->key, "Press again to restart")) return 0;
         request_restart_game();
@@ -3588,7 +4592,7 @@ static int runtime_ui_enabled(void*, const RecompRuntimeUiItem* item) {
         return g_active_hardware_mode_pref == GB_HARDWARE_MODE_CGB ||
                g_active_hardware_mode_pref == GB_HARDWARE_MODE_GBA;
     if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING) == 0)
-        return g_shader_pipeline != NULL;
+        return g_shader_pipeline != NULL && !gb_lrs_active();   /* a preset replaces it */
     return 1;
 }
 
@@ -3975,6 +4979,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             g_native_presented != was_native || setting_changed) {
             recreate_streaming_texture();
             update_game_viewport();
+            /* History and feedback passes would blend pictures of both sizes. */
+            gb_lrs_clear_history();
         } else if (g_custom_present_scale != shown_scale) {
             update_game_viewport();
         }
@@ -4159,6 +5165,10 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     glBindTexture(GL_TEXTURE_2D, 0);
     g_last_timing.upload_ms = sdl_now_ms() - upload_start_ms;
 
+    /* A preset picked in last frame's menu compiles here, before this frame
+     * binds anything of its own. */
+    slang_apply_pending();
+
     /* Clear + compose. */
     double compose_start_ms = sdl_now_ms();
     int draw_w = 0, draw_h = 0;
@@ -4192,12 +5202,33 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
     if (g_shader_pipeline) {
         const int active_shader = gb_shader_pipeline_active(g_shader_pipeline);
-        /* The game image at (x, y, w, h), sampled by the built-in shader. */
+        /* The game image at (x, y, w, h). With a librashader preset the chain
+         * renders it at exactly w x h and the result is copied 1:1 with the
+         * passthrough; otherwise the built-in shader samples the game texture.
+         * Blending is off for the copy: presets do not all write alpha 1. */
         auto draw_game = [&](int x, int y, int w, int h, int src_w, int src_h) {
-            gb_shader_pipeline_draw(g_shader_pipeline, g_game_tex, src_w, src_h,
-                                    x, y, w, h, draw_w, draw_h);
+            const GLuint shaded = gb_lrs_active()
+                ? gb_lrs_render(g_game_tex, presentation_width(), presentation_height(), w, h)
+                : 0;
+            if (!shaded) {
+                gb_shader_pipeline_draw(g_shader_pipeline, g_game_tex, src_w, src_h,
+                                        x, y, w, h, draw_w, draw_h);
+                return;
+            }
+            glViewport(0, 0, draw_w, draw_h);
+            glDisable(GL_BLEND);
+            gb_shader_pipeline_set_active_by_name(g_shader_pipeline, "sharp");
+            gb_shader_pipeline_draw(g_shader_pipeline, shaded, w, h, x, y, w, h, draw_w, draw_h);
+            if (active_shader >= 0) {
+                gb_shader_pipeline_set_active(g_shader_pipeline, active_shader);
+            }
+            glEnable(GL_BLEND);
         };
-        if (active_border) {
+        if (gb_lrs_active() && g_slang_fill_window) {
+            /* Bezel presets draw a whole television around the picture, so
+             * they get the window rather than the game rect (and no border). */
+            draw_game(0, 0, draw_w, draw_h, presentation_width(), presentation_height());
+        } else if (active_border) {
             /* Border is always drawn with the passthrough "sharp" shader
              * — the user-selected effect applies to the game pixels
              * only, which is the visually-right thing for an LCD-style
@@ -4504,6 +5535,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 ImGui::EndCombo();
             }
         }
+
+        draw_librashader_settings();
 
         /* Three optional toggles laid out inline. Each only appears
          * when it's actually applicable: SGB Colors only when the
@@ -5723,6 +6756,9 @@ void gb_platform_shutdown(void) {
     }
 
     /* Tear down GL-owned objects before the context goes away. */
+    if (g_gl_context) {
+        gb_lrs_shutdown();
+    }
     if (g_shader_pipeline) {
         gb_shader_pipeline_destroy(g_shader_pipeline);
         g_shader_pipeline = NULL;
@@ -6368,10 +7404,18 @@ bool gb_platform_init(int scale) {
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 
     /* GBRECOMP_HIDDEN_WINDOW: a real GL context in a window that is never
-     * shown, for automated runs that must render (window screenshots, frame
-     * pacing) without putting a window on the desktop. */
+     * shown, for automated runs that must render (shader checks) without
+     * putting a window on the desktop. */
+    /* Copied: on Windows SDL_getenv returns one buffer that every later
+     * SDL_getenv (SDL's own hint lookups included) overwrites. */
+    const char* const shader_probe_env = SDL_getenv("GBRECOMP_SHADER_PROBE");
+    const std::string shader_probe_path = shader_probe_env ? shader_probe_env : "";
+    const char* const shader_probe = shader_probe_env ? shader_probe_path.c_str() : NULL;
+    if (shader_probe) {
+        g_fullscreen_mode = 0;   /* a probe must never touch the display mode */
+    }
     const Uint32 window_visibility =
-        env_flag_enabled("GBRECOMP_HIDDEN_WINDOW") ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN;
+        (shader_probe || env_flag_enabled("GBRECOMP_HIDDEN_WINDOW")) ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN;
     g_window = SDL_CreateWindow(
         "GB Recompiled",
         SDL_WINDOWPOS_CENTERED,
@@ -6404,7 +7448,20 @@ bool gb_platform_init(int scale) {
     SDL_SetWindowMinimumSize(g_window, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
 
     fprintf(stderr, "[SDL] Creating GL context...\n");
+    /* Ask for ES 3.1 first: librashader compiles presets to the context's GLSL
+     * ES version, and 3.00 rejects constructs common in slang presets (arrays
+     * of arrays, in crt-geom among others). ANGLE answers an ES 2.0 request
+     * with 3.0 but only gives 3.1 when asked. Everything else here is ES 2.0
+     * code, which a 3.x context runs unchanged; fall back to 2.0 if 3.1 is
+     * refused. */
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     g_gl_context = SDL_GL_CreateContext(g_window);
+    if (!g_gl_context) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        g_gl_context = SDL_GL_CreateContext(g_window);
+    }
     if (!g_gl_context) {
         fprintf(stderr, "[SDL] SDL_GL_CreateContext failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(g_window);
@@ -6412,6 +7469,8 @@ bool gb_platform_init(int scale) {
         return false;
     }
     SDL_GL_MakeCurrent(g_window, g_gl_context);
+    /* Before any program is linked: ANGLE looks D3DCompile up on first use. */
+    gb_lrs_hook_shader_compiler();
 
     /* One-time GL identity log. Confirms which driver SDL actually gave us
      * (real GLES2/ANGLE vs a desktop ES2-compat context) and whether an
@@ -6433,6 +7492,13 @@ bool gb_platform_init(int scale) {
                 has_compiler ? "yes" : "NO");
     }
 
+    /* Compiled programs persist in shader_cache/ (see gl_program_cache.h). */
+    {
+        char cache_dir[1152];
+        gb_host_state_path("shader_cache", cache_dir, sizeof(cache_dir));
+        gb_gl_program_cache_install(cache_dir);
+    }
+
     /* No vsync — we drive timing in wall-clock to hit 59.7 FPS exactly,
      * including on non-60Hz monitors. */
     SDL_GL_SetSwapInterval(0);
@@ -6446,6 +7512,10 @@ bool gb_platform_init(int scale) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
+    /* With the other settings, not in whatever folder the game was started
+     * from (an AppImage or a Steam shortcut often starts in $HOME). */
+    static char imgui_ini[1152];
+    io.IniFilename = gb_host_state_path("imgui.ini", imgui_ini, sizeof(imgui_ini));
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
@@ -6467,6 +7537,21 @@ bool gb_platform_init(int scale) {
             gb_shader_pipeline_set_active_by_name(g_shader_pipeline, "sharp");
         }
     }
+
+    /* librashader is optional: without it the menu says why and nothing else
+     * changes. GBRECOMP_SHADER_PRESET overrides the saved preset for this run
+     * ("" turns it off). */
+    gb_lrs_init();
+    if (shader_probe) {
+        /* A child started by gb_lrs_probe: compile the preset, render, and go,
+         * before the ROM, saves or preferences are touched. */
+        std::_Exit(gb_lrs_probe_child(shader_probe));
+    }
+    if (const char* preset = SDL_getenv("GBRECOMP_SHADER_PRESET")) {
+        g_slang_preset_pref = preset;
+        g_slang_param_prefs.clear();
+    }
+    g_slang_load_pending = !g_slang_preset_pref.empty();
 
     if (!recreate_streaming_texture()) {
         SDL_GL_DeleteContext(g_gl_context);
@@ -7624,8 +8709,9 @@ void gb_platform_set_menu(const char* open, int pause_in_menu, int dim_percent, 
     if (opacity_percent >= 0 && opacity_percent <= 100) g_menu_opacity_percent = opacity_percent;
     if (open) {
         close_menus();
-        if (strcmp(open, "settings") == 0) {
+        if (strcmp(open, "settings") == 0 || strcmp(open, "shaders") == 0) {
             g_show_menu = true;
+            g_slang_open_section = strcmp(open, "shaders") == 0;
         } else if (strcmp(open, "main") == 0) {
 #ifdef RECOMP_LAUNCHER
             recomp_runtime_ui_open(g_runtime_ui);
@@ -7954,6 +9040,7 @@ static void apply_post_load_host_state(GBContext* ctx) {
      * newest state, the one before the frame shown until now. */
     g_rewind_newest_on_screen = false;
     reset_audio_output_buffer(true);
+    gb_lrs_clear_history();   /* a preset's previous frames are the old timeline's */
     g_last_guest_framebuffer_valid = false;
     g_present_count = ctx ? ctx->completed_frames : 0;
     g_last_frame_time = SDL_GetTicks();

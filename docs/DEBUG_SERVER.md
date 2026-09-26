@@ -316,7 +316,7 @@ queue, so `sdl_event` / `key` / `mouse` (above) drive them while it lasts.
 
 | Command | Args | Reply | Notes |
 |---|---|---|---|
-| `menu` | `open` (`main`, `settings`, `none`), `pause_in_menu` (int 0/1), `dim_percent`, `opacity_percent` (int 0-100), `leave` (`quit` or `launcher`); absent leaves it | `main_open`, `settings_open`, `game_held`, `pause_in_menu`, `dim_percent`, `opacity_percent` | Opens or closes the menus and sets Pause in Menu, Game Dimming and Menu Opacity without saving. `leave` does what the menus' Quit / Return to Launcher do (the latter errors where there is no launcher to return to). |
+| `menu` | `open` (`main`, `settings`, `shaders`: the settings window at Shader Presets, `none`), `pause_in_menu` (int 0/1), `dim_percent`, `opacity_percent` (int 0-100), `leave` (`quit` or `launcher`); absent leaves it | `main_open`, `settings_open`, `game_held`, `pause_in_menu`, `dim_percent`, `opacity_percent` | Opens or closes the menus and sets Pause in Menu, Game Dimming and Menu Opacity without saving. `leave` does what the menus' Quit / Return to Launcher do (the latter errors where there is no launcher to return to). |
 | `window_screenshot` | `path` (str) | `ok` | Writes the next presented window as PNG: the menus and the shader preset included, unlike `screenshot`. Frames need not advance; a menu keeps presenting while it holds the game. |
 | `restart` | — | `ok` | Restart Game: the machine goes back to how it was before its first frame (kept by `gb_before_first_frame`) at the next frame boundary, with the cart's battery RAM as it is now, flushed to disk first. Errors before the first frame has started. |
 

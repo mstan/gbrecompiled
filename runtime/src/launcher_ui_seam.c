@@ -369,9 +369,18 @@ int gb_launcher_preboot(void) {
      * entry chose, so name the state-anchored file the runtime actually reads. */
     gi.rom_cache_path = romcfg_path;
 
+    /* An em dash where titles are UTF-8 end to end. SDL2's X11 backend runs
+     * the title through this process's C locale, which cannot convert it:
+     * _NET_WM_NAME is never set and window managers show WM_NAME's raw bytes
+     * ("Shantae â Launcher"), so Linux gets a plain hyphen. */
     char title[256];
+#if defined(_WIN32) || defined(__APPLE__)
     snprintf(title, sizeof(title), "%s \xE2\x80\x94 Launcher",
              gi.name ? gi.name : "Game Boy");
+#else
+    snprintf(title, sizeof(title), "%s - Launcher",
+             gi.name ? gi.name : "Game Boy");
+#endif
 
     char out_rom[1024];
     out_rom[0] = '\0';

@@ -1080,6 +1080,10 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                 if (ppu->mode_cycles < hblank_len) {
                     return;
                 }
+                /* Lag-frame hold: enter VBlank once the game's frame is ready. */
+                if (ppu->ly == VISIBLE_SCANLINES - 1 && ctx && gb_frame_hold_at_vblank(ctx)) {
+                    return;
+                }
                 ppu->mode_cycles -= hblank_len;
                 ppu->lcd_on_first_line = false;   /* first line consumed */
                 ppu->ly_prev = ppu->ly;           /* read-before-increment race */
@@ -1091,6 +1095,7 @@ void ppu_tick(GBPPU* ppu, GBContext* ctx, uint32_t cycles) {
                     if (!ppu->frame_ready) {
                         gb_sgb_apply_to_frame(ctx);
                         convert_to_rgb(ppu);
+                        if (gb_custom_frame_end) gb_custom_frame_end(ctx);
                         ppu->frame_ready = true;
                         ctx->frame_done = 1;
                     }

@@ -18,6 +18,7 @@
 #endif
 #include "gb_printer.h"
 #include "debug_server.h"
+#include "rewind.h"
 #include "color_lut.h"  /* present-time screen-color LUT (opt-in, default raw) */
 extern "C" {
 #include "keybinds.h"
@@ -34,9 +35,17 @@ extern "C" void gb_debug_server_set_context(GBContext *ctx);
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
 #include <SDL_opengles2.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <climits>
+#include <cmath>
+#include <ctime>
+#include <fstream>
 #include <map>
 #include <filesystem>
 #include <string>
@@ -94,6 +103,7 @@ static uint32_t g_last_frame_time = 0;
 static SDL_AudioDeviceID g_audio_device = 0;
 static SDL_GameController* g_controller = NULL;
 static bool g_vsync = false;  /* VSync OFF - we pace with wall clock for 59.7 FPS */
+static int g_swap_interval = 0;  /* last given to SDL_GL_SetSwapInterval */
 static bool g_audio_started = false;
 static uint32_t g_audio_start_threshold = 0;
 
@@ -103,14 +113,83 @@ static double g_timing_vsync_total = 0.0;
 static uint32_t g_timing_frame_count = 0;
 static GBPlatformTimingInfo g_last_timing = {};
 
-/* Menu State */
+/* Menu State: g_show_menu is the settings window; the runtime menu (the one
+ * Escape opens) is g_runtime_ui. */
 static bool g_show_menu = false;
 static bool g_show_overlay = false;
 #ifdef RECOMP_LAUNCHER
 static RecompRuntimeUi* g_runtime_ui = NULL;
 #endif
+/* RetroArch's Pause Content When Menu Is Active (menu_pause_libretro, on by
+ * default): while a menu is up the game waits in gb_platform_vsync, silent. */
+static bool g_menu_pauses_game = true;
+/* How a menu covers the game, so a shader's effect shows while it is tuned:
+ * Game Dimming is how dark the game behind a menu gets (a black layer, 0 = not
+ * dimmed; 60 is about what the runtime menu always had), Menu Opacity how
+ * solid the menus' own backgrounds are. */
+static constexpr int GB_MENU_DIM_DEFAULT = 60;
+static int g_menu_dim_percent = GB_MENU_DIM_DEFAULT;
+static int g_menu_opacity_percent = 100;
+/* The settings window's last frame had a text field being typed into or a
+ * popup (a combo's list, a confirmation) open: Escape is theirs then. */
+static bool g_menu_text_input = false;
+static bool g_menu_popup_open = false;
+
+static bool menu_open(void) {
+#ifdef RECOMP_LAUNCHER
+    if (g_runtime_ui && recomp_runtime_ui_is_open(g_runtime_ui)) return true;
+#endif
+    return g_show_menu;
+}
+
+static bool menu_holds_game(void) {
+    return g_menu_pauses_game && menu_open();
+}
+
+static float menu_opacity(void) {
+    return (float)g_menu_opacity_percent / 100.0f;
+}
+
+static float menu_dim(void) {
+    return (float)g_menu_dim_percent / 100.0f;
+}
+
+/* gb_platform_request_window_shot: written at the next present. */
+static std::string g_window_shot_path;
+
+/* Restart Game, Return to Launcher and Quit (defined with the save states).
+ * g_boot_state is the machine before its first frame. */
+static std::vector<uint8_t> g_boot_state;
+static bool g_restart_pending = false;
+static bool can_restart_game(void);
+static void request_restart_game(void);
+static void run_pending_restart(void);
+static bool launcher_available(void);
+static void request_exit(GBPlatformExitAction action);
 
 static int g_speed_percent = 100;
+/* Speeds of the Fast Forward (Hold) and Fast Forward (toggle) shortcuts; the
+ * toggle was called Max Speed, which its variables and prefs keys (max_speed,
+ * speed.max_percent) still say. Either can be Unlimited, no frame limiter at
+ * all, as RetroArch's Fast-Forward Rate 0 ("no limit"); it compares above
+ * every other speed, and prefs store it as 0. */
+static constexpr int GB_SPEED_UNLIMITED = INT_MAX;
+static int g_fast_forward_speed_percent = 250;
+static int g_max_speed_percent = GB_SPEED_UNLIMITED;
+/* RetroArch's "Fast-Forward Frame Skip" (fastforward_frameskip, on by
+ * default): above 100% only as many frames are drawn as the display shows. */
+static bool g_fast_forward_frameskip = true;
+static uint64_t g_frames_skipped = 0;
+static constexpr int GB_SHORTCUT_SPEED_MIN_PERCENT = 110;
+static constexpr int GB_SHORTCUT_SPEED_MAX_PERCENT = 1000;
+/* Sound at speeds other than 100%, RetroArch's fast-forward audio settings:
+ * Mute ("Mute When Fast-Forwarding"), Normal Pitch (its default: what the
+ * device cannot take in time is dropped) or Sped Up ("Speed Up Audio When
+ * Fast-Forwarding"). Below 100% the sound is slowed down unless muted, as in
+ * RetroArch's slow motion. */
+enum GBSpeedAudioMode { GB_SPEED_AUDIO_MUTE = 0, GB_SPEED_AUDIO_NORMAL_PITCH = 1, GB_SPEED_AUDIO_SPED_UP = 2 };
+static int g_speed_audio_mode = GB_SPEED_AUDIO_NORMAL_PITCH;
+static const char* g_speed_audio_mode_names[] = { "Mute", "Normal Pitch", "Sped Up" };
 static int g_palette_idx = 0;
 /* Color correction: 0=Off, 1=GBC (modern LCDs viewing GBC-tinted output),
  * 2=GBA (compensate for AGB LCD's darker / washed-out look). Applied
@@ -119,6 +198,18 @@ static int g_palette_idx = 0;
  * hardware. Only relevant in CGB/GBA hardware modes — hidden in DMG/SGB. */
 static int g_color_correction = 0;
 static bool g_smooth_lcd_transitions = true;
+/* Preemptive frames (preempt_before_frame): -1 = the game's default. */
+static int g_preemptive_frames_pref = -1;
+static int preemptive_frames(void);
+/* Rewind (rewind_before_frame), RetroArch's settings and defaults but on:
+ * Rewind Frames is how many frames apart states are kept (and so how fast
+ * holding the key goes back), the buffer how much memory holds them. */
+static bool g_rewind_enabled = true;
+static int g_rewind_granularity = 1;
+static int g_rewind_buffer_mb = 20;
+static constexpr int GB_REWIND_MAX_GRANULARITY = 32;
+static constexpr int GB_REWIND_MAX_BUFFER_MB = 1024;
+static void rewind_free(void);
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
 /* Headless (GBRECOMP_HEADLESS=1): dummy SDL video/audio, no window, no GL —
@@ -284,15 +375,18 @@ typedef enum GBInputAction {
     GB_INPUT_ACTION_SELECT = 6,
     GB_INPUT_ACTION_START = 7,
     GB_INPUT_ACTION_FAST_FORWARD = 8,
-    GB_INPUT_ACTION_TOGGLE_MAX_SPEED = 9,
-    GB_INPUT_ACTION_SAVE_STATE = 10,
-    GB_INPUT_ACTION_LOAD_STATE = 11,
-    GB_INPUT_ACTION_PREVIOUS_STATE_SLOT = 12,
-    GB_INPUT_ACTION_NEXT_STATE_SLOT = 13,
-    GB_INPUT_ACTION_TOGGLE_OVERLAY = 14,
-    GB_INPUT_ACTION_TOGGLE_MUTE = 15,
-    GB_INPUT_ACTION_TOGGLE_MENU = 16,
-    GB_INPUT_ACTION_COUNT = 17,
+    GB_INPUT_ACTION_REWIND = 9,
+    GB_INPUT_ACTION_TOGGLE_MAX_SPEED = 10,
+    GB_INPUT_ACTION_SAVE_STATE = 11,
+    GB_INPUT_ACTION_LOAD_STATE = 12,
+    GB_INPUT_ACTION_PREVIOUS_STATE_SLOT = 13,
+    GB_INPUT_ACTION_NEXT_STATE_SLOT = 14,
+    GB_INPUT_ACTION_TOGGLE_OVERLAY = 15,
+    GB_INPUT_ACTION_TOGGLE_MUTE = 16,
+    GB_INPUT_ACTION_TOGGLE_MENU = 17,
+    GB_INPUT_ACTION_PAUSE = 18,
+    GB_INPUT_ACTION_FRAME_ADVANCE = 19,
+    GB_INPUT_ACTION_COUNT = 20,
 } GBInputAction;
 typedef enum GBInputBindingKind {
     GB_INPUT_BINDING_NONE = 0,
@@ -327,10 +421,16 @@ static std::string g_audio_target_device_name;
 static std::string g_audio_active_device_name;
 static constexpr int GB_SAVESTATE_SLOT_COUNT = 10;
 static constexpr int GB_JOYPAD_ACTION_COUNT = 8;
-static constexpr int GB_FAST_FORWARD_SPEED_PERCENT = 250;
-static constexpr int GB_MAX_SHORTCUT_SPEED_PERCENT = 500;
 static int g_savestate_slot = 0;
 static std::string g_savestate_status;
+/* On-screen messages (notify.*): state saves/loads, slot changes, rewinding
+ * and fast forward. */
+static bool g_notify_save_load = true;
+static bool g_notify_slot = true;
+static bool g_notify_rewind = true;
+static bool g_notify_fast_forward = true;
+static std::string g_state_notice;
+static uint64_t g_state_notice_ms = 0;
 static const char* g_render_scaling_mode_names[] = {
     "Pixel Perfect",
     "Aspect Fit",
@@ -358,9 +458,29 @@ static const uint32_t g_palettes[][4] = {
     { 0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000 }, // B&W
     { 0xFFFFB000, 0xFFCB4F0E, 0xFF800000, 0xFF330000 }, // Amber (Phosphor)
 };
-static uint32_t g_custom_framebuffer[GB_CUSTOM_FRAME_SIZE];
+static std::vector<uint32_t> g_custom_framebuffer;   /* sized to the resolved view */
+/* The custom view's native picture presented on its own this frame, scaled to
+ * the window by gb_custom_native_scaling instead of centered in the view. */
+static bool g_native_presented = false;
+/* Window pixels per game pixel gb_custom_fit asked for this frame's view
+ * (0: the scaling mode decides). */
+static double g_custom_present_scale = 0.0;
+/* The view's size (the window's size and borders follow it). */
+static int view_width(void) {
+    return gb_custom_render ? gb_custom_view_width : gb_ws_render_width();
+}
+static int view_height(void) {
+    return gb_custom_render ? gb_custom_view_height : GB_SCREEN_HEIGHT;
+}
+/* The picture presented this frame: the view (or the part gb_custom_fit
+ * kept), or the native picture on its own. */
 static int presentation_width(void) {
+    if (g_native_presented) return GB_SCREEN_WIDTH;
     return gb_custom_render ? gb_custom_width : gb_ws_render_width();
+}
+static int presentation_height(void) {
+    if (g_native_presented) return GB_SCREEN_HEIGHT;
+    return gb_custom_render ? gb_custom_height : GB_SCREEN_HEIGHT;
 }
 /* Most recent frame handed to the presentation path, published by
  * render_frame_internal() for gb_platform_get_presented_frame(). */
@@ -390,7 +510,17 @@ static GBBindingCaptureDevice g_binding_capture_device = GB_CAPTURE_DEVICE_NONE;
 static GBInputAction g_binding_capture_action = GB_INPUT_ACTION_RIGHT;
 static int g_binding_capture_slot = 0;
 static bool g_fast_forward_active = false;
+static bool g_debug_fast_forward = false;   /* held by the debug server's `speed` */
 static bool g_max_speed_mode = false;
+/* User pause / frame advance, for measuring input latency. The emulator waits
+ * in gb_platform_vsync() after the finished frame is on screen; each advance
+ * lets one more frame through. g_pause_input is the joypad state (dpad low
+ * nibble, buttons high, active low) the last advanced frame ran with, and
+ * g_pause_input_frames counts consecutive advanced frames that saw it. */
+static bool g_user_paused = false;
+static int g_frame_advance_pending = 0;
+static uint8_t g_pause_input = 0xFF;
+static uint32_t g_pause_input_frames = 0;
 static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Right",
     "Left",
@@ -401,7 +531,8 @@ static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Select",
     "Start",
     "Fast Forward (Hold)",
-    "Toggle Max Speed",
+    "Rewind (Hold)",
+    "Fast Forward",   /* a toggle; "toggle_max_speed" in prefs, its old name */
     "Save State",
     "Load State",
     "Previous State Slot",
@@ -409,6 +540,8 @@ static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Toggle Overlay",
     "Toggle Mute",
     "Toggle Menu",
+    "Pause",
+    "Frame Advance",
 };
 
 static bool has_interpreter_activity(const GBContext* ctx) {
@@ -433,6 +566,8 @@ static void update_controller_axis_binding_state(void);
 static void recompute_audio_targets(void);
 static void refresh_audio_device_pause_state(void);
 static void reset_audio_output_buffer(bool preserve_stats);
+static bool audio_output_should_run(void);
+static void on_speed_changed(bool audio_was_running);
 static char* trim_ascii(char* text);
 static void update_effective_joypad_state(void);
 static void save_runtime_preferences(void);
@@ -468,7 +603,7 @@ static uint8_t g_script_joypad_dpad = 0xFF;
 #include <stdlib.h>
 #include <ctype.h>
 
-#define MAX_SCRIPT_ENTRIES 100
+#define MAX_SCRIPT_ENTRIES 4096
 typedef enum {
     SCRIPT_ANCHOR_FRAME = 0,
     SCRIPT_ANCHOR_CYCLE = 1,
@@ -690,13 +825,49 @@ static bool input_action_is_runtime(GBInputAction action) {
 
 static int effective_speed_percent(void) {
     int speed_percent = (g_speed_percent > 0) ? g_speed_percent : 100;
-    if (g_max_speed_mode) {
-        return GB_MAX_SHORTCUT_SPEED_PERCENT;
+    /* The shortcuts only ever speed the game up. */
+    if (g_max_speed_mode && speed_percent < g_max_speed_percent) {
+        speed_percent = g_max_speed_percent;
     }
-    if (g_fast_forward_active && speed_percent < GB_FAST_FORWARD_SPEED_PERCENT) {
-        return GB_FAST_FORWARD_SPEED_PERCENT;
+    if (g_fast_forward_active && speed_percent < g_fast_forward_speed_percent) {
+        speed_percent = g_fast_forward_speed_percent;
     }
     return speed_percent;
+}
+
+/* RetroArch's "Fast forward." while either Fast Forward shortcut is on, with
+ * the speed it runs at; empty otherwise. */
+static std::string fast_forward_status_text(void) {
+    if (!g_max_speed_mode && !g_fast_forward_active) return "";
+    const int speed = effective_speed_percent();
+    return speed == GB_SPEED_UNLIMITED ? "Fast forward (unlimited)."
+                                       : "Fast forward (" + std::to_string(speed) + "%).";
+}
+
+/* A shortcut speed as prefs and the debug server give it: 110-1000, or 0 for
+ * Unlimited. Anything else leaves it as it is. */
+static void set_shortcut_speed(int* percent, long value) {
+    if (value == 0) {
+        *percent = GB_SPEED_UNLIMITED;
+    } else if (value >= GB_SHORTCUT_SPEED_MIN_PERCENT && value <= GB_SHORTCUT_SPEED_MAX_PERCENT) {
+        *percent = (int)value;
+    }
+}
+
+static int shortcut_speed_pref(int percent) {
+    return percent == GB_SPEED_UNLIMITED ? 0 : percent;
+}
+
+/* V-Sync makes each present wait for the display's refresh, which holds the
+ * game at the refresh rate. Above 100% it is off, as RetroArch turns it off
+ * while fast-forwarding (driver_set_nonblock_state), so the speed shortcuts
+ * work the same with it on or off. */
+static void update_swap_interval(void) {
+    const int interval = (g_vsync && effective_speed_percent() <= 100) ? 1 : 0;
+    if (interval != g_swap_interval) {
+        SDL_GL_SetSwapInterval(interval);
+        g_swap_interval = interval;
+    }
 }
 
 static const char* overlay_visibility_hint_text(void) {
@@ -1138,6 +1309,7 @@ static const char* input_action_config_name(GBInputAction action) {
         case GB_INPUT_ACTION_SELECT: return "select";
         case GB_INPUT_ACTION_START: return "start";
         case GB_INPUT_ACTION_FAST_FORWARD: return "fast_forward";
+        case GB_INPUT_ACTION_REWIND: return "rewind";
         case GB_INPUT_ACTION_TOGGLE_MAX_SPEED: return "toggle_max_speed";
         case GB_INPUT_ACTION_SAVE_STATE: return "save_state";
         case GB_INPUT_ACTION_LOAD_STATE: return "load_state";
@@ -1146,6 +1318,8 @@ static const char* input_action_config_name(GBInputAction action) {
         case GB_INPUT_ACTION_TOGGLE_OVERLAY: return "toggle_overlay";
         case GB_INPUT_ACTION_TOGGLE_MUTE: return "toggle_mute";
         case GB_INPUT_ACTION_TOGGLE_MENU: return "toggle_menu";
+        case GB_INPUT_ACTION_PAUSE: return "pause";
+        case GB_INPUT_ACTION_FRAME_ADVANCE: return "frame_advance";
         case GB_INPUT_ACTION_COUNT:
         default:
             return "unknown";
@@ -1285,6 +1459,7 @@ static void set_default_audio_preferences(void) {
     g_audio_latency_ms = 80;
     g_audio_volume_percent = 100;
     g_audio_target_device_name.clear();
+    g_speed_audio_mode = GB_SPEED_AUDIO_NORMAL_PITCH;
 }
 
 static void set_default_input_bindings(void) {
@@ -1307,6 +1482,7 @@ static void set_default_input_bindings(void) {
     g_keyboard_bindings[GB_INPUT_ACTION_SELECT][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_RSHIFT);
     g_keyboard_bindings[GB_INPUT_ACTION_START][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_RETURN);
     g_keyboard_bindings[GB_INPUT_ACTION_FAST_FORWARD][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_TAB);
+    g_keyboard_bindings[GB_INPUT_ACTION_REWIND][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_R);
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MAX_SPEED][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_GRAVE);
     g_keyboard_bindings[GB_INPUT_ACTION_SAVE_STATE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F5);
     g_keyboard_bindings[GB_INPUT_ACTION_LOAD_STATE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F8);
@@ -1315,6 +1491,8 @@ static void set_default_input_bindings(void) {
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_OVERLAY][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F1);
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MUTE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_M);
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MENU][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F10);
+    g_keyboard_bindings[GB_INPUT_ACTION_PAUSE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_P);
+    g_keyboard_bindings[GB_INPUT_ACTION_FRAME_ADVANCE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_O);
 
     g_controller_bindings[GB_INPUT_ACTION_UP][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_UP);
     g_controller_bindings[GB_INPUT_ACTION_UP][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE, SDL_CONTROLLER_AXIS_LEFTY);
@@ -1458,6 +1636,9 @@ static std::string runtime_preferences_path(void) {
 // recomp-ui launcher "Widescreen (experimental)" toggle, mirrored to the
 // video.widescreen pref. Drives the opt-in extended view via gb_ws_set_cli_request.
 static int g_pref_widescreen = 0;
+/* launcher.skip is the launcher's own ("Skip launcher on boot"); carried
+ * through so a runtime save does not drop it. -1 = absent. */
+static int g_launcher_skip_pref = -1;
 
 /* Rewrite only the keyboard.* / controller.* value lines of an existing prefs
  * file, leaving every other line byte-identical. A full save_runtime_preferences()
@@ -1538,7 +1719,26 @@ static void load_runtime_preferences(void) {
     set_default_input_bindings();
     g_savestate_slot = 0;
     g_savestate_status.clear();
+    g_notify_save_load = true;
+    g_notify_slot = true;
+    g_notify_rewind = true;
+    g_notify_fast_forward = true;
     g_max_speed_mode = false;
+    g_fast_forward_speed_percent = 250;
+    g_max_speed_percent = GB_SPEED_UNLIMITED;
+    g_fast_forward_frameskip = true;
+    g_preemptive_frames_pref = -1;
+    g_rewind_enabled = true;
+    g_rewind_granularity = 1;
+    g_rewind_buffer_mb = 20;
+    g_vsync = false;
+    g_show_overlay = false;
+    g_smooth_lcd_transitions = true;
+    g_render_scaling_mode = GB_RENDER_SCALING_PIXEL_PERFECT;
+    g_menu_pauses_game = true;
+    g_menu_dim_percent = GB_MENU_DIM_DEFAULT;
+    g_menu_opacity_percent = 100;
+    g_launcher_skip_pref = -1;
     g_per_game_prefs.clear();
 
     const std::string path = runtime_preferences_path();
@@ -1591,6 +1791,29 @@ static void load_runtime_preferences(void) {
                     g_audio_target_device_name = value;
                     continue;
                 }
+                if (strcmp(key, "audio.fast_forward") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0 && parsed < (long)IM_ARRAYSIZE(g_speed_audio_mode_names)) {
+                        g_speed_audio_mode = (int)parsed;
+                    }
+                    continue;
+                }
+                if (strcmp(key, "speed.fast_forward_percent") == 0 ||
+                    strcmp(key, "speed.max_percent") == 0) {
+                    char* end = NULL;
+                    long parsed = strtol(value, &end, 10);
+                    if (end != value) {
+                        set_shortcut_speed(strcmp(key, "speed.max_percent") == 0
+                                               ? &g_max_speed_percent
+                                               : &g_fast_forward_speed_percent,
+                                           parsed);
+                    }
+                    continue;
+                }
+                if (strcmp(key, "speed.fast_forward_frameskip") == 0) {
+                    g_fast_forward_frameskip = (strcmp(value, "0") != 0);
+                    continue;
+                }
                 /* recomp-ui launcher-controlled display settings (written by
                  * the pre-boot seam; see launcher_ui_seam.c). Parsed here so a
                  * launcher choice is applied on the very next boot — this runs
@@ -1617,9 +1840,53 @@ static void load_runtime_preferences(void) {
                     g_fullscreen_mode = (int)parsed;
                     continue;
                 }
+                if (strcmp(key, "emulation.preemptive_frames") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0 && parsed <= GB_PREEMPT_MAX_FRAMES) {
+                        g_preemptive_frames_pref = (int)parsed;
+                    }
+                    continue;
+                }
+                if (strcmp(key, "emulation.rewind") == 0) {
+                    g_rewind_enabled = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "emulation.rewind_granularity") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 1 && parsed <= GB_REWIND_MAX_GRANULARITY) {
+                        g_rewind_granularity = (int)parsed;
+                    }
+                    continue;
+                }
+                if (strcmp(key, "emulation.rewind_buffer_mb") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 1 && parsed <= GB_REWIND_MAX_BUFFER_MB) {
+                        g_rewind_buffer_mb = (int)parsed;
+                    }
+                    continue;
+                }
                 if (strcmp(key, "video.linear_filter") == 0) {
                     g_render_filter_mode = (strcmp(value, "0") != 0)
                         ? GB_RENDER_FILTER_LINEAR : GB_RENDER_FILTER_NEAREST;
+                    continue;
+                }
+                if (strcmp(key, "video.scaling_mode") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0 && parsed < (long)IM_ARRAYSIZE(g_render_scaling_mode_names)) {
+                        g_render_scaling_mode = (GBRenderScalingMode)parsed;
+                    }
+                    continue;
+                }
+                if (strcmp(key, "video.vsync") == 0) {
+                    g_vsync = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "video.smooth_slow_frames") == 0) {
+                    g_smooth_lcd_transitions = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "launcher.skip") == 0) {
+                    g_launcher_skip_pref = (strcmp(value, "0") != 0) ? 1 : 0;
                     continue;
                 }
                 if (strcmp(key, "video.palette") == 0) {
@@ -1644,11 +1911,41 @@ static void load_runtime_preferences(void) {
                     }
                     continue;
                 }
+                if (strcmp(key, "ui.pause_in_menu") == 0) {
+                    g_menu_pauses_game = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "ui.menu_opacity") == 0 || strcmp(key, "ui.menu_dim") == 0) {
+                    long parsed = strtol(value, NULL, 10);
+                    if (parsed >= 0 && parsed <= 100) {
+                        (strcmp(key, "ui.menu_dim") == 0 ? g_menu_dim_percent : g_menu_opacity_percent) =
+                            (int)parsed;
+                    }
+                    continue;
+                }
                 if (strcmp(key, "savestate.slot") == 0) {
                     long parsed = strtol(value, NULL, 10);
                     if (parsed >= 0 && parsed < GB_SAVESTATE_SLOT_COUNT) {
                         g_savestate_slot = (int)parsed;
                     }
+                    continue;
+                }
+                if (strcmp(key, "notify.save_load") == 0 ||
+                    strcmp(key, "savestate.notify_save_load") == 0 /* earlier name */) {
+                    g_notify_save_load = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "notify.slot") == 0 ||
+                    strcmp(key, "savestate.notify_slot") == 0 /* earlier name */) {
+                    g_notify_slot = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "notify.rewind") == 0) {
+                    g_notify_rewind = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "notify.fast_forward") == 0) {
+                    g_notify_fast_forward = (strcmp(value, "0") != 0);
                     continue;
                 }
                 if (strcmp(key, "border.enabled") == 0) {
@@ -1666,6 +1963,10 @@ static void load_runtime_preferences(void) {
                 }
                 if (strcmp(key, "diag.show_fps") == 0) {
                     g_show_fps = (strcmp(value, "0") != 0);
+                    continue;
+                }
+                if (strcmp(key, "diag.show_overlay") == 0) {
+                    g_show_overlay = (strcmp(value, "0") != 0);
                     continue;
                 }
                 if (strcmp(key, "shader.active") == 0) {
@@ -1839,20 +2140,44 @@ static void save_runtime_preferences(void) {
     fprintf(file, "audio.latency_ms=%u\n", g_audio_latency_ms);
     fprintf(file, "audio.volume_percent=%u\n", g_audio_volume_percent);
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
+    fprintf(file, "audio.fast_forward=%d\n", g_speed_audio_mode);
+    fprintf(file, "speed.fast_forward_percent=%d\n", shortcut_speed_pref(g_fast_forward_speed_percent));
+    fprintf(file, "speed.max_percent=%d\n", shortcut_speed_pref(g_max_speed_percent));
+    fprintf(file, "speed.fast_forward_frameskip=%d\n", g_fast_forward_frameskip ? 1 : 0);
     /* recomp-ui launcher-controlled display settings (round-trip with the
      * pre-boot seam; see launcher_ui_seam.c). */
     fprintf(file, "window.scale=%d\n", g_scale);
     fprintf(file, "video.fullscreen=%d\n", g_fullscreen_mode);
     fprintf(file, "video.linear_filter=%d\n",
             g_render_filter_mode == GB_RENDER_FILTER_LINEAR ? 1 : 0);
+    fprintf(file, "video.scaling_mode=%d\n", (int)g_render_scaling_mode);
+    fprintf(file, "video.vsync=%d\n", g_vsync ? 1 : 0);
+    fprintf(file, "video.smooth_slow_frames=%d\n", g_smooth_lcd_transitions ? 1 : 0);
     fprintf(file, "video.palette=%d\n", g_palette_idx);
     fprintf(file, "video.widescreen=%d\n", g_pref_widescreen ? 1 : 0);
+    if (g_preemptive_frames_pref >= 0) {
+        fprintf(file, "emulation.preemptive_frames=%d\n", g_preemptive_frames_pref);
+    }
+    fprintf(file, "emulation.rewind=%d\n", g_rewind_enabled ? 1 : 0);
+    fprintf(file, "emulation.rewind_granularity=%d\n", g_rewind_granularity);
+    fprintf(file, "emulation.rewind_buffer_mb=%d\n", g_rewind_buffer_mb);
     fprintf(file, "ui.theme=%d\n", g_imgui_theme);
+    fprintf(file, "ui.pause_in_menu=%d\n", g_menu_pauses_game ? 1 : 0);
+    fprintf(file, "ui.menu_dim=%d\n", g_menu_dim_percent);
+    fprintf(file, "ui.menu_opacity=%d\n", g_menu_opacity_percent);
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
+    fprintf(file, "notify.save_load=%d\n", g_notify_save_load ? 1 : 0);
+    fprintf(file, "notify.slot=%d\n", g_notify_slot ? 1 : 0);
+    fprintf(file, "notify.rewind=%d\n", g_notify_rewind ? 1 : 0);
+    fprintf(file, "notify.fast_forward=%d\n", g_notify_fast_forward ? 1 : 0);
     fprintf(file, "border.enabled=%d\n", g_border_enabled ? 1 : 0);
     fprintf(file, "sgb.colors=%d\n", g_sgb_colors_pref ? 1 : 0);
     fprintf(file, "sgb.cart_border=%d\n", g_sgb_cart_border_enabled ? 1 : 0);
     fprintf(file, "diag.show_fps=%d\n", g_show_fps ? 1 : 0);
+    fprintf(file, "diag.show_overlay=%d\n", g_show_overlay ? 1 : 0);
+    if (g_launcher_skip_pref >= 0) {
+        fprintf(file, "launcher.skip=%d\n", g_launcher_skip_pref);
+    }
     if (!g_active_shader_pref.empty()) {
         fprintf(file, "shader.active=%s\n", g_active_shader_pref.c_str());
     }
@@ -1907,6 +2232,48 @@ static void set_savestate_status(const char* action, int slot, bool success, con
     g_savestate_status = message;
 }
 
+/* RetroArch's state messages (saved / loaded / state slot), bottom left for a
+ * few seconds; `shown` is the matching notify.* setting. A failed
+ * save or load passes true, so it always shows. The Esc menu's footer shows
+ * the message while that menu is open, the settings window has its own
+ * status line. */
+static void post_state_notice(const std::string& text, bool shown) {
+#if defined(RECOMP_LAUNCHER) && defined(RECOMP_RUNTIME_UI_HAS_STATUS)
+    if (g_runtime_ui && recomp_runtime_ui_is_open(g_runtime_ui)) {
+        recomp_runtime_ui_set_status(g_runtime_ui, text.c_str());
+        return;
+    }
+#endif
+    if (!shown || menu_open()) return;
+    g_state_notice = text;
+    g_state_notice_ms = SDL_GetTicks64();
+}
+
+/* "State slot: 3 (empty)" / "State slot: 3 (saved Sep 25 13:35)". */
+static std::string savestate_slot_summary(const GBContext* ctx, int slot) {
+    std::string text = "State slot: " + std::to_string(slot + 1);
+    std::string path;
+    if (!savestate_slot_exists(ctx, slot, &path)) return text + " (empty)";
+    std::error_code ec;
+    const fs::file_time_type written = fs::last_write_time(fs::path(path), ec);
+    if (ec) return text;
+    const auto system_written = std::chrono::system_clock::now() +
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            written - fs::file_time_type::clock::now());
+    const time_t when = std::chrono::system_clock::to_time_t(system_written);
+    const struct tm* local = localtime(&when);
+    char stamp[32];
+    if (!local || !strftime(stamp, sizeof(stamp), "%b %d %H:%M", local)) return text;
+    return text + " (saved " + stamp + ")";
+}
+
+static void select_savestate_slot(const GBContext* ctx, int slot) {
+    g_savestate_slot = (slot % GB_SAVESTATE_SLOT_COUNT + GB_SAVESTATE_SLOT_COUNT) % GB_SAVESTATE_SLOT_COUNT;
+    g_savestate_status = "Selected slot " + std::to_string(g_savestate_slot + 1);
+    save_runtime_preferences();
+    post_state_notice(savestate_slot_summary(ctx, g_savestate_slot), g_notify_slot);
+}
+
 static bool recreate_streaming_texture(void);
 static void set_app_suspended(bool suspended);
 
@@ -1945,8 +2312,26 @@ static bool input_action_is_pressed(GBInputAction action) {
     return false;
 }
 
+static uint8_t current_joypad_input(void) {
+    return (uint8_t)((g_joypad_dpad & 0x0F) | ((g_joypad_buttons & 0x0F) << 4));
+}
+
+static void set_user_paused(bool paused) {
+    if (g_user_paused == paused) {
+        return;
+    }
+    g_user_paused = paused;
+    g_frame_advance_pending = 0;
+    g_pause_input = current_joypad_input();
+    g_pause_input_frames = 0;
+    /* audio_output_should_run() is false while paused: this drops the queued
+     * samples and pauses the device, and on resume it refills before playing. */
+    reset_audio_output_buffer(true);
+}
+
 static void update_runtime_action_state(GBContext* ctx) {
     const int previous_effective_speed = effective_speed_percent();
+    const bool audio_was_running = audio_output_should_run();
 
     for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
         if (!input_action_is_runtime((GBInputAction)action)) {
@@ -1970,19 +2355,16 @@ static void update_runtime_action_state(GBContext* ctx) {
                     break;
 
                 case GB_INPUT_ACTION_PREVIOUS_STATE_SLOT:
-                    g_savestate_slot = (g_savestate_slot + GB_SAVESTATE_SLOT_COUNT - 1) % GB_SAVESTATE_SLOT_COUNT;
-                    g_savestate_status = "Selected slot " + std::to_string(g_savestate_slot + 1);
-                    save_runtime_preferences();
+                    select_savestate_slot(ctx, g_savestate_slot - 1);
                     break;
 
                 case GB_INPUT_ACTION_NEXT_STATE_SLOT:
-                    g_savestate_slot = (g_savestate_slot + 1) % GB_SAVESTATE_SLOT_COUNT;
-                    g_savestate_status = "Selected slot " + std::to_string(g_savestate_slot + 1);
-                    save_runtime_preferences();
+                    select_savestate_slot(ctx, g_savestate_slot + 1);
                     break;
 
                 case GB_INPUT_ACTION_TOGGLE_OVERLAY:
                     g_show_overlay = !g_show_overlay;
+                    save_runtime_preferences();
                     break;
 
                 case GB_INPUT_ACTION_TOGGLE_MUTE:
@@ -1994,7 +2376,21 @@ static void update_runtime_action_state(GBContext* ctx) {
                     g_show_menu = !g_show_menu;
                     break;
 
+                case GB_INPUT_ACTION_PAUSE:
+                    set_user_paused(!g_user_paused);
+                    break;
+
+                case GB_INPUT_ACTION_FRAME_ADVANCE:
+                    /* While running, stop at the end of the current frame. */
+                    if (g_user_paused) {
+                        g_frame_advance_pending++;
+                    } else {
+                        set_user_paused(true);
+                    }
+                    break;
+
                 case GB_INPUT_ACTION_FAST_FORWARD:
+                case GB_INPUT_ACTION_REWIND:   /* held; rewind_before_frame() reads it */
                 case GB_INPUT_ACTION_RIGHT:
                 case GB_INPUT_ACTION_LEFT:
                 case GB_INPUT_ACTION_UP:
@@ -2012,10 +2408,10 @@ static void update_runtime_action_state(GBContext* ctx) {
         g_runtime_action_pressed[action] = pressed;
     }
 
-    g_fast_forward_active = g_runtime_action_pressed[GB_INPUT_ACTION_FAST_FORWARD];
+    g_fast_forward_active = g_runtime_action_pressed[GB_INPUT_ACTION_FAST_FORWARD] || g_debug_fast_forward;
 
     if (effective_speed_percent() != previous_effective_speed) {
-        reset_audio_output_buffer(true);
+        on_speed_changed(audio_was_running);
     }
 }
 
@@ -2035,12 +2431,11 @@ static void rebuild_manual_joypad_state_from_bindings(void) {
 
 static void update_effective_joypad_state(void) {
     rebuild_manual_joypad_state_from_bindings();
-    /* While the in-game menu is up, hide all joypad activity from the
-     * cart. The game keeps running (so NPCs walk, music plays, RTC
-     * advances), but arrow keys / A / Start used to navigate the
-     * menu don't bleed through and move the player or open the cart's
-     * own menu. Active-low: 0xFF = nothing pressed. */
-    if (g_show_menu) {
+    /* While a menu is up, hide all joypad activity from the cart, so keys
+     * that navigate the menu (or type into it) never move the player or
+     * open the cart's own menu, also with Pause in Menu off. Active-low:
+     * 0xFF = nothing pressed. */
+    if (menu_open()) {
         g_joypad_dpad = 0xFF;
         g_joypad_buttons = 0xFF;
         return;
@@ -2053,6 +2448,32 @@ static void request_joypad_interrupt(GBContext* ctx) {
     if (!ctx) return;
     ctx->io[0x0F] |= 0x10;
     if (ctx->halted) ctx->halted = 0;
+}
+
+/* Called wherever a menu may have opened or closed. Every binding starts
+ * released either way, as RetroArch blocks input across a menu toggle: what
+ * was held when the menu opened must not stay held for the game, and what was
+ * pressed in the menu must not reach it afterwards. The game's sound stops
+ * and starts with the game. */
+static void menu_visibility_changed(void) {
+    static bool was_open = false;
+    const bool open = menu_open();
+    if (open == was_open) return;
+    was_open = open;
+    clear_all_binding_pressed_state();
+    update_effective_joypad_state();
+    update_runtime_action_state(g_registered_ctx);
+    if (g_menu_pauses_game) reset_audio_output_buffer(true);
+    if (!open) {
+        g_menu_text_input = false;
+        g_menu_popup_open = false;
+    }
+}
+
+static void set_menu_pauses_game(bool pauses) {
+    if (g_menu_pauses_game == pauses) return;
+    g_menu_pauses_game = pauses;
+    reset_audio_output_buffer(true);   /* the sound stops or starts with the game */
 }
 
 static bool input_state_has_press(uint8_t dpad, uint8_t buttons) {
@@ -2404,6 +2825,7 @@ static int round_to_int(double value) {
  * ========================================================================== */
 
 static bool sgb_cart_border_active(void) {
+    if (view_width() != GB_SCREEN_WIDTH || view_height() != GB_SCREEN_HEIGHT) return false;
     if (!g_sgb_cart_border_enabled) return false;
     if (!g_sgb_cart_border_texture) return false;
     /* Border render is gated on its own display flag — independent of
@@ -2418,17 +2840,17 @@ static bool sgb_cart_border_active(void) {
 }
 
 static int border_content_width(void) {
-    if ((g_border_enabled && g_border_texture) || sgb_cart_border_active()) {
+    if ((g_border_enabled && g_border_texture && view_width() == GB_SCREEN_WIDTH && view_height() == GB_SCREEN_HEIGHT) || sgb_cart_border_active()) {
         return GB_BORDER_FULL_W;
     }
-    return presentation_width();   /* 160 unless the extended view is armed */
+    return view_width();   /* 160 unless the extended view is armed */
 }
 
 static int border_content_height(void) {
-    if ((g_border_enabled && g_border_texture) || sgb_cart_border_active()) {
+    if ((g_border_enabled && g_border_texture && view_width() == GB_SCREEN_WIDTH && view_height() == GB_SCREEN_HEIGHT) || sgb_cart_border_active()) {
         return GB_BORDER_FULL_H;
     }
-    return GB_SCREEN_HEIGHT;
+    return view_height();
 }
 
 static void unload_border_texture(void) {
@@ -2679,35 +3101,86 @@ static void update_render_filter(void) {
      * gone, so this is a no-op kept around for the existing call sites. */
 }
 
-static void update_game_viewport(void) {
-    const int content_w = border_content_width();
-    const int content_h = border_content_height();
+/* Game Dimming and Menu Opacity: the menus redraw with them while they are
+ * dragged; saved when let go. */
+static void menu_look_sliders(void) {
+    auto slider = [](const char* label, int* percent, const char* tip) {
+        const bool changed = ImGui::SliderInt(label, percent, 0, 100, "%d", ImGuiSliderFlags_NoInput);
+        if (ImGui::IsItemDeactivatedAfterEdit() || (changed && !ImGui::IsItemActive())) {
+            save_runtime_preferences();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    };
+    slider("Game Dimming %", &g_menu_dim_percent,
+           "How dark the game gets behind a menu. 0 leaves it as it is,\n"
+           "so a shader preset's effect shows while you tune it.");
+    slider("Menu Opacity %", &g_menu_opacity_percent,
+           "How solid the menus' own backgrounds are. Lower it too to\n"
+           "see the game through the menu itself.");
+}
 
-    if (!g_window) {
+/* The largest whole scale at which content fits the window, at least 1. */
+static int largest_whole_scale(int window_w, int window_h, int content_w, int content_h) {
+    const int scale = std::min(window_w / content_w, window_h / content_h);
+    return scale < 1 ? 1 : scale;
+}
+
+static void update_game_viewport(void) {
+    /* The custom view's native picture on its own has its own scaling, and
+     * the part of the view gb_custom_fit kept may ask for a scale. Borders
+     * surround a 160 x 144 view only. */
+    const bool border = !g_native_presented && border_content_width() != view_width();
+    const int content_w = border ? border_content_width() : presentation_width();
+    const int content_h = border ? border_content_height() : presentation_height();
+    int mode = (int)g_render_scaling_mode, whole_scale = 0;
+    if (g_native_presented && gb_custom_native_scaling >= 0) {
+        if (gb_custom_native_scaling == GB_CUSTOM_NATIVE_WHOLE_SCALE) {
+            whole_scale = std::max(gb_custom_native_scale, 1);
+        } else if (gb_custom_native_scaling < (int)IM_ARRAYSIZE(g_render_scaling_mode_names)) {
+            mode = gb_custom_native_scaling;
+        }
+    }
+
+    int window_w = 0;
+    int window_h = 0;
+    if (g_window) {
+        SDL_GetWindowSize(g_window, &window_w, &window_h);
+    } else if (!gb_custom_render) {
         g_game_viewport.x = 0;
         g_game_viewport.y = 0;
         g_game_viewport.w = content_w * g_scale;
         g_game_viewport.h = content_h * g_scale;
         return;
+    } else {
+        /* No window (benchmark runs): the windowed size the custom view
+         * resolves against, so the debug server's `window` reports its rect. */
+        window_w = g_windowed_width;
+        window_h = g_windowed_height;
     }
-
-    int window_w = 0;
-    int window_h = 0;
-    SDL_GetWindowSize(g_window, &window_w, &window_h);
     if (window_w <= 0) window_w = content_w;
     if (window_h <= 0) window_h = content_h;
 
     int viewport_w = window_w;
     int viewport_h = window_h;
 
-    switch (g_render_scaling_mode) {
+    if (!g_native_presented && !border && g_custom_present_scale > 0.0) {
+        viewport_w = round_to_int(content_w * g_custom_present_scale);
+        viewport_h = round_to_int(content_h * g_custom_present_scale);
+        mode = -1;
+    }
+    if (whole_scale > 0) {
+        /* A chosen whole scale, down to the largest that fits the window. */
+        whole_scale = std::min(whole_scale, largest_whole_scale(window_w, window_h, content_w, content_h));
+        viewport_w = content_w * whole_scale;
+        viewport_h = content_h * whole_scale;
+        mode = -1;
+    }
+
+    switch (mode) {
+        case -1:
+            break;
         case GB_RENDER_SCALING_PIXEL_PERFECT: {
-            int scale_x = window_w / content_w;
-            int scale_y = window_h / content_h;
-            int integer_scale = (scale_x < scale_y) ? scale_x : scale_y;
-            if (integer_scale < 1) {
-                integer_scale = 1;
-            }
+            const int integer_scale = largest_whole_scale(window_w, window_h, content_w, content_h);
             viewport_w = content_w * integer_scale;
             viewport_h = content_h * integer_scale;
             break;
@@ -2751,8 +3224,19 @@ static void update_game_viewport(void) {
 }
 
 static void apply_window_scale_preset(void) {
-    g_windowed_width = border_content_width() * g_scale;
-    g_windowed_height = border_content_height() * g_scale;
+    /* An expanded view can be thousands of pixels: a window scale it would
+     * overflow the screen at steps down to the largest that fits (at least 1). */
+    int scale = g_scale;
+    SDL_Rect usable;
+    if (gb_custom_render && g_window &&
+        SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(g_window), &usable) == 0) {
+        while (scale > 1 && (border_content_width() * scale > usable.w ||
+                             border_content_height() * scale > usable.h)) {
+            --scale;
+        }
+    }
+    g_windowed_width = border_content_width() * scale;
+    g_windowed_height = border_content_height() * scale;
 
     if (g_window && g_fullscreen_mode == 0) {
         SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
@@ -2842,7 +3326,7 @@ static bool recreate_streaming_texture(void) {
      * set sane defaults so even pre-shader code paths see a usable
      * texture. */
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                 presentation_width(), GB_SCREEN_HEIGHT, 0,
+                 presentation_width(), presentation_height(), 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -2876,16 +3360,15 @@ static void reset_runtime_display_defaults(void) {
     g_speed_percent = 100;
     g_palette_idx = 0;
     g_smooth_lcd_transitions = true;
-    g_vsync = false;
+    g_vsync = false;   /* update_swap_interval() applies it */
     g_show_overlay = false;
     g_max_speed_mode = false;
+    g_fast_forward_speed_percent = 250;
+    g_max_speed_percent = GB_SPEED_UNLIMITED;
+    g_fast_forward_frameskip = true;
     g_render_scaling_mode = GB_RENDER_SCALING_PIXEL_PERFECT;
     g_render_filter_mode = GB_RENDER_FILTER_NEAREST;
     update_render_filter();
-
-    if (g_gl_context) {
-        SDL_GL_SetSwapInterval(0);
-    }
 
     const int want_fullscreen_mode = platform_default_fullscreen_mode();
     if (g_window) {
@@ -2934,10 +3417,66 @@ static const RecompRuntimeUiItem g_runtime_extra_items[] = {
     { RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING, "Graphics", "LCD shader",
       "Simulate the response and subpixels of the original LCD.",
       RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    /* Short descriptions: the row's -/+ buttons sit over the end of them. */
+    { "gbc.menu_dim", "Display", "Game dimming",
+      "How dark the game gets behind a menu.",
+      RECOMP_RUNTIME_UI_INT, 0, 100, 10, NULL, 0, NULL },
+    { "gbc.menu_opacity", "Display", "Menu opacity",
+      "How solid the menus' backgrounds are.",
+      RECOMP_RUNTIME_UI_INT, 0, 100, 10, NULL, 0, NULL },
+    { "gbc.state_slot", "System", "State slot",
+      "The slot Save state and Load state use.",
+      RECOMP_RUNTIME_UI_INT, 1, GB_SAVESTATE_SLOT_COUNT, 1, NULL, 0, NULL },
     { "gbc.advanced", "System", "Advanced settings",
       "Open Game Boy-specific palettes, borders, link, cheats, and controls.",
       RECOMP_RUNTIME_UI_ACTION, 0, 0, 0, NULL, 0, NULL },
+    { "gbc.pause_in_menu", "System", "Pause in menu",
+      "Hold the game while a menu is open.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "gbc.restart", "System", "Restart game",
+      "Back to the boot, keeping saves. Press twice.",
+      RECOMP_RUNTIME_UI_ACTION, 0, 0, 0, NULL, 0, NULL },
+    { "gbc.return_to_launcher", "System", "Return to launcher",
+      "Close the game, open the launcher. Press twice.",
+      RECOMP_RUNTIME_UI_ACTION, 0, 0, 0, NULL, 0, NULL },
+    { "gbc.quit", "System", "Quit game",
+      "Close the game. Press twice.",
+      RECOMP_RUNTIME_UI_ACTION, 0, 0, 0, NULL, 0, NULL },
+    { "gbc.notify_save_load", "Notifications", "Save and load",
+      "A state saved or loaded. Failures always show.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "gbc.notify_slot", "Notifications", "State slot",
+      "The slot picked, and whether it holds a state.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "gbc.notify_rewind", "Notifications", "Rewind",
+      "Rewinding, and the buffer running out.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "gbc.notify_fast_forward", "Notifications", "Fast forward",
+      "Fast forward on, and its speed.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
 };
+
+/* Leaving the game from this menu takes a second press within three seconds;
+ * the first one says so in the footer (with a recomp-ui that has no footer
+ * message, one press does). */
+static bool runtime_ui_confirmed(const char* key, const char* prompt) {
+#ifndef RECOMP_RUNTIME_UI_HAS_STATUS
+    (void)key; (void)prompt;
+    return true;
+#else
+    static std::string pending;
+    static uint64_t pending_ms = 0;
+    const uint64_t now = SDL_GetTicks64();
+    if (pending == key && now - pending_ms <= 3000) {
+        pending.clear();
+        return true;
+    }
+    pending = key;
+    pending_ms = now;
+    recomp_runtime_ui_set_status(g_runtime_ui, prompt);
+    return false;
+#endif
+}
 
 static int runtime_ui_get(void*, const RecompRuntimeUiItem* item, int* out) {
     if (!item || !out) return 0;
@@ -2948,6 +3487,14 @@ static int runtime_ui_get(void*, const RecompRuntimeUiItem* item, int* out) {
     else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = (int)std::min(g_audio_volume_percent, 100u);
     else if (strcmp(item->key, "gbc.scaling_mode") == 0) *out = (int)g_render_scaling_mode;
     else if (strcmp(item->key, "gbc.color_correction") == 0) *out = g_color_correction;
+    else if (strcmp(item->key, "gbc.menu_dim") == 0) *out = g_menu_dim_percent;
+    else if (strcmp(item->key, "gbc.menu_opacity") == 0) *out = g_menu_opacity_percent;
+    else if (strcmp(item->key, "gbc.pause_in_menu") == 0) *out = g_menu_pauses_game;
+    else if (strcmp(item->key, "gbc.state_slot") == 0) *out = g_savestate_slot + 1;
+    else if (strcmp(item->key, "gbc.notify_save_load") == 0) *out = g_notify_save_load;
+    else if (strcmp(item->key, "gbc.notify_slot") == 0) *out = g_notify_slot;
+    else if (strcmp(item->key, "gbc.notify_rewind") == 0) *out = g_notify_rewind;
+    else if (strcmp(item->key, "gbc.notify_fast_forward") == 0) *out = g_notify_fast_forward;
     else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING) == 0) {
         const int active = g_shader_pipeline ? gb_shader_pipeline_active(g_shader_pipeline) : -1;
         const char* name = active >= 0 ? gb_shader_pipeline_name(g_shader_pipeline, active) : NULL;
@@ -2976,6 +3523,25 @@ static int runtime_ui_set(void*, const RecompRuntimeUiItem* item, int value) {
     } else if (strcmp(item->key, "gbc.color_correction") == 0) {
         g_color_correction = std::max(0, std::min(value, 2));
         set_active_game_pref_int("color_correction", g_color_correction);
+    } else if (strcmp(item->key, "gbc.menu_dim") == 0) {
+        g_menu_dim_percent = std::max(0, std::min(value, 100));
+    } else if (strcmp(item->key, "gbc.menu_opacity") == 0) {
+        g_menu_opacity_percent = std::max(0, std::min(value, 100));
+    } else if (strcmp(item->key, "gbc.pause_in_menu") == 0) {
+        set_menu_pauses_game(value != 0);
+    } else if (strcmp(item->key, "gbc.state_slot") == 0) {
+        /* Saves the preference and puts the slot's summary in the footer,
+         * which "Saved" would replace. */
+        select_savestate_slot(g_registered_ctx, std::max(1, std::min(value, GB_SAVESTATE_SLOT_COUNT)) - 1);
+        return 0;
+    } else if (strcmp(item->key, "gbc.notify_save_load") == 0) {
+        g_notify_save_load = value != 0;
+    } else if (strcmp(item->key, "gbc.notify_slot") == 0) {
+        g_notify_slot = value != 0;
+    } else if (strcmp(item->key, "gbc.notify_rewind") == 0) {
+        g_notify_rewind = value != 0;
+    } else if (strcmp(item->key, "gbc.notify_fast_forward") == 0) {
+        g_notify_fast_forward = value != 0;
     } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LCD_GHOSTING) == 0) {
         if (!g_shader_pipeline || !gb_shader_pipeline_set_active_by_name(
                 g_shader_pipeline, value ? "lcd" : "sharp")) return 0;
@@ -2990,17 +3556,32 @@ static int runtime_ui_action(void*, const RecompRuntimeUiItem* item) {
     if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME) == 0) {
         recomp_runtime_ui_close(g_runtime_ui);
     } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_SAVE_STATE) == 0) {
-        return save_savestate_slot(g_registered_ctx, g_savestate_slot);
+        /* The footer keeps the message save/load put there ("Done" would
+         * replace it). */
+        save_savestate_slot(g_registered_ctx, g_savestate_slot);
+        return 0;
     } else if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LOAD_STATE) == 0) {
-        return load_savestate_slot(g_registered_ctx, g_savestate_slot);
+        load_savestate_slot(g_registered_ctx, g_savestate_slot);
+        return 0;
     } else if (strcmp(item->key, "gbc.advanced") == 0) {
         recomp_runtime_ui_close(g_runtime_ui);
         g_show_menu = true;
+    } else if (strcmp(item->key, "gbc.restart") == 0) {
+        if (!runtime_ui_confirmed(item->key, "Press again to restart")) return 0;
+        request_restart_game();
+    } else if (strcmp(item->key, "gbc.return_to_launcher") == 0) {
+        if (!runtime_ui_confirmed(item->key, "Press again for the launcher")) return 0;
+        request_exit(GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER);
+    } else if (strcmp(item->key, "gbc.quit") == 0) {
+        if (!runtime_ui_confirmed(item->key, "Press again to quit")) return 0;
+        request_exit(GB_PLATFORM_EXIT_QUIT);
     } else return 0;
     return 1;
 }
 
 static int runtime_ui_enabled(void*, const RecompRuntimeUiItem* item) {
+    if (strcmp(item->key, "gbc.restart") == 0) return can_restart_game();
+    if (strcmp(item->key, "gbc.return_to_launcher") == 0) return launcher_available();
     if (strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0)
         return g_fullscreen_mode == 0;
     if (strcmp(item->key, "gbc.color_correction") == 0)
@@ -3022,7 +3603,8 @@ static void create_runtime_ui(void) {
     config.menu.back_label = "B / Esc";
     config.menu.callbacks = { NULL, runtime_ui_get, runtime_ui_set,
                               runtime_ui_action, runtime_ui_enabled,
-                              runtime_ui_save, NULL };
+                              runtime_ui_save,
+                              [](void*, int) { menu_visibility_changed(); } };
     config.features = RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
                       RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
                       RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
@@ -3164,6 +3746,158 @@ static void ensure_lcd_off_framebuffer(void) {
     g_lcd_off_framebuffer_initialized = true;
 }
 
+static std::string action_hint_label(GBInputAction action) {
+    for (int slot = 0; slot < 2; slot++) {
+        if (binding_is_valid(g_keyboard_bindings[action][slot])) {
+            return binding_display_label(g_keyboard_bindings[action][slot]);
+        }
+    }
+    for (int slot = 0; slot < 2; slot++) {
+        if (binding_is_valid(g_controller_bindings[action][slot])) {
+            return binding_display_label(g_controller_bindings[action][slot]);
+        }
+    }
+    return "Unbound";
+}
+
+static void draw_pause_overlay(void) {
+    static const char* const names[8] = { "Right", "Left", "Up", "Down", "A", "B", "Select", "Start" };
+    const uint8_t input = current_joypad_input();
+    std::string held;
+    for (int bit = 0; bit < 8; bit++) {
+        if (!(input & (1u << bit))) {
+            held += held.empty() ? names[bit] : std::string(" + ") + names[bit];
+        }
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    const float pad = 8.0f * io.FontGlobalScale;
+    ImGui::SetNextWindowPos(ImVec2(pad, pad), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    if (ImGui::Begin("##pause_overlay", NULL,
+                     ImGuiWindowFlags_NoDecoration |
+                     ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoInputs)) {
+        ImGui::Text("Paused - %s: resume, %s: advance%s%s%s",
+                    action_hint_label(GB_INPUT_ACTION_PAUSE).c_str(),
+                    action_hint_label(GB_INPUT_ACTION_FRAME_ADVANCE).c_str(),
+                    g_rewind_enabled ? ", " : "",
+                    g_rewind_enabled ? action_hint_label(GB_INPUT_ACTION_REWIND).c_str() : "",
+                    g_rewind_enabled ? ": back" : "");
+        ImGui::Text("Held: %s", held.empty() ? "nothing" : held.c_str());
+        ImGui::Text("Frames run with this input: %u",
+                    input == g_pause_input ? g_pause_input_frames : 0u);
+    }
+    ImGui::End();
+}
+
+/* RetroArch's messages, bottom left, each above the ones drawn before it:
+ * `stacked` is the height those took, and the new total is returned. */
+static float draw_corner_message(const char* id, const char* text, float alpha, float stacked) {
+    ImGuiIO& io = ImGui::GetIO();
+    const float pad = 8.0f * io.FontGlobalScale;
+    const float bottom = io.DisplaySize.y - pad - stacked;
+    float height = 0.0f;
+    ImGui::SetNextWindowPos(ImVec2(pad, bottom), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+    if (ImGui::Begin(id, NULL,
+                     ImGuiWindowFlags_NoDecoration |
+                     ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoInputs)) {
+        ImGui::TextUnformatted(text);
+        height = ImGui::GetWindowHeight();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+    return height > 0.0f ? stacked + height + pad * 0.5f : stacked;
+}
+
+/* The rewind messages while the key is held, RetroArch's fast-forward
+ * indicator while a Fast Forward shortcut is on, and the latest state message
+ * (post_state_notice) for three seconds with the last half second fading, as
+ * RetroArch's 180-frame messages. notify.rewind / notify.fast_forward turn
+ * the first two off. */
+static const char* rewind_status_text(void);
+static std::string fast_forward_status_text(void);
+static void draw_corner_messages(void) {
+    static constexpr uint64_t kShowMs = 3000, kFadeMs = 500;
+    float stacked = 0.0f;
+    if (const char* rewind_text = rewind_status_text(); rewind_text && g_notify_rewind) {
+        stacked = draw_corner_message("##rewind_overlay", rewind_text, 1.0f, stacked);
+    }
+    if (const std::string fast_forward = fast_forward_status_text(); !fast_forward.empty() && g_notify_fast_forward) {
+        stacked = draw_corner_message("##fast_forward_overlay", fast_forward.c_str(), 1.0f, stacked);
+    }
+    if (g_state_notice.empty()) return;
+    const uint64_t age = SDL_GetTicks64() - g_state_notice_ms;
+    if (age >= kShowMs) {
+        g_state_notice.clear();
+        return;
+    }
+    const float alpha = age + kFadeMs > kShowMs ? (float)(kShowMs - age) / (float)kFadeMs : 1.0f;
+    draw_corner_message("##state_notice", g_state_notice.c_str(), alpha, stacked);
+}
+
+/* RetroArch's fast-forward frame skip (video_driver_frame), ported: while the
+ * game runs above 100% (RetroArch: nonblocking, which is also when V-Sync is
+ * off here), the time between frames accumulates and a frame is drawn only
+ * once it reaches the display's refresh period. The first frame's interval is
+ * ignored (no rubber band at the start), a frame drawn with a whole spare
+ * interval in hand drops it (so an outside frame limiter cannot pull the
+ * speed down to 1x), and a runaway accumulator, when the host cannot keep up,
+ * is reset. The menu and pause always draw. Deviation: RetroArch keeps the
+ * interval in 16 bits, which wraps after 65 ms; here it saturates. */
+static bool fast_forward_frame_due(void) {
+    static uint64_t last_time;
+    static int32_t accumulator;
+    static int8_t nonblock_active;
+    const uint64_t new_time = SDL_GetPerformanceCounter() * 1000000ull / SDL_GetPerformanceFrequency();
+    bool render = true;
+    if (g_fast_forward_frameskip && effective_speed_percent() > 100 && !menu_open() && !g_user_paused) {
+        int refresh = 60;
+        SDL_DisplayMode mode;
+        const int display = g_window ? SDL_GetWindowDisplayIndex(g_window) : 0;
+        if (SDL_GetCurrentDisplayMode(display < 0 ? 0 : display, &mode) == 0 && mode.refresh_rate > 0) {
+            refresh = mode.refresh_rate;
+        }
+        const int32_t previous = accumulator;
+        const int32_t delta = (int32_t)std::min<uint64_t>(new_time - last_time, 65535);
+        const int32_t target = (int32_t)(1000000.0f / (float)refresh);
+        if (!nonblock_active) {
+            nonblock_active = -1;
+        } else if (nonblock_active < 0) {
+            nonblock_active = 1;
+        }
+        if (nonblock_active > 0) {
+            accumulator += delta;
+        }
+        render = accumulator >= target;
+        if (render) {
+            accumulator -= target;
+            if (previous - accumulator >= delta) {
+                accumulator -= delta;
+            }
+            if (accumulator < 0 || accumulator > target) {
+                accumulator = 0;
+            }
+        }
+    } else {
+        nonblock_active = 0;
+        accumulator = 0;
+    }
+    last_time = new_time;
+    return render;
+}
+
 static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_frame) {
     if (!framebuffer) {
         DBG_FRAME("Platform render_frame: SKIPPED (null: tex=%d, gl=%d, fb=%d)",
@@ -3178,23 +3912,72 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         g_last_guest_framebuffer_valid = true;
     }
 
+    /* A skipped frame is still counted above; one picked for a dump is drawn. */
+    const bool dump_frame =
+        (count_guest_frame &&
+         frame_is_selected_for_dump(g_dump_frames, g_dump_count, (uint32_t)g_frame_count)) ||
+        frame_is_selected_for_dump(g_dump_present_frames, g_dump_present_count, (uint32_t)g_frame_count);
+    if (!g_benchmark_mode && g_gl_context && !fast_forward_frame_due() && !dump_frame) {
+        g_frames_skipped++;
+        g_last_timing.upload_ms = 0.0;
+        g_last_timing.compose_ms = 0.0;
+        g_last_timing.present_ms = 0.0;
+        g_last_timing.total_render_ms = 0.0;
+        return;
+    }
+
     if (gb_custom_render && g_registered_ctx) {
         int ww = g_windowed_width, wh = g_windowed_height;
         if (g_window) SDL_GetWindowSize(g_window, &ww, &wh);
-        int width = gb_custom_resolve_width(ww, wh);
-        if (width != gb_custom_width) {
-            gb_custom_width = width;
+        int width, height;
+        const int whole_pixels = g_render_scaling_mode == GB_RENDER_SCALING_PIXEL_PERFECT;
+        gb_custom_resolve_size(ww, wh, whole_pixels, &width, &height);
+        const bool was_native = g_native_presented;
+        const int shown_width = presentation_width(), shown_height = presentation_height();
+        const double shown_scale = g_custom_present_scale;
+        gb_custom_view_width = width;
+        gb_custom_view_height = height;
+        /* The game may show less of the world than the view (a room smaller
+         * than it), at a scale of its own. */
+        double scale = 0.0;
+        if (gb_custom_fit) {
+            gb_custom_fit(g_registered_ctx, ww, wh, whole_pixels, &width, &height, &scale);
+            width = std::max(GB_SCREEN_WIDTH, std::min(width, gb_custom_view_width));
+            height = std::max(GB_SCREEN_HEIGHT, std::min(height, gb_custom_view_height));
+        }
+        gb_custom_width = width;
+        gb_custom_height = height;
+        g_custom_present_scale = scale > 0.0 ? scale : 0.0;
+        g_custom_framebuffer.resize((size_t)width * height);
+        const int native_width = gb_ws_render_width();
+        /* A frame the game declines shows the native picture: on its own and
+         * scaled to the window, or centered in the view. Frames that are not
+         * new guest frames (the LCD is off, or the last one presented again)
+         * keep the last frame's choice, so a blank LCD never switches it. */
+        static int applied_scaling = GB_CUSTOM_NATIVE_IN_VIEW, applied_scale = 1;
+        const bool setting_changed = gb_custom_native_scaling != applied_scaling ||
+                                     gb_custom_native_scale != applied_scale;
+        applied_scaling = gb_custom_native_scaling;
+        applied_scale = gb_custom_native_scale;
+        const bool drawn = gb_custom_draw_frame(g_registered_ctx, g_custom_framebuffer.data(), width,
+                                                framebuffer);
+        if (count_guest_frame || setting_changed) {
+            g_native_presented = !drawn && gb_custom_native_scaling != GB_CUSTOM_NATIVE_IN_VIEW &&
+                                 native_width == GB_SCREEN_WIDTH;
+        }
+        if (!g_native_presented) {
+            if (!drawn) {
+                gb_custom_center_native(g_custom_framebuffer.data(), width, framebuffer, native_width);
+            }
+            framebuffer = g_custom_framebuffer.data();
+        }
+        if (presentation_width() != shown_width || presentation_height() != shown_height ||
+            g_native_presented != was_native || setting_changed) {
             recreate_streaming_texture();
             update_game_viewport();
+        } else if (g_custom_present_scale != shown_scale) {
+            update_game_viewport();
         }
-        const int native_width = gb_ws_render_width();
-        if (!gb_custom_render(g_registered_ctx, g_custom_framebuffer, width, framebuffer)) {
-            std::fill_n(g_custom_framebuffer, width * GB_SCREEN_HEIGHT, 0xff000000u);
-            for (int y = 0; y < GB_SCREEN_HEIGHT; ++y)
-                memcpy(g_custom_framebuffer + y * width + (width - native_width) / 2,
-                       framebuffer + y * native_width, native_width * sizeof(uint32_t));
-        }
-        framebuffer = g_custom_framebuffer;
     }
 
     /* Publish what the user is about to see. Deliberately placed after the
@@ -3205,14 +3988,14 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
      * allocations, so a pointer is enough; it names the most recent frame. */
     g_presented_frame = framebuffer;
     g_presented_width = presentation_width();
-    g_presented_height = GB_SCREEN_HEIGHT;
+    g_presented_height = presentation_height();
 
     if (count_guest_frame) {
         /* Handle Screenshot Dumping */
         if (frame_is_selected_for_dump(g_dump_frames, g_dump_count, (uint32_t)g_frame_count)) {
             char filename[128];
             snprintf(filename, sizeof(filename), "%s_%05d.ppm", g_screenshot_prefix, g_frame_count);
-            save_ppm(filename, framebuffer, presentation_width(), GB_SCREEN_HEIGHT, g_frame_count);
+            save_ppm(filename, framebuffer, presentation_width(), presentation_height(), g_frame_count);
         }
     }
 
@@ -3224,7 +4007,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                  g_screenshot_prefix,
                  g_frame_count,
                  (unsigned long long)g_present_count);
-        save_ppm(filename, framebuffer, presentation_width(), GB_SCREEN_HEIGHT, g_frame_count);
+        save_ppm(filename, framebuffer, presentation_width(), presentation_height(), g_frame_count);
     }
 
     if (g_benchmark_mode || g_app_suspended || !g_gl_context) {
@@ -3252,7 +4035,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     if (count_guest_frame && g_frame_count <= 3) {
         bool has_content = false;
         uint32_t white = 0xFFE0F8D0;
-        for (int i = 0; i < presentation_width() * GB_SCREEN_HEIGHT; i++) {
+        for (int i = 0; i < presentation_width() * presentation_height(); i++) {
             if (framebuffer[i] != white) {
                 has_content = true;
                 break;
@@ -3262,22 +4045,6 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                   g_frame_count, has_content, framebuffer[0]);
     }
 
-    if (count_guest_frame && (g_frame_count % 60) == 0) {
-        char title[64];
-        snprintf(title, sizeof(title), "GameBoy Recompiled - Frame %d", g_frame_count);
-        SDL_SetWindowTitle(g_window, title);
-    } else if (!count_guest_frame && (g_present_count % 30) == 0) {
-        char title[96];
-        if (g_frame_count == 0) {
-            snprintf(title, sizeof(title), "GameBoy Recompiled - Starting... (%llu)",
-                     (unsigned long long)(g_present_count / 30));
-        } else {
-            snprintf(title, sizeof(title), "GameBoy Recompiled - Frame %d (Working...)",
-                     g_frame_count);
-        }
-        SDL_SetWindowTitle(g_window, title);
-    }
-
     /* Upload framebuffer to the GL game texture. The PPU stores pixels
      * as 0xAARRGGBB (CPU-side ARGB), which on a little-endian host is
      * BGRA in memory. GL ES 2.0 doesn't reliably expose GL_BGRA, so
@@ -3285,7 +4052,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
      * override (Original / Pocket / Plasma) is applied during the same
      * pass since we're touching every pixel anyway. */
     double upload_start_ms = sdl_now_ms();
-    static uint32_t s_upload_buf[GB_CUSTOM_FRAME_SIZE];
+    const size_t frame_pixels = (size_t)presentation_width() * presentation_height();
+    static std::vector<uint32_t> s_upload_buf;
+    s_upload_buf.resize(frame_pixels);
     {
         const uint32_t* src = framebuffer;
         /* Present-time screen-color LUT (opt-in via GBCRECOMP_SCREEN; default
@@ -3297,10 +4066,11 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             g_color_lut_resolved = true;
         }
         if (g_color_lut && !color_lut_is_passthrough(g_color_lut)) {
-            static uint32_t s_lut_buf[GB_CUSTOM_FRAME_SIZE];
-            color_lut_map_argb8888(g_color_lut, framebuffer, s_lut_buf,
-                                   presentation_width(), GB_SCREEN_HEIGHT);
-            src = s_lut_buf;
+            static std::vector<uint32_t> s_lut_buf;
+            s_lut_buf.resize(frame_pixels);
+            color_lut_map_argb8888(g_color_lut, framebuffer, s_lut_buf.data(),
+                                   presentation_width(), presentation_height());
+            src = s_lut_buf.data();
         }
         /* Match the actual post-conversion DMG-green values produced by
          * ppu.c's rgb555_to_rgba (which uses *255/31 with integer
@@ -3337,7 +4107,27 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         const int16_t* cc = (g_color_correction == 1) ? cc_gbc :
                             (g_color_correction == 2) ? cc_gba : NULL;
 
-        for (int i = 0; i < presentation_width() * GB_SCREEN_HEIGHT; i++) {
+        /* Neither palette nor correction (the usual case): the swap alone,
+         * four pixels at a time. A 1920x1080 view is 2 million pixels. */
+        size_t first = 0;
+        if (!pal && !cc) {
+            uint32_t* dst = s_upload_buf.data();
+#if defined(__SSE2__)
+            const __m128i alpha_green = _mm_set1_epi32((int)0xFF00FF00u);
+            for (; first + 4 <= frame_pixels; first += 4) {
+                const __m128i c = _mm_loadu_si128((const __m128i*)(src + first));
+                /* 00RR00BB -> 00BB00RR: swap the 16-bit halves. */
+                __m128i rb = _mm_andnot_si128(alpha_green, c);
+                rb = _mm_shufflehi_epi16(_mm_shufflelo_epi16(rb, 0xB1), 0xB1);
+                _mm_storeu_si128((__m128i*)(dst + first), _mm_or_si128(_mm_and_si128(c, alpha_green), rb));
+            }
+#endif
+            for (; first < frame_pixels; first++) {
+                const uint32_t c = src[first];
+                dst[first] = (c & 0xFF00FF00u) | ((c >> 16) & 0xFFu) | ((c & 0xFFu) << 16);
+            }
+        }
+        for (size_t i = first; i < frame_pixels; i++) {
             uint32_t c = src[i];
             if (pal) {
                 if      (c == orig[0]) c = pal[0];
@@ -3364,8 +4154,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     }
     glBindTexture(GL_TEXTURE_2D, g_game_tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                    presentation_width(), GB_SCREEN_HEIGHT,
-                    GL_RGBA, GL_UNSIGNED_BYTE, s_upload_buf);
+                    presentation_width(), presentation_height(),
+                    GL_RGBA, GL_UNSIGNED_BYTE, s_upload_buf.data());
     glBindTexture(GL_TEXTURE_2D, 0);
     g_last_timing.upload_ms = sdl_now_ms() - upload_start_ms;
 
@@ -3381,9 +4171,11 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
     refresh_sgb_cart_border_texture();
     GLuint active_border = 0;
-    if (sgb_cart_border_active()) {
+    if (g_native_presented) {
+        /* The custom view's native picture has no border of its own. */
+    } else if (sgb_cart_border_active()) {
         active_border = g_sgb_cart_border_texture;
-    } else if (g_border_enabled && g_border_texture) {
+    } else if (g_border_enabled && g_border_texture && view_width() == GB_SCREEN_WIDTH && view_height() == GB_SCREEN_HEIGHT) {
         active_border = g_border_texture;
     }
 
@@ -3400,6 +4192,11 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
     if (g_shader_pipeline) {
         const int active_shader = gb_shader_pipeline_active(g_shader_pipeline);
+        /* The game image at (x, y, w, h), sampled by the built-in shader. */
+        auto draw_game = [&](int x, int y, int w, int h, int src_w, int src_h) {
+            gb_shader_pipeline_draw(g_shader_pipeline, g_game_tex, src_w, src_h,
+                                    x, y, w, h, draw_w, draw_h);
+        };
         if (active_border) {
             /* Border is always drawn with the passthrough "sharp" shader
              * — the user-selected effect applies to the game pixels
@@ -3420,17 +4217,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             if (active_shader >= 0) {
                 gb_shader_pipeline_set_active(g_shader_pipeline, active_shader);
             }
-            gb_shader_pipeline_draw(g_shader_pipeline,
-                                    g_game_tex,
-                                    GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT,
-                                    gb_x, gb_y, gb_w, gb_h,
-                                    draw_w, draw_h);
+            draw_game(gb_x, gb_y, gb_w, gb_h, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
         } else {
-            gb_shader_pipeline_draw(g_shader_pipeline,
-                                    g_game_tex,
-                                    presentation_width(), GB_SCREEN_HEIGHT,
-                                    vp_x, vp_y, vp_w, vp_h,
-                                    draw_w, draw_h);
+            draw_game(vp_x, vp_y, vp_w, vp_h, presentation_width(), presentation_height());
         }
     }
 
@@ -3440,14 +4229,22 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     ImGuiIO& imgui_io = ImGui::GetIO();
     imgui_io.FontGlobalScale = settings_ui_scale_for_size(imgui_io.DisplaySize);
 
+    g_menu_text_input = false;
+    g_menu_popup_open = false;
     if (g_show_menu) {
+        /* Game Dimming, under the window (whose own background is Menu
+         * Opacity); at the defaults the game shows about as little as it did
+         * under the window's old fixed 96%. */
+        ImGui::GetBackgroundDrawList()->AddRectFilled(
+            ImVec2(0.0f, 0.0f), imgui_io.DisplaySize,
+            IM_COL32(0, 0, 0, (int)(255.0f * menu_dim() + 0.5f)));
         const float ui_scale = imgui_io.FontGlobalScale;
         const float footer_height = ImGui::GetFrameHeightWithSpacing() *
                                     (g_launcher_return_enabled ? 3.8f : 3.0f);
 
         ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(imgui_io.DisplaySize, ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.96f);
+        ImGui::SetNextWindowBgAlpha(0.96f * menu_opacity());
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * ui_scale, 16.0f * ui_scale));
@@ -3473,20 +4270,64 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
          * ========================================================== */
 
         ImGui::TextDisabled("Playback");
-        if (ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500, "%d", ImGuiSliderFlags_NoInput)) {
-            reset_audio_output_buffer(true);
-        }
+        const bool audio_was_running = audio_output_should_run();
+        const int previous_speed = effective_speed_percent();
+        ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500, "%d", ImGuiSliderFlags_NoInput);
         if (ImGui::Button("Reset Speed")) {
             g_speed_percent = 100;
             g_max_speed_mode = false;
-            reset_audio_output_buffer(true);
         }
         ImGui::SameLine();
-        ImGui::TextDisabled("Effective: %d%%", effective_speed_percent());
+        if (effective_speed_percent() == GB_SPEED_UNLIMITED) {
+            ImGui::TextDisabled("Effective: Unlimited");
+        } else {
+            ImGui::TextDisabled("Effective: %d%%", effective_speed_percent());
+        }
         if (g_fast_forward_active) {
-            ImGui::TextDisabled("Fast forward shortcut is active.");
+            ImGui::TextDisabled("Fast Forward (Hold) is held.");
         } else if (g_max_speed_mode) {
-            ImGui::TextDisabled("Max speed shortcut is active.");
+            ImGui::TextDisabled("Fast Forward is on.");
+        }
+        /* In steps of 10%, which a 110-1000 slider is too fine to hit, and
+         * one step past 1000% for Unlimited. */
+        auto shortcut_speed_slider = [](const char* label, int* percent) {
+            constexpr int unlimited_step = GB_SHORTCUT_SPEED_MAX_PERCENT + 10;
+            int value = *percent == GB_SPEED_UNLIMITED ? unlimited_step : *percent;
+            if (ImGui::SliderInt(label, &value, GB_SHORTCUT_SPEED_MIN_PERCENT, unlimited_step,
+                                 value >= unlimited_step ? "Unlimited" : "%d",
+                                 ImGuiSliderFlags_NoInput)) {
+                value = (value + 5) / 10 * 10;
+                if (value >= unlimited_step) {
+                    value = GB_SPEED_UNLIMITED;
+                }
+                if (value != *percent) {
+                    *percent = value;
+                    save_runtime_preferences();
+                }
+            }
+        };
+        shortcut_speed_slider("Fast Forward Speed %", &g_max_speed_percent);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Speed while Fast Forward is on; %s turns it on and off.\n"
+                              "Unlimited runs the game as fast as this PC can.",
+                              action_hint_label(GB_INPUT_ACTION_TOGGLE_MAX_SPEED).c_str());
+        }
+        shortcut_speed_slider("Fast Forward (Hold) Speed %", &g_fast_forward_speed_percent);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Speed while %s is held.\n"
+                              "Unlimited runs the game as fast as this PC can.",
+                              action_hint_label(GB_INPUT_ACTION_FAST_FORWARD).c_str());
+        }
+        if (ImGui::Checkbox("Fast-Forward Frame Skip", &g_fast_forward_frameskip)) {
+            save_runtime_preferences();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Above 100%%, draw only as many frames as the display shows,\n"
+                              "as RetroArch's Fast-Forward Frame Skip does. The game still\n"
+                              "runs every frame; the time goes to running it faster.");
+        }
+        if (effective_speed_percent() != previous_speed) {
+            on_speed_changed(audio_was_running);
         }
         if (ImGui::Checkbox("Show FPS", &g_show_fps)) {
             save_runtime_preferences();
@@ -3504,6 +4345,16 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
             ImGui::EndCombo();
         }
+        bool pause_in_menu = g_menu_pauses_game;
+        if (ImGui::Checkbox("Pause Game in Menu", &pause_in_menu)) {
+            set_menu_pauses_game(pause_in_menu);
+            save_runtime_preferences();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Hold the game (and its sound) while this or the Escape menu is open.\n"
+                              "Off, the game keeps running behind the menu, still without your input.");
+        }
+        menu_look_sliders();
 
         ImGui::Spacing();
         ImGui::TextDisabled("Audio");
@@ -3514,6 +4365,20 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         if (ImGui::SliderInt("Master Volume (%)", &audio_volume_percent, 0, 200, "%d", ImGuiSliderFlags_NoInput)) {
             g_audio_volume_percent = (uint32_t)audio_volume_percent;
             save_runtime_preferences();
+        }
+        {
+            const bool audio_was_running = audio_output_should_run();
+            if (ImGui::Combo("Fast-Forward Audio", &g_speed_audio_mode, g_speed_audio_mode_names,
+                             IM_ARRAYSIZE(g_speed_audio_mode_names))) {
+                on_speed_changed(audio_was_running);
+                save_runtime_preferences();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Sound while the game runs faster than 100%%, as RetroArch offers it:\n"
+                                  "Normal Pitch drops what cannot be played in time, so it skips;\n"
+                                  "Sped Up plays all of it faster and higher. Below 100%% the sound\n"
+                                  "plays slower and lower unless this is Mute.");
+            }
         }
 
         ImGui::Spacing();
@@ -3728,8 +4593,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::TextDisabled("Savestates");
         int savestate_slot = g_savestate_slot + 1;
         if (ImGui::SliderInt("Active Slot", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT, "%d", ImGuiSliderFlags_NoInput)) {
-            g_savestate_slot = savestate_slot - 1;
-            save_runtime_preferences();
+            select_savestate_slot(g_registered_ctx, savestate_slot - 1);
         }
         if (ImGui::Button("Save State (F5)")) {
             save_savestate_slot(g_registered_ctx, g_savestate_slot);
@@ -3749,6 +4613,33 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         }
         if (!g_savestate_status.empty()) {
             ImGui::TextWrapped("%s", g_savestate_status.c_str());
+        }
+
+        /* Notifications: the messages bottom left (draw_corner_messages). */
+        ImGui::Spacing();
+        ImGui::TextDisabled("Notifications");
+        struct NotifyToggle { const char* label; bool* value; const char* tip; };
+        const NotifyToggle notify_toggles[] = {
+            { "Save/Load", &g_notify_save_load,
+              "Say on screen when a state is saved or loaded. A failed save or load always shows." },
+            { "Slot Changes", &g_notify_slot,
+              "Say on screen which state slot the Previous/Next Slot keys picked, and whether it holds a state." },
+            { "Rewind", &g_notify_rewind, "Say on screen while rewinding, and when the rewind buffer runs out." },
+            { "Fast Forward", &g_notify_fast_forward,
+              "Say on screen while either Fast Forward shortcut is on, and at what speed." },
+        };
+        /* Two to a row, the second column past the longest first-column label. */
+        const ImGuiStyle& notify_style = ImGui::GetStyle();
+        const float notify_column = ImGui::GetCursorPosX() + ImGui::GetFrameHeight() + notify_style.ItemInnerSpacing.x +
+                                    ImGui::CalcTextSize("Save/Load").x + notify_style.ItemSpacing.x * 4.0f;
+        for (size_t i = 0; i < sizeof(notify_toggles) / sizeof(notify_toggles[0]); i++) {
+            if (i % 2) ImGui::SameLine(notify_column);
+            if (ImGui::Checkbox(notify_toggles[i].label, notify_toggles[i].value)) {
+                save_runtime_preferences();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", notify_toggles[i].tip);
+            }
         }
 
 #ifdef GBRT_HAVE_GBCAM
@@ -3803,8 +4694,9 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::Separator();
 
         /* ============================================================
-         * Cheats: libretro .cht files dropped into cheats/<game_id>/
-         * are loaded on cart launch. GameShark codes apply per-frame
+         * Cheats: libretro .cht files dropped into cheats/ (see
+         * gb_cheats_load) are loaded on cart launch, or again with
+         * Reload Cheats. GameShark codes apply per-frame
          * via gb_cheats_tick(); Game Genie codes patch ROM at
          * toggle-on and restore at toggle-off. Cart-agnostic -- any
          * Game Boy game in the libretro database works.
@@ -3816,14 +4708,24 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
          * (a .cht file was loaded) or a brief hint pointing the
          * user at the cheats/ folder. */
         if (ImGui::CollapsingHeader("Cheats")) {
+            static int cheat_page = 0;
             if (gb_cheats_count() == 0) {
-                ImGui::TextDisabled(
-                    "No .cht files found in cheats/%s/.\n"
-                    "Drop a libretro-database .cht file there and relaunch.",
-                    g_active_game_id.c_str());
+                ImGui::PushTextWrapPos(0.0f);
+                if (gb_cheats_game_id()[0]) {
+                    ImGui::TextDisabled("No cheats found. Put a libretro-database .cht file in %s "
+                                        "(or in its %s folder) and press Reload Cheats.",
+                                        gb_cheats_dir(), gb_cheats_game_id());
+                } else {
+                    ImGui::TextDisabled("No cheats found. Put a libretro-database .cht file in %s "
+                                        "and press Reload Cheats.", gb_cheats_dir());
+                }
+                ImGui::PopTextWrapPos();
+                if (ImGui::Button("Reload Cheats")) {
+                    gb_cheats_reload(g_registered_ctx);
+                    cheat_page = 0;
+                }
             } else {
             static char cheat_filter[64] = "";
-            static int  cheat_page = 0;
             const int   cheats_per_page = 10;
 
             int total  = gb_cheats_count();
@@ -3831,17 +4733,26 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             for (int i = 0; i < total; i++) {
                 if (gb_cheats_get(i)->enabled) active++;
             }
-            ImGui::TextDisabled("Loaded %d cheats from cheats/%s/  (active: %d)",
-                                total, g_active_game_id.c_str(), active);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("Loaded %d cheats from %s  (active: %d)",
+                                total, gb_cheats_dir(), active);
+            ImGui::PopTextWrapPos();
             if (ImGui::InputText("Search##cheats",
                                  cheat_filter, sizeof(cheat_filter))) {
                 /* Reset to page 1 on filter change so the user isn't
                  * stranded on a page that no longer has matches. */
                 cheat_page = 0;
             }
-            ImGui::SameLine();
             if (ImGui::Button("Disable All##cheats")) {
                 gb_cheats_disable_all(g_registered_ctx);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reload Cheats")) {
+                gb_cheats_reload(g_registered_ctx);
+                cheat_page = 0;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Turn every cheat off and read the .cht files again.");
             }
 
             /* Lower-case the filter once per frame for case-insensitive
@@ -4332,6 +5243,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                              g_fullscreen_mode_names,
                              IM_ARRAYSIZE(g_fullscreen_mode_names))) {
                 set_fullscreen_mode(fullscreen_mode);
+                save_runtime_preferences();
             }
             int scaling_mode = (int)g_render_scaling_mode;
             if (ImGui::Combo("Scaling Mode",
@@ -4340,6 +5252,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                              IM_ARRAYSIZE(g_render_scaling_mode_names))) {
                 g_render_scaling_mode = (GBRenderScalingMode)scaling_mode;
                 update_game_viewport();
+                save_runtime_preferences();
             }
             int filter_mode = (int)g_render_filter_mode;
             if (ImGui::Combo("Scale Filter",
@@ -4348,6 +5261,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                              IM_ARRAYSIZE(g_render_filter_names))) {
                 g_render_filter_mode = (GBRenderFilterMode)filter_mode;
                 update_render_filter();
+                save_runtime_preferences();
             }
 
             if (g_fullscreen_mode == 0) {
@@ -4358,15 +5272,80 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                                  IM_ARRAYSIZE(g_scale_names))) {
                     g_scale = scale_idx + 1;
                     apply_window_scale_preset();
+                    save_runtime_preferences();
                 }
             } else {
                 ImGui::TextDisabled("Window Size disabled while fullscreen.");
             }
-            if (ImGui::Checkbox("V-Sync", &g_vsync)) {
-                SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
+            if (ImGui::Checkbox("V-Sync", &g_vsync)) {   /* update_swap_interval() applies it */
+                save_runtime_preferences();
             }
-            ImGui::Checkbox("Show Overlay", &g_show_overlay);
-            ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Off while the game runs faster than 100%%, so fast forward is not\n"
+                                  "held to the display's refresh rate.");
+            }
+            if (ImGui::Checkbox("Show Overlay", &g_show_overlay)) {
+                save_runtime_preferences();
+            }
+            if (ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions)) {
+                save_runtime_preferences();
+            }
+            int preempt_frames = preemptive_frames();
+            if (ImGui::SliderInt("Preemptive Frames", &preempt_frames, 0, GB_PREEMPT_MAX_FRAMES)) {
+                g_preemptive_frames_pref = preempt_frames;
+                save_runtime_preferences();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Replays each input change into this many past frames, as RetroArch\n"
+                                  "does, so the game responds that many frames sooner. Set it no\n"
+                                  "higher than the game's own delay, or the first frames of a\n"
+                                  "response are skipped.");
+            }
+            if (ImGui::Checkbox("Rewind", &g_rewind_enabled)) {
+                if (!g_rewind_enabled) rewind_free();
+                save_runtime_preferences();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Hold %s to run the game backwards, as in RetroArch. Recent frames\n"
+                                  "are kept in memory as the game runs; holding the key goes back\n"
+                                  "through them, and letting go plays on from there.",
+                                  action_hint_label(GB_INPUT_ACTION_REWIND).c_str());
+            }
+            if (g_rewind_enabled) {
+                if (ImGui::SliderInt("Rewind Frames", &g_rewind_granularity, 1, GB_REWIND_MAX_GRANULARITY)) {
+                    save_runtime_preferences();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Keeps one frame in this many: the buffer reaches back further,\n"
+                                      "and rewinding goes back that many frames at a time.");
+                }
+                /* A new size starts an empty buffer, so it applies on release. */
+                static int buffer_mb = 0;
+                static bool buffer_dragged = false;
+                if (!buffer_dragged) buffer_mb = g_rewind_buffer_mb;
+                ImGui::SliderInt("Rewind Buffer (MB)", &buffer_mb, 10, GB_REWIND_MAX_BUFFER_MB, "%d",
+                                 ImGuiSliderFlags_NoInput);
+                buffer_dragged = ImGui::IsItemActive();
+                if (ImGui::IsItemDeactivatedAfterEdit() && buffer_mb != g_rewind_buffer_mb) {
+                    g_rewind_buffer_mb = buffer_mb;
+                    rewind_free();   /* the next frame starts the new one */
+                    save_runtime_preferences();
+                }
+                GBPlatformRewindInfo rewind_info;
+                gb_platform_get_rewind_info(&rewind_info);
+                const double fps = 4194304.0 / 70224.0;
+                const double held_s = rewind_info.states * g_rewind_granularity / fps;
+                if (rewind_info.capacity && rewind_info.used && rewind_info.states > 60) {
+                    /* Patches so far, extended to the whole buffer. */
+                    const double full = (double)rewind_info.capacity / rewind_info.used *
+                                        (rewind_info.states - 1) * g_rewind_granularity / fps;
+                    ImGui::TextDisabled("Holds %.0f s, room for about %.0f s (%.1f of %d MB)",
+                                        held_s, full > held_s ? full : held_s,
+                                        rewind_info.used / 1048576.0, g_rewind_buffer_mb);
+                } else {
+                    ImGui::TextDisabled("Holds %.0f s", held_s);
+                }
+            }
 
             ImGui::Spacing();
             ImGui::TextDisabled("Audio");
@@ -4422,8 +5401,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             ImGui::TextDisabled("Ring %u / %u  ·  %u Hz buf %u",
                                 current_audio_ring_fill_samples(), current_audio_ring_capacity(),
                                 g_audio_device_sample_rate, g_audio_device_buffer_samples);
-            if (effective_speed_percent() != 100) {
-                ImGui::TextDisabled("Audio paused while Speed %% != 100.");
+            if (effective_speed_percent() != 100 && g_speed_audio_mode == GB_SPEED_AUDIO_MUTE) {
+                ImGui::TextDisabled("Audio paused while Speed %% != 100 (Fast-Forward Audio: Mute).");
             }
             if (ImGui::Button("Reset Audio")) {
                 reset_runtime_audio_defaults();
@@ -4477,7 +5456,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             if (ImGui::Button("Reset Controls")) {
                 reset_runtime_control_defaults();
             }
-            ImGui::TextDisabled("Shortcuts: fast forward, max speed, savestates, overlay, mute, menu.");
+            ImGui::TextDisabled("Shortcuts: fast forward, rewind, savestates, overlay, mute, menu, pause.");
 
             ImGui::Spacing();
             ImGui::TextDisabled("Diagnostics");
@@ -4526,48 +5505,66 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::EndChild();
         ImGui::Separator();
 
-        const int footer_button_count = g_launcher_return_enabled ? 3 : 2;
+        /* Leaving the game asks first: progress since the game last saved
+         * would go. Restart Game runs in place (run_pending_restart). */
+        enum { LEAVE_NONE, LEAVE_RESTART, LEAVE_LAUNCHER, LEAVE_QUIT };
+        static int leave = LEAVE_NONE;
+        const bool offer_launcher = launcher_available();
+        const int footer_button_count = offer_launcher ? 4 : 3;
         const float footer_button_width =
             (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * (footer_button_count - 1)) /
             (float)footer_button_count;
         if (ImGui::Button("Resume", ImVec2(footer_button_width, 0.0f))) {
             g_show_menu = false;
         }
-
-        if (g_launcher_return_enabled) {
-            ImGui::SameLine();
-            if (ImGui::Button("Return to Launcher", ImVec2(footer_button_width, 0.0f))) {
-                g_exit_action = GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER;
-                SDL_Event quit_event;
-                quit_event.type = SDL_QUIT;
-                SDL_PushEvent(&quit_event);
-            }
-        } else {
-            /* Single-game launcher mode: nowhere to return to, so offer
-             * "Restart Game" in the same slot. The launcher loops back to
-             * the same cart and pokegame_init runs a full reset.
-             *
-             * We don't change g_exit_action here (the recompiled main only
-             * has translation logic for RETURN_TO_LAUNCHER → exit code 64);
-             * instead we set a separate flag the launcher reads after the
-             * cart's main_fn returns. */
-            ImGui::SameLine();
-            if (ImGui::Button("Restart Game", ImVec2(footer_button_width, 0.0f))) {
-                g_restart_game_requested = true;
-                g_exit_action = GB_PLATFORM_EXIT_RESTART_GAME;
-                SDL_Event quit_event;
-                quit_event.type = SDL_QUIT;
-                SDL_PushEvent(&quit_event);
-            }
-        }
-
         ImGui::SameLine();
-        if (ImGui::Button("Quit", ImVec2(footer_button_width, 0.0f))) {
-            g_exit_action = GB_PLATFORM_EXIT_QUIT;
-            SDL_Event quit_event;
-            quit_event.type = SDL_QUIT;
-            SDL_PushEvent(&quit_event);
+        if (!can_restart_game()) ImGui::BeginDisabled();
+        if (ImGui::Button("Restart Game", ImVec2(footer_button_width, 0.0f))) leave = LEAVE_RESTART;
+        if (!can_restart_game()) ImGui::EndDisabled();
+        if (offer_launcher) {
+            ImGui::SameLine();
+            if (ImGui::Button("Return to Launcher", ImVec2(footer_button_width, 0.0f))) leave = LEAVE_LAUNCHER;
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Quit", ImVec2(footer_button_width, 0.0f))) leave = LEAVE_QUIT;
+
+        if (leave != LEAVE_NONE && !ImGui::IsPopupOpen("###leave_game")) {
+            ImGui::OpenPopup("###leave_game");
+        }
+        const char* const leave_title = leave == LEAVE_RESTART  ? "Restart the game?###leave_game"
+                                      : leave == LEAVE_LAUNCHER ? "Return to the launcher?###leave_game"
+                                                                : "Quit the game?###leave_game";
+        ImGui::SetNextWindowPos(ImVec2(imgui_io.DisplaySize.x * 0.5f, imgui_io.DisplaySize.y * 0.5f),
+                                ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal(leave_title, NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted(leave == LEAVE_RESTART
+                                       ? "The game starts over from the boot. Its own saves are kept."
+                                       : "Anything the game has not saved is lost.");
+            const char* const confirm = leave == LEAVE_RESTART  ? "Restart"
+                                      : leave == LEAVE_LAUNCHER ? "Return to Launcher"
+                                                                : "Quit";
+            if (ImGui::Button(confirm)) {
+                if (leave == LEAVE_RESTART) request_restart_game();
+                else request_exit(leave == LEAVE_LAUNCHER ? GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER
+                                                          : GB_PLATFORM_EXIT_QUIT);
+                leave = LEAVE_NONE;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+                leave = LEAVE_NONE;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        } else {
+            leave = LEAVE_NONE;
+        }
+
+        /* For the next events: whether Escape / B belong to a field or popup. */
+        g_menu_text_input = imgui_io.WantTextInput;
+        g_menu_popup_open = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ||
+                            ImGui::IsAnyItemActive();
         ImGui::End();
         ImGui::PopStyleVar(6);
     } else if (g_show_overlay) {
@@ -4636,13 +5633,61 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         ImGui::End();
     }
 
+    if (g_user_paused && !menu_open()) {
+        draw_pause_overlay();
+    }
+    if (!menu_open()) {
+        draw_corner_messages();
+    }
+
 #ifdef RECOMP_LAUNCHER
+#ifdef RECOMP_RUNTIME_UI_HAS_BACKDROP
+    recomp_runtime_ui_set_backdrop(g_runtime_ui, menu_dim(), menu_opacity());
+#endif
     recomp_runtime_ui_render_imgui(g_runtime_ui);
 #endif
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     g_last_timing.compose_ms = sdl_now_ms() - compose_start_ms;
+    /* The menus' own buttons (Resume, the confirmations) open and close them. */
+    menu_visibility_changed();
 
+    /* GBRECOMP_WINDOW_SHOTS=1: frames picked by --dump-frames are also written
+     * as the composed window, <prefix>_window_<frame>.ppm. The other captures
+     * read the guest framebuffer, so this is the only one that shows shaders,
+     * borders and menus. */
+    if (count_guest_frame &&
+        frame_is_selected_for_dump(g_dump_frames, g_dump_count, (uint32_t)g_frame_count) &&
+        env_flag_enabled("GBRECOMP_WINDOW_SHOTS")) {
+        std::vector<uint8_t> rgba((size_t)draw_w * (size_t)draw_h * 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glReadPixels(0, 0, draw_w, draw_h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        std::vector<uint32_t> argb((size_t)draw_w * (size_t)draw_h);
+        for (int y = 0; y < draw_h; y++) {
+            const uint8_t* src = &rgba[(size_t)(draw_h - 1 - y) * (size_t)draw_w * 4];   /* GL rows are bottom-up */
+            for (int x = 0; x < draw_w; x++, src += 4) {
+                argb[(size_t)y * (size_t)draw_w + (size_t)x] =
+                    0xFF000000u | ((uint32_t)src[0] << 16) | ((uint32_t)src[1] << 8) | src[2];
+            }
+        }
+        char filename[160];
+        snprintf(filename, sizeof(filename), "%s_window_%05d.ppm", g_screenshot_prefix, g_frame_count);
+        save_ppm(filename, argb.data(), draw_w, draw_h, g_frame_count);
+    }
+    if (!g_window_shot_path.empty()) {
+        std::vector<uint8_t> rgba((size_t)draw_w * (size_t)draw_h * 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glReadPixels(0, 0, draw_w, draw_h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        for (size_t i = 3; i < rgba.size(); i += 4) rgba[i] = 0xFF;
+        const int stride = draw_w * 4;   /* GL rows are bottom-up: write from the last one */
+        if (!stbi_write_png(g_window_shot_path.c_str(), draw_w, draw_h, 4,
+                            rgba.data() + (size_t)(draw_h - 1) * (size_t)stride, -stride)) {
+            fprintf(stderr, "[SDL] Could not write %s\n", g_window_shot_path.c_str());
+        }
+        g_window_shot_path.clear();
+    }
+
+    update_swap_interval();
     double present_start_ms = sdl_now_ms();
     SDL_GL_SwapWindow(g_window);
     g_last_timing.present_ms = sdl_now_ms() - present_start_ms;
@@ -4657,6 +5702,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 void gb_platform_shutdown(void) {
     gb_serial_link_shutdown();
     gb_lan_shutdown();
+    rewind_free();   /* a restarted game starts a new one, as RetroArch does per content */
     close_input_record_file();
     close_audio_output_device();
     g_audio_output_devices.clear();
@@ -4696,6 +5742,9 @@ void gb_platform_shutdown(void) {
         g_window = NULL;
     }
     g_registered_ctx = NULL;
+    gb_before_first_frame = NULL;
+    g_boot_state.clear();
+    g_restart_pending = false;
     g_app_suspended = false;
     g_renderer_reset_pending = false;
     SDL_Quit();
@@ -4875,7 +5924,9 @@ static bool audio_output_should_run(void) {
            g_audio_output_enabled &&
            !g_benchmark_mode &&
            !g_app_suspended &&
-           effective_speed_percent() == 100;
+           !g_user_paused &&
+           !menu_holds_game() &&
+           (effective_speed_percent() == 100 || g_speed_audio_mode != GB_SPEED_AUDIO_MUTE);
 }
 
 static uint32_t audio_ring_fill_samples(void) {
@@ -5015,10 +6066,7 @@ static void sdl_audio_callback(void* userdata, Uint8* stream, int len) {
     g_audio_read_pos.store(read_pos, std::memory_order_release);
 }
 
-static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
-    (void)ctx;
-    if (!audio_output_should_run()) return;
-    
+static void audio_ring_push(int16_t left, int16_t right) {
     uint32_t write_pos = g_audio_write_pos.load(std::memory_order_relaxed);
     uint32_t next_write = (write_pos + 1) % AUDIO_RING_SIZE;
     
@@ -5037,6 +6085,135 @@ static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
     if (!g_audio_started && audio_ring_fill_samples() >= g_audio_start_threshold) {
         g_audio_started = true;
         refresh_audio_device_pause_state();
+    }
+}
+
+/* ---- Audio at other speeds ----
+ * RetroArch's fast-forward and slow-motion sound (audio_driver_flush), ported.
+ * At 100% samples go to the device as they are made. Faster, Normal Pitch
+ * keeps them as they are and drops what arrives while the buffer holds its
+ * target, as RetroArch's non-blocking write loses what the device cannot take;
+ * Sped Up resamples them to the speed the game really runs at, measured as
+ * audio_driver_fastforward_ratio_mult does, so they reach the device as fast
+ * as it plays them. Slower, both stretch them the same way. Dynamic rate
+ * control (RetroArch's audio_rate_control_delta, +-0.5%) holds a resampled
+ * buffer near its target against the measurement's small errors. */
+struct SpeedAudio {
+    uint64_t last_counter = 0;    /* when the last frame ended; 0 = measure afresh */
+    double avg_wall = 0.0;        /* seconds a frame took, averaged */
+    double avg_expected = 0.0;    /* seconds those frames last at 100% */
+    double step = 1.0;            /* game samples per device sample */
+    double phase = 0.0;
+    int32_t sum_l = 0;
+    int32_t sum_r = 0;
+    int count = 0;
+    int16_t prev_l = 0;
+    int16_t prev_r = 0;
+};
+static SpeedAudio g_speed_audio;
+static constexpr double GB_SPEED_AUDIO_AVG_FRAMES = 16.0;   /* AUDIO_FF_EXP_AVG_SAMPLES */
+static constexpr double GB_AUDIO_RATE_CONTROL_DELTA = 0.005;
+static constexpr double GB_SPEED_AUDIO_MIN_STEP = 0.0625;   /* AUDIO_MIN_RATIO */
+static constexpr double GB_SPEED_AUDIO_MAX_STEP = 16.0;     /* AUDIO_MAX_RATIO */
+
+static double clamp_speed_audio_step(double step) {
+    return step < GB_SPEED_AUDIO_MIN_STEP ? GB_SPEED_AUDIO_MIN_STEP
+         : step > GB_SPEED_AUDIO_MAX_STEP ? GB_SPEED_AUDIO_MAX_STEP : step;
+}
+
+/* The set speed's step, which Unlimited starts at the most of. */
+static double set_speed_audio_step(void) {
+    return clamp_speed_audio_step(effective_speed_percent() / 100.0);
+}
+
+/* Starts measuring again from the set speed. */
+static void speed_audio_reset(void) {
+    g_speed_audio.last_counter = 0;
+    g_speed_audio.step = set_speed_audio_step();
+    g_speed_audio.sum_l = g_speed_audio.sum_r = 0;
+    g_speed_audio.count = 0;
+}
+
+/* The sound plays on through a speed change unless it stops or starts. */
+static void on_speed_changed(bool audio_was_running) {
+    speed_audio_reset();
+    if (audio_output_should_run() != audio_was_running) {
+        reset_audio_output_buffer(true);
+    }
+}
+
+/* After each frame's pacing: moving averages of how long frames take and how
+ * long they last at 100%, seeded with the set speed. */
+static void speed_audio_frame(uint32_t frame_cycles) {
+    SpeedAudio& s = g_speed_audio;
+    const int speed_percent = effective_speed_percent();
+    if (speed_percent == 100 || !audio_output_should_run()) {
+        s.last_counter = 0;
+        return;
+    }
+    const uint64_t now = SDL_GetPerformanceCounter();
+    const double expected = (double)(frame_cycles ? frame_cycles : 70224u) / 4194304.0;
+    if (s.last_counter == 0) {
+        s.avg_expected = expected;
+        s.avg_wall = expected / set_speed_audio_step();
+    } else {
+        const double wall = (double)(now - s.last_counter) / (double)SDL_GetPerformanceFrequency();
+        const double keep = (GB_SPEED_AUDIO_AVG_FRAMES - 1.0) / GB_SPEED_AUDIO_AVG_FRAMES;
+        s.avg_wall = s.avg_wall * keep + wall / GB_SPEED_AUDIO_AVG_FRAMES;
+        s.avg_expected = s.avg_expected * keep + expected / GB_SPEED_AUDIO_AVG_FRAMES;
+    }
+    s.last_counter = now;
+    s.step = clamp_speed_audio_step(s.avg_wall > 0.0 ? s.avg_expected / s.avg_wall : 1.0);
+}
+
+static void speed_audio_sample(int16_t left, int16_t right) {
+    SpeedAudio& s = g_speed_audio;
+    if (effective_speed_percent() > 100 && g_speed_audio_mode == GB_SPEED_AUDIO_NORMAL_PITCH) {
+        if (audio_ring_fill_samples() < g_audio_start_threshold) {
+            audio_ring_push(left, right);
+        } else {
+            audio_stats_samples_dropped(1);
+        }
+        return;
+    }
+    double step = s.step;
+    if (g_audio_started && g_audio_start_threshold > 0) {
+        double direction = ((double)audio_ring_fill_samples() - (double)g_audio_start_threshold) /
+                           (double)g_audio_start_threshold;
+        direction = direction < -1.0 ? -1.0 : direction > 1.0 ? 1.0 : direction;
+        step *= 1.0 + GB_AUDIO_RATE_CONTROL_DELTA * direction;
+    }
+    if (step >= 1.0) {
+        /* Fewer samples: each is the average of those it stands for. */
+        s.sum_l += left;
+        s.sum_r += right;
+        s.count++;
+        s.phase += 1.0;
+        if (s.phase >= step) {
+            s.phase -= step;
+            audio_ring_push((int16_t)(s.sum_l / s.count), (int16_t)(s.sum_r / s.count));
+            s.sum_l = s.sum_r = 0;
+            s.count = 0;
+        }
+    } else {
+        /* More samples: between the previous one and this one. */
+        for (; s.phase < 1.0; s.phase += step) {
+            audio_ring_push((int16_t)(s.prev_l + (left - s.prev_l) * s.phase),
+                            (int16_t)(s.prev_r + (right - s.prev_r) * s.phase));
+        }
+        s.phase -= 1.0;
+    }
+    s.prev_l = left;
+    s.prev_r = right;
+}
+
+static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
+    (void)ctx;
+    if (!audio_output_should_run()) return;
+    if (effective_speed_percent() == 100) {
+        audio_ring_push(left, right);
+    } else {
+        speed_audio_sample(left, right);
     }
 }
 
@@ -5138,9 +6315,24 @@ bool gb_platform_init(int scale) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
 #endif
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
+#if defined(_WIN32)
+    /* Same DPI awareness as the launcher (launcher_platform_open), which sets
+     * it when it runs first; without it (launcher skipped) Windows bitmap-
+     * scales the window at 125% and up, so whole-pixel scaling blurs and the
+     * desktop reads smaller than it is. Default priority keeps any earlier
+     * choice. */
+    SDL_SetHintWithPriority(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2", SDL_HINT_DEFAULT);
+    SDL_SetHintWithPriority(SDL_HINT_WINDOWS_DPI_SCALING, "0", SDL_HINT_DEFAULT);
+#endif
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
         return false;
+    }
+    /* Without any sound output (no PipeWire/PulseAudio/ALSA on a Linux box,
+     * say) the game still runs, silently: the audio code checks
+     * audio_subsystem_available(). */
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
+        fprintf(stderr, "[SDL] No audio output (%s); running without sound.\n", SDL_GetError());
     }
     load_runtime_preferences();
     fprintf(stderr, "[SDL] SDL initialized.\n");
@@ -5175,13 +6367,18 @@ bool gb_platform_init(int scale) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 
+    /* GBRECOMP_HIDDEN_WINDOW: a real GL context in a window that is never
+     * shown, for automated runs that must render (window screenshots, frame
+     * pacing) without putting a window on the desktop. */
+    const Uint32 window_visibility =
+        env_flag_enabled("GBRECOMP_HIDDEN_WINDOW") ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN;
     g_window = SDL_CreateWindow(
         "GB Recompiled",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         g_windowed_width,
         g_windowed_height,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL |
+        window_visibility | SDL_WINDOW_OPENGL |
         (g_fullscreen_mode == 2 ? SDL_WINDOW_FULLSCREEN :
          g_fullscreen_mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP :
                                    SDL_WINDOW_RESIZABLE)
@@ -5192,7 +6389,18 @@ bool gb_platform_init(int scale) {
         SDL_Quit();
         return false;
     }
-    fprintf(stderr, "[SDL] Window created.\n");
+    {
+        SDL_DisplayMode desktop;
+        float hdpi = 0.0f;
+        const int display = SDL_GetWindowDisplayIndex(g_window);
+        if (SDL_GetDesktopDisplayMode(display, &desktop) == 0 &&
+            SDL_GetDisplayDPI(display, NULL, &hdpi, NULL) == 0) {
+            fprintf(stderr, "[SDL] Window created on a %dx%d desktop (%.0f dpi).\n",
+                    desktop.w, desktop.h, hdpi);
+        } else {
+            fprintf(stderr, "[SDL] Window created.\n");
+        }
+    }
     SDL_SetWindowMinimumSize(g_window, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT);
 
     fprintf(stderr, "[SDL] Creating GL context...\n");
@@ -5350,9 +6558,74 @@ static bool handle_binding_capture_event(const SDL_Event* event) {
     }
 }
 
+/* A press of Toggle Menu (or the controller's Guide button). */
+static bool event_is_menu_toggle(const SDL_Event* event) {
+    if (event->type == SDL_KEYDOWN && event->key.repeat == 0) {
+        for (int slot = 0; slot < 2; slot++) {
+            if (binding_matches_scancode(g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MENU][slot],
+                                         event->key.keysym.scancode)) {
+                return true;
+            }
+        }
+    }
+    if (event->type == SDL_CONTROLLERBUTTONDOWN) {
+        if (event->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) return true;
+        for (int slot = 0; slot < 2; slot++) {
+            if (binding_matches_controller_button(g_controller_bindings[GB_INPUT_ACTION_TOGGLE_MENU][slot],
+                                                  event->cbutton.button)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool event_is_game_input(const SDL_Event* event) {
+    switch (event->type) {
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+        case SDL_CONTROLLERBUTTONDOWN:
+        case SDL_CONTROLLERBUTTONUP:
+        case SDL_CONTROLLERAXISMOTION:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void close_menus(void) {
+    g_show_menu = false;
+#ifdef RECOMP_LAUNCHER
+    recomp_runtime_ui_close(g_runtime_ui);
+#endif
+}
+
 #ifdef RECOMP_LAUNCHER
 static bool handle_shared_runtime_ui_event(const SDL_Event* event) {
     if (!g_runtime_ui || !event) return false;
+
+    /* Toggle Menu closes whichever menu is up (not while typing: F10 is a
+     * key like any other then). */
+    if (menu_open() && !g_menu_text_input && event_is_menu_toggle(event)) {
+        close_menus();
+        return true;
+    }
+
+    /* The settings window's Back: to the runtime menu, unless a text field,
+     * a combo's list or a popup takes Escape / B (ImGui closes those). */
+    const bool back_key = (event->type == SDL_KEYDOWN &&
+                           (event->key.keysym.scancode == SDL_SCANCODE_ESCAPE ||
+                            event->key.keysym.scancode == SDL_SCANCODE_AC_BACK)) ||
+                          (event->type == SDL_CONTROLLERBUTTONDOWN &&
+                           event->cbutton.button == SDL_CONTROLLER_BUTTON_B);
+    if (back_key && g_show_menu && !recomp_runtime_ui_is_open(g_runtime_ui)) {
+        const bool repeat = event->type == SDL_KEYDOWN && event->key.repeat != 0;
+        if (!g_menu_text_input && !g_menu_popup_open && !repeat) {
+            g_show_menu = false;
+            recomp_runtime_ui_open(g_runtime_ui);
+        }
+        return true;
+    }
 
     if (event->type == SDL_CONTROLLERBUTTONDOWN &&
         event->cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE) {
@@ -5425,7 +6698,15 @@ static bool handle_shared_runtime_ui_event(const SDL_Event* event) {
 }
 #endif
 
+static bool handle_runtime_event_inner(const SDL_Event* event, GBContext* ctx);
+
 static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
+    const bool keep_running = handle_runtime_event_inner(event, ctx);
+    menu_visibility_changed();
+    return keep_running;
+}
+
+static bool handle_runtime_event_inner(const SDL_Event* event, GBContext* ctx) {
     if (!event) {
         return true;
     }
@@ -5450,6 +6731,21 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
         return true;
     }
 #endif
+    /* A menu has the keyboard and the controller: nothing reaches the game or
+     * fires a shortcut, whether it moves through the menu or is typed into a
+     * search field there. */
+    if (menu_open() && event_is_game_input(event)) {
+#ifndef RECOMP_LAUNCHER
+        const bool back = event->type == SDL_KEYDOWN && event->key.repeat == 0 &&
+                          (event->key.keysym.scancode == SDL_SCANCODE_ESCAPE ||
+                           event->key.keysym.scancode == SDL_SCANCODE_AC_BACK) &&
+                          !g_menu_popup_open;
+        if (!g_menu_text_input && (back || event_is_menu_toggle(event))) {
+            close_menus();
+        }
+#endif
+        return true;
+    }
 
     switch (event->type) {
         case SDL_APP_WILLENTERBACKGROUND:
@@ -5719,6 +7015,44 @@ extern "C" int gb_platform_inject_sdl_event(const void* sdl_event) {
     return 1;
 }
 
+/* Debug-server input override, applied last so it beats keyboard,
+ * controller, the --input script and the in-game menu gate: a client that
+ * asked for a button explicitly is driving the joypad.
+ *
+ * This has to land on g_joypad_dpad/g_joypad_buttons. The override used to
+ * exist only inside gb_platform_get_joypad(), but gbrt.c's JOYP read
+ * (gb_read8 at 0xFF00) reads the two globals directly and never calls that
+ * accessor -- so set_input over TCP silently did nothing, which is why game
+ * modules grew their own input commands on top of the script route. */
+static void apply_debug_input_override(GBContext* ctx) {
+    static uint8_t s_prev_debug_dpad = 0xFF;
+    static uint8_t s_prev_debug_buttons = 0xFF;
+    const uint8_t joyp = ctx ? ctx->io[0x00] : 0xFF;
+    const bool dpad_selected = !(joyp & 0x10);
+    const bool buttons_selected = !(joyp & 0x20);
+    const int override = gb_debug_server_get_input_override();
+    uint8_t debug_dpad = 0xFF;
+    uint8_t debug_buttons = 0xFF;
+    if (override >= 0) {
+        /* Mask is active high, 0=R 1=L 2=U 3=D 4=A 5=B 6=Select 7=Start;
+         * the joypad nibbles are active low. */
+        debug_dpad    = (uint8_t)(0xF0 | (~override & 0x0F));
+        debug_buttons = (uint8_t)(0xF0 | ((~(override >> 4)) & 0x0F));
+        g_joypad_dpad = debug_dpad;
+        g_joypad_buttons = debug_buttons;
+    }
+    const uint8_t new_debug_dpad =
+        (uint8_t)(s_prev_debug_dpad & (uint8_t)(~debug_dpad) & 0x0F);
+    const uint8_t new_debug_buttons =
+        (uint8_t)(s_prev_debug_buttons & (uint8_t)(~debug_buttons) & 0x0F);
+    if (ctx && ((new_debug_dpad && dpad_selected) ||
+                (new_debug_buttons && buttons_selected))) {
+        request_joypad_interrupt(ctx);
+    }
+    s_prev_debug_dpad = debug_dpad;
+    s_prev_debug_buttons = debug_buttons;
+}
+
 bool gb_platform_poll_events(GBContext* ctx) {
     g_last_poll_ctx = ctx;
     /* Drain inbound BGB packets and apply them to the live serial state. */
@@ -5731,6 +7065,8 @@ bool gb_platform_poll_events(GBContext* ctx) {
     /* Debug server: poll TCP commands and block if paused */
     gb_debug_server_poll();
     gb_debug_server_wait_if_paused();
+
+    game_on_frame(ctx);
 
     SDL_Event event;
 
@@ -5764,7 +7100,9 @@ bool gb_platform_poll_events(GBContext* ctx) {
             }
         }
     }
-    
+    /* Also here for runs that never pace a frame (benchmark mode). */
+    run_pending_restart();
+
     /* Handle Automation Inputs */
     uint8_t previous_script_dpad = g_script_joypad_dpad;
     uint8_t previous_script_buttons = g_script_joypad_buttons;
@@ -5799,45 +7137,36 @@ bool gb_platform_poll_events(GBContext* ctx) {
     }
 
     update_effective_joypad_state();
-
-    /* Debug-server input override, applied last so it beats keyboard,
-     * controller, the --input script and the in-game menu gate: a client that
-     * asked for a button explicitly is driving the joypad.
-     *
-     * This has to land on g_joypad_dpad/g_joypad_buttons. The override used to
-     * exist only inside gb_platform_get_joypad(), but gbrt.c's JOYP read
-     * (gb_read8 at 0xFF00) reads the two globals directly and never calls that
-     * accessor -- so set_input over TCP silently did nothing, which is why game
-     * modules grew their own input commands on top of the script route. */
-    {
-        static uint8_t s_prev_debug_dpad = 0xFF;
-        static uint8_t s_prev_debug_buttons = 0xFF;
-        const int override = gb_debug_server_get_input_override();
-        uint8_t debug_dpad = 0xFF;
-        uint8_t debug_buttons = 0xFF;
-        if (override >= 0) {
-            /* Mask is active high, 0=R 1=L 2=U 3=D 4=A 5=B 6=Select 7=Start;
-             * the joypad nibbles are active low. */
-            debug_dpad    = (uint8_t)(0xF0 | (~override & 0x0F));
-            debug_buttons = (uint8_t)(0xF0 | ((~(override >> 4)) & 0x0F));
-            g_joypad_dpad = debug_dpad;
-            g_joypad_buttons = debug_buttons;
-        }
-        const uint8_t new_debug_dpad =
-            (uint8_t)(s_prev_debug_dpad & (uint8_t)(~debug_dpad) & 0x0F);
-        const uint8_t new_debug_buttons =
-            (uint8_t)(s_prev_debug_buttons & (uint8_t)(~debug_buttons) & 0x0F);
-        if (ctx && ((new_debug_dpad && dpad_selected) ||
-                    (new_debug_buttons && buttons_selected))) {
-            request_joypad_interrupt(ctx);
-        }
-        s_prev_debug_dpad = debug_dpad;
-        s_prev_debug_buttons = debug_buttons;
-    }
-
+    apply_debug_input_override(ctx);
     record_manual_input_state(current_cycles);
 
     return true;
+}
+
+/* Handles the events that arrived while gb_platform_vsync() slept. Without
+ * this they would wait for gb_platform_poll_events(), which runs only after
+ * the next frame has been emulated, so a press made during the sleep (most of
+ * every frame) reached the game a frame late. */
+static void handle_events_before_frame(void) {
+    SDL_Event event;
+    bool handled = false;
+    while (SDL_PollEvent(&event)) {
+        if (ImGui::GetCurrentContext() != NULL) {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+        }
+        if (!handle_runtime_event(&event, g_registered_ctx)) {
+            /* Quit: let gb_platform_poll_events() see it and end the loop. */
+            SDL_Event quit_event = {};
+            quit_event.type = SDL_QUIT;
+            SDL_PushEvent(&quit_event);
+            break;
+        }
+        handled = true;
+    }
+    if (handled) {
+        apply_debug_input_override(g_registered_ctx);
+        record_manual_input_state(g_registered_ctx ? g_registered_ctx->cycles : 0);
+    }
 }
 
 
@@ -5846,6 +7175,8 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
     /* Debug server: record frame state and check watchpoints */
     gb_debug_server_record_frame();
     gb_debug_server_check_watchpoints();
+
+    if (g_registered_ctx) game_post_frame(g_registered_ctx);
 
     /* Flush battery RAM to disk after no ERAM writes for ~5 seconds.
      * eram_dirty_frame tracks the LAST write, so we debounce properly
@@ -5897,17 +7228,488 @@ uint8_t gb_platform_get_joypad(void) {
     return g_joypad_buttons & g_joypad_dpad;
 }
 
+/* Holds the emulator while the user has it paused or a menu is open (with
+ * Pause in Menu on). The frame just finished is already presented; this keeps
+ * re-presenting it so the menus stay usable, and keeps handling events so
+ * buttons held now are what the next frame reads. Returns true if it held,
+ * once the menus are closed and the user resumes, advances one frame or steps
+ * one back with Rewind. */
+static bool paused_rewind_step_due(void);
+static bool wait_while_user_paused(void) {
+    if (!g_user_paused && !menu_holds_game()) {
+        return false;
+    }
+    uint64_t last_present_ms = 0;
+    while (menu_holds_game() ||
+           (g_user_paused && g_frame_advance_pending == 0 && !paused_rewind_step_due())) {
+        const uint64_t now_ms = SDL_GetTicks64();
+        const uint64_t next_present_ms = last_present_ms + 16;
+        SDL_Event event;
+        if (SDL_WaitEventTimeout(&event, now_ms < next_present_ms ? (int)(next_present_ms - now_ms) : 0)) {
+            do {
+                if (ImGui::GetCurrentContext() != NULL) {
+                    ImGui_ImplSDL2_ProcessEvent(&event);
+                }
+                if (!handle_runtime_event(&event, g_registered_ctx)) {
+                    /* Quit: let gb_platform_poll_events() see it and end the loop. */
+                    SDL_Event quit_event = {};
+                    quit_event.type = SDL_QUIT;
+                    SDL_PushEvent(&quit_event);
+                    return true;
+                }
+            } while (SDL_PollEvent(&event));
+        }
+        gb_debug_server_poll();
+        if (!menu_holds_game() &&
+            (!g_user_paused || g_frame_advance_pending > 0 || paused_rewind_step_due())) {
+            break;
+        }
+        if (SDL_GetTicks64() >= next_present_ms) {
+            /* A state load drops the cached frame; show the loaded one instead. */
+            const uint32_t* fb = g_last_guest_framebuffer_valid ? g_last_guest_framebuffer
+                               : g_registered_ctx ? gb_get_framebuffer(g_registered_ctx) : NULL;
+            render_frame_internal(fb, false);
+            last_present_ms = SDL_GetTicks64();
+        }
+    }
+    if (g_user_paused && g_frame_advance_pending > 0) {
+        g_frame_advance_pending--;
+        const uint8_t input = current_joypad_input();
+        g_pause_input_frames = (input == g_pause_input) ? g_pause_input_frames + 1 : 1;
+        g_pause_input = input;
+    }
+    return true;
+}
+
+/* ---- Preemptive frames ----
+ * RetroArch's model (runahead.c, preempt_run), ported. A ring keeps the
+ * machine state from before each of the last N frames. Before a frame runs,
+ * the joypad is compared with the one the previous frame read; when it changed
+ * and the ring is full, the oldest state is loaded and those N frames run again
+ * with the new input, without sound or picture, re-saving the ring on the way.
+ * The state before the coming frame then replaces the oldest entry, and the
+ * main loop runs and shows that frame as usual. The game sees each change N
+ * frames before it was made, so a response that takes the game N or more
+ * frames appears N frames sooner; nothing else about the game changes. A state
+ * load empties the ring (RetroArch's CMD_EVENT_PREEMPT_RESET_BUFFER); it
+ * refills after N frames. */
+struct Preempt {
+    uint8_t* buffer = nullptr;   /* frames * state_size */
+    size_t state_size = 0;
+    int frames = 0;
+    uint64_t frame_count = 0;    /* states saved since the ring was emptied */
+    int start_ptr = 0;           /* oldest state */
+    uint8_t joypad = 0;          /* what the last frame read */
+};
+static Preempt g_preempt;
+static uint64_t g_preempt_replays = 0;
+
+static int preemptive_frames(void) {
+    const int n = g_preemptive_frames_pref >= 0 ? g_preemptive_frames_pref
+                                                : game_default_preemptive_frames();
+    return n < 0 ? 0 : n > GB_PREEMPT_MAX_FRAMES ? GB_PREEMPT_MAX_FRAMES : n;
+}
+
+static void preempt_reset(void) {
+    g_preempt.frame_count = 0;
+}
+
+static void preempt_free(void) {
+    free(g_preempt.buffer);
+    g_preempt = Preempt();
+}
+
+uint64_t gb_platform_preempt_replays(void) {
+    return g_preempt_replays;
+}
+
+/* One frame as the main loop runs it, in the same slices so it ends on the
+ * same instruction, without polling or presenting. False when it did not
+ * finish (the LCD stayed off). */
+static bool preempt_run_frame(GBContext* ctx) {
+    gb_reset_frame(ctx);
+    ctx->stopped = 0;
+    for (int slice = 0; !ctx->frame_done; slice++) {
+        if (slice == 8) return false;
+        gb_run_cycles(ctx, g_smooth_lcd_transitions ? 70224u : 0xFFFFFFFFu);
+    }
+    g_preempt_replays++;
+    return true;
+}
+
+/* Called at the end of gb_platform_vsync, after this frame's input is in. */
+static void preempt_before_frame(void) {
+    GBContext* ctx = g_registered_ctx;
+    /* A scripted input run expects each input on its own frame. */
+    const int frames = (ctx && g_script_count == 0) ? preemptive_frames() : 0;
+    if (!frames) {
+        if (g_preempt.buffer) preempt_free();
+        return;
+    }
+    /* Only whole frames can be run again; pacing slices of a frame the LCD
+     * keeps off empty the ring. */
+    if (!ctx->frame_done) {
+        preempt_reset();
+        return;
+    }
+    const size_t size = gb_state_size(ctx);
+    if (!g_preempt.buffer || frames != g_preempt.frames || size != g_preempt.state_size) {
+        preempt_free();
+        if (size > SIZE_MAX / (size_t)frames ||
+            !(g_preempt.buffer = (uint8_t*)malloc(size * (size_t)frames))) {
+            return;
+        }
+        g_preempt.state_size = size;
+        g_preempt.frames = frames;
+        g_preempt.joypad = current_joypad_input();
+    }
+    auto slot = [](int i) { return g_preempt.buffer + (size_t)i * g_preempt.state_size; };
+    auto next = [frames](int i) { return (i + 1) % frames; };
+
+    const uint8_t joypad = current_joypad_input();
+    const bool dirty = joypad != g_preempt.joypad;
+    g_preempt.joypad = joypad;
+    if (dirty && g_preempt.frame_count >= (uint64_t)frames) {
+        /* Those frames were already heard; run them again silently. */
+        const auto on_audio_sample = ctx->callbacks.on_audio_sample;
+        ctx->callbacks.on_audio_sample = NULL;
+        gb_state_load(ctx, slot(g_preempt.start_ptr));
+        bool finished = preempt_run_frame(ctx);
+        for (int replay = next(g_preempt.start_ptr);
+             finished && replay != g_preempt.start_ptr; replay = next(replay)) {
+            gb_state_save(ctx, slot(replay));
+            finished = preempt_run_frame(ctx);
+        }
+        ctx->callbacks.on_audio_sample = on_audio_sample;
+        if (!finished) {
+            preempt_reset();
+            return;
+        }
+    }
+    gb_state_save(ctx, slot(g_preempt.start_ptr));
+    g_preempt.start_ptr = next(g_preempt.start_ptr);
+    g_preempt.frame_count++;
+}
+
+/* ---- Rewind ----
+ * RetroArch's rewind (state_manager_check_rewind), ported; the buffer is
+ * rewind.c. Before a frame runs, its state goes into the buffer, one every
+ * Rewind Frames frames. While the Rewind key is held, the newest state is
+ * taken out and loaded instead and the frame runs from it, so each frame
+ * shown is an older one; its sound is collected backwards and played before
+ * the next. The first step back passes over the state of the frame already
+ * on screen (RetroArch shows that frame again). States leave out the picture
+ * (gb_state_save_no_picture): the frame run from one draws it again. Loading
+ * one empties the preemptive frames' ring, as any state load does in
+ * RetroArch; it refills once the key is let go. */
+enum GBRewindStatus { GB_REWIND_IDLE, GB_REWIND_BACK, GB_REWIND_AT_OLDEST };
+static GBRewind* g_rewind = nullptr;
+static size_t g_rewind_state_size = 0;
+static size_t g_rewind_buffer_bytes = 0;
+static int g_rewind_granularity_count = 0;
+static bool g_rewind_newest_on_screen = false;  /* pushed just before the frame shown */
+static bool g_rewind_frame_is_reversed = false; /* this frame's sound is collected */
+static GBRewindStatus g_rewind_status = GB_REWIND_IDLE;
+static int g_rewind_debug_frames = 0;           /* debug server `rewind` */
+static uint64_t g_rewind_paused_step_ms = 0;
+/* One frame's sound, stereo, written from the end backwards (RetroArch's
+ * rewind_buf); room for a held frame twice the usual length. */
+static constexpr size_t GB_REWIND_AUDIO_SIZE = 8192;
+static int16_t g_rewind_audio[GB_REWIND_AUDIO_SIZE];
+static size_t g_rewind_audio_ptr = GB_REWIND_AUDIO_SIZE;
+static void (*g_rewind_audio_sink)(GBContext*, int16_t, int16_t) = nullptr;
+
+static void rewind_free(void) {
+    gb_rewind_free(g_rewind);
+    g_rewind = nullptr;
+    g_rewind_state_size = 0;
+    g_rewind_buffer_bytes = 0;
+    g_rewind_newest_on_screen = false;
+    g_rewind_status = GB_REWIND_IDLE;
+}
+
+static bool rewind_held(void) {
+    return g_runtime_action_pressed[GB_INPUT_ACTION_REWIND] || g_rewind_debug_frames > 0;
+}
+
+static void on_audio_sample_rewind(GBContext* ctx, int16_t left, int16_t right) {
+    (void)ctx;
+    if (g_rewind_audio_ptr < 2) return;
+    g_rewind_audio[--g_rewind_audio_ptr] = right;
+    g_rewind_audio[--g_rewind_audio_ptr] = left;
+}
+
+/* RetroArch's audio_driver_frame_is_reverse: the frame just run went back, so
+ * its sound goes out backwards now. */
+static void rewind_end_reversed_frame(GBContext* ctx) {
+    if (!g_rewind_frame_is_reversed) return;
+    g_rewind_frame_is_reversed = false;
+    ctx->callbacks.on_audio_sample = g_rewind_audio_sink;
+    for (size_t i = g_rewind_audio_ptr; g_rewind_audio_sink && i + 1 < GB_REWIND_AUDIO_SIZE; i += 2) {
+        g_rewind_audio_sink(ctx, g_rewind_audio[i], g_rewind_audio[i + 1]);
+    }
+    g_rewind_audio_ptr = GB_REWIND_AUDIO_SIZE;
+}
+
+/* With the key held, loads the state the coming frame runs from and returns
+ * true. Called before the frame's preemptive frames, which it replaces. */
+static bool rewind_step_back(void) {
+    GBContext* ctx = g_registered_ctx;
+    if (!ctx) return false;
+    /* Only between whole frames; slices of a frame the LCD keeps off wait. */
+    if (!ctx->frame_done) return false;
+    rewind_end_reversed_frame(ctx);
+    const bool held = rewind_held();
+    if (g_rewind_debug_frames > 0) g_rewind_debug_frames--;
+    if (!g_rewind_enabled) {
+        if (g_rewind) rewind_free();
+        g_rewind_status = GB_REWIND_IDLE;
+        return false;
+    }
+
+    const size_t size = gb_state_size(ctx);
+    const size_t buffer = (size_t)g_rewind_buffer_mb << 20;
+    if (size != g_rewind_state_size || buffer != g_rewind_buffer_bytes) {
+        rewind_free();
+        g_rewind = gb_rewind_new(size, buffer);
+        g_rewind_state_size = size;   /* not retried until one changes */
+        g_rewind_buffer_bytes = buffer;
+        g_rewind_granularity_count = g_rewind_granularity - 1;   /* keep this frame's */
+        if (!g_rewind) {
+            fprintf(stderr, "[REWIND] Could not keep %zu-byte states in %d MB\n",
+                    size, g_rewind_buffer_mb);
+        }
+    }
+    if (!g_rewind || !held) {
+        g_rewind_status = GB_REWIND_IDLE;
+        return false;
+    }
+
+    const void* state = nullptr;
+    bool popped = gb_rewind_pop(g_rewind, &state);
+    if (!state) {   /* nothing kept yet: the frame runs on */
+        g_rewind_status = GB_REWIND_IDLE;
+        return false;
+    }
+    if (popped && g_rewind_newest_on_screen) {
+        gb_rewind_pop(g_rewind, &state);   /* at the oldest, state stays */
+    }
+    g_rewind_newest_on_screen = false;
+    gb_state_load_no_picture(ctx, state);
+    preempt_reset();
+    /* core_set_rewind_callbacks: collect the frame's sound; none at the
+     * oldest, where the same frame runs again. */
+    g_rewind_frame_is_reversed = true;
+    g_rewind_audio_ptr = GB_REWIND_AUDIO_SIZE;
+    g_rewind_audio_sink = ctx->callbacks.on_audio_sample;
+    ctx->callbacks.on_audio_sample = popped ? on_audio_sample_rewind : NULL;
+    g_rewind_status = popped ? GB_REWIND_BACK : GB_REWIND_AT_OLDEST;
+    if (g_user_paused) g_rewind_paused_step_ms = SDL_GetTicks64();
+    return true;
+}
+
+/* Keeps the state the coming frame runs from, after preemptive frames made
+ * it. */
+static void rewind_push(void) {
+    GBContext* ctx = g_registered_ctx;
+    if (!ctx || !g_rewind || !ctx->frame_done) return;
+    g_rewind_newest_on_screen = false;
+    if (++g_rewind_granularity_count < g_rewind_granularity) return;
+    g_rewind_granularity_count = 0;
+    gb_state_save_no_picture(ctx, gb_rewind_push_where(g_rewind));
+    gb_rewind_push_do(g_rewind);
+    g_rewind_newest_on_screen = true;
+}
+
+static const char* rewind_status_text(void) {
+    if (!rewind_held()) return NULL;
+    switch (g_rewind_status) {
+        case GB_REWIND_BACK: return "Rewinding.";
+        case GB_REWIND_AT_OLDEST: return "Reached end of rewind buffer.";
+        case GB_REWIND_IDLE:
+        default: return NULL;
+    }
+}
+
+/* Holding Rewind while paused steps back once per refresh, as RetroArch runs
+ * one frame per refresh while it rewinds paused. */
+static bool paused_rewind_step_due(void) {
+    /* Leaving the pause runs a frame, so only with a state to go back to. */
+    return g_rewind && gb_rewind_has_state(g_rewind) && rewind_held() &&
+           SDL_GetTicks64() >= g_rewind_paused_step_ms + 16;
+}
+
+void gb_platform_rewind_hold(int frames) {
+    g_rewind_debug_frames = frames > 0 ? frames : 0;
+}
+
+void gb_platform_get_rewind_info(GBPlatformRewindInfo* out) {
+    if (!out) return;
+    *out = GBPlatformRewindInfo{};
+    out->enabled = g_rewind_enabled;
+    out->state_size = g_rewind_state_size;
+    if (g_rewind) {
+        out->states = gb_rewind_entries(g_rewind);
+        out->used = gb_rewind_used(g_rewind);
+        out->capacity = gb_rewind_capacity(g_rewind);
+    }
+}
+
+void gb_platform_set_speed(int fast_forward, int max_speed, int vsync, int percent,
+                           int fast_forward_percent, int max_percent) {
+    const int previous_speed = effective_speed_percent();
+    const bool audio_was_running = audio_output_should_run();
+    if (fast_forward >= 0) g_debug_fast_forward = fast_forward != 0;
+    if (max_speed >= 0) g_max_speed_mode = max_speed != 0;
+    if (vsync >= 0) g_vsync = vsync != 0;
+    if (percent >= 10 && percent <= 500) g_speed_percent = percent;   /* the menu's range */
+    set_shortcut_speed(&g_fast_forward_speed_percent, fast_forward_percent);
+    set_shortcut_speed(&g_max_speed_percent, max_percent);
+    g_fast_forward_active = g_runtime_action_pressed[GB_INPUT_ACTION_FAST_FORWARD] || g_debug_fast_forward;
+    if (effective_speed_percent() != previous_speed) {
+        on_speed_changed(audio_was_running);
+    }
+}
+
+void gb_platform_get_speed_info(GBPlatformSpeedInfo* out) {
+    if (!out) return;
+    out->effective_percent = shortcut_speed_pref(effective_speed_percent());
+    out->fast_forward_percent = shortcut_speed_pref(g_fast_forward_speed_percent);
+    out->max_percent = shortcut_speed_pref(g_max_speed_percent);
+    out->guest_fps = g_guest_fps;
+    out->fast_forward = g_fast_forward_active;
+    out->max_speed = g_max_speed_mode;
+    out->vsync = g_vsync;
+    out->swap_interval = g_swap_interval;
+    out->audio_mode = g_speed_audio_mode;
+    out->audio_step = g_speed_audio.step;
+    out->present_ms = g_last_timing.present_ms;
+    out->frameskip = g_fast_forward_frameskip;
+    out->frames_skipped = g_frames_skipped;
+}
+
+void gb_platform_set_window(int width, int height, int scaling_mode) {
+    if (scaling_mode >= 0 && scaling_mode < (int)IM_ARRAYSIZE(g_render_scaling_mode_names)) {
+        g_render_scaling_mode = (GBRenderScalingMode)scaling_mode;
+    }
+    if (width > 0 && height > 0 && g_fullscreen_mode == 0) {
+        g_windowed_width = width;
+        g_windowed_height = height;
+        if (g_window) SDL_SetWindowSize(g_window, width, height);
+    }
+    update_game_viewport();
+}
+
+void gb_platform_get_window_info(GBPlatformWindowInfo* out) {
+    if (!out) return;
+    out->window_width = g_windowed_width;
+    out->window_height = g_windowed_height;
+    if (g_window) SDL_GetWindowSize(g_window, &out->window_width, &out->window_height);
+    out->view_width = view_width();
+    out->view_height = view_height();
+    out->native_presented = g_native_presented;
+    out->picture_width = presentation_width();
+    out->picture_height = presentation_height();
+    out->game_x = g_game_viewport.x;
+    out->game_y = g_game_viewport.y;
+    out->game_width = g_game_viewport.w;
+    out->game_height = g_game_viewport.h;
+    out->scaling_mode = (int)g_render_scaling_mode;
+    out->fullscreen = g_fullscreen_mode;
+}
+
+void gb_platform_set_menu(const char* open, int pause_in_menu, int dim_percent, int opacity_percent) {
+    if (pause_in_menu >= 0) set_menu_pauses_game(pause_in_menu != 0);
+    if (dim_percent >= 0 && dim_percent <= 100) g_menu_dim_percent = dim_percent;
+    if (opacity_percent >= 0 && opacity_percent <= 100) g_menu_opacity_percent = opacity_percent;
+    if (open) {
+        close_menus();
+        if (strcmp(open, "settings") == 0) {
+            g_show_menu = true;
+        } else if (strcmp(open, "main") == 0) {
+#ifdef RECOMP_LAUNCHER
+            recomp_runtime_ui_open(g_runtime_ui);
+#else
+            g_show_menu = true;
+#endif
+        }
+    }
+    menu_visibility_changed();
+}
+
+void gb_platform_get_menu_info(GBPlatformMenuInfo* out) {
+    if (!out) return;
+    *out = GBPlatformMenuInfo{};
+#ifdef RECOMP_LAUNCHER
+    out->main_open = g_runtime_ui && recomp_runtime_ui_is_open(g_runtime_ui);
+#endif
+    out->settings_open = g_show_menu;
+    out->game_held = menu_holds_game();
+    out->pause_in_menu = g_menu_pauses_game;
+    out->dim_percent = g_menu_dim_percent;
+    out->opacity_percent = g_menu_opacity_percent;
+}
+
+bool gb_platform_restart_game(void) {
+    if (!can_restart_game()) return false;
+    request_restart_game();
+    return true;
+}
+
+bool gb_platform_leave_game(const char* to) {
+    if (!to) return false;
+    if (strcmp(to, "quit") == 0) {
+        request_exit(GB_PLATFORM_EXIT_QUIT);
+    } else if (strcmp(to, "launcher") == 0 && launcher_available()) {
+        request_exit(GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool gb_platform_request_window_shot(const char* path) {
+    if (!g_window || !g_gl_context || !path || !path[0]) return false;
+    g_window_shot_path = path;
+    return true;
+}
+
+/* Called at the end of gb_platform_vsync, after this frame's input is in. */
+static void before_frame(void) {
+    run_pending_restart();
+    if (rewind_step_back()) return;
+    preempt_before_frame();
+    rewind_push();
+}
+
 void gb_platform_vsync(uint32_t frame_cycles) {
+    static uint64_t next_frame_time = 0;
+    static uint64_t frame_remainder = 0;
     if (g_benchmark_mode || g_app_suspended) {
         g_last_timing.pacing_cycles = (frame_cycles > 0) ? frame_cycles : 70224u;
         g_last_timing.pacing_ms = 0.0;
+        speed_audio_reset();
+        return;
+    }
+    if (wait_while_user_paused()) {
+        /* Time stood still for the game: pace on from now instead of racing
+         * to catch up, so an advanced frame runs immediately. */
+        next_frame_time = SDL_GetPerformanceCounter();
+        frame_remainder = 0;
+        speed_audio_reset();
+        g_last_timing.pacing_cycles = (frame_cycles > 0) ? frame_cycles : 70224u;
+        g_last_timing.pacing_ms = 0.0;
+        g_last_frame_time = SDL_GetTicks();
+        before_frame();
         return;
     }
     if (g_turbo) {
         /* Skip frame pacing entirely — run as fast as possible */
         update_audio_stats_from_ring();
         audio_stats_tick(SDL_GetTicks64());
+        speed_audio_frame(frame_cycles);
         g_last_frame_time = SDL_GetTicks();
+        before_frame();
         return;
     }
     /*
@@ -5918,13 +7720,14 @@ void gb_platform_vsync(uint32_t frame_cycles) {
      * accumulated wall-clock target and advance it before waiting so the
      * current frame's cycle count is what determines the current sleep.
      */
-    static uint64_t next_frame_time = 0;
-    static uint64_t frame_remainder = 0;
     const uint64_t gb_frame_cycles = (frame_cycles > 0) ? (uint64_t)frame_cycles : 70224ull;
     const uint64_t gb_cpu_hz = 4194304;
     uint64_t freq = SDL_GetPerformanceFrequency();
     uint64_t now = SDL_GetPerformanceCounter();
     uint32_t speed_percent = (uint32_t)effective_speed_percent();
+    /* Unlimited has no frame limiter (RetroArch's Fast-Forward Rate 0): no
+     * wait, and a limited speed paces on from the frame it starts on. */
+    const bool unlimited = speed_percent == (uint32_t)GB_SPEED_UNLIMITED;
     uint64_t frame_ticks_num = (freq * gb_frame_cycles * 100ull) + frame_remainder;
     uint64_t frame_ticks_den = gb_cpu_hz * (uint64_t)speed_percent;
     uint64_t frame_ticks = frame_ticks_num / frame_ticks_den;
@@ -5942,9 +7745,12 @@ void gb_platform_vsync(uint32_t frame_cycles) {
     next_frame_time += frame_ticks;
     uint64_t target_frame_time = next_frame_time;
     uint32_t audio_fill = audio_ring_fill_samples();
-    bool audio_starved = audio_output_should_run() && g_audio_started && audio_fill < g_audio_low_watermark;
+    /* Only at 100%: at other speeds the sound follows the game's real speed
+     * (speed_audio_frame), so running early to feed it would feed back. */
+    bool audio_starved = speed_percent == 100 && audio_output_should_run() && g_audio_started &&
+                         audio_fill < g_audio_low_watermark;
 
-    if (!audio_starved && now < target_frame_time) {
+    if (!unlimited && !audio_starved && now < target_frame_time) {
         for (;;) {
             uint64_t wait_ticks = target_frame_time - now;
             uint32_t wait_us = (uint32_t)((wait_ticks * 1000000) / freq);
@@ -5975,18 +7781,22 @@ void gb_platform_vsync(uint32_t frame_cycles) {
 
     /* If we fell behind by more than 3 frames, reset (don't try to catch up) */
     uint64_t max_frame_lag = frame_ticks * 3;
-    if (now > target_frame_time + max_frame_lag) {
+    if (unlimited || now > target_frame_time + max_frame_lag) {
         next_frame_time = now;
         frame_remainder = 0;
     }
-    
+
     update_audio_stats_from_ring();
     audio_stats_tick(SDL_GetTicks64());
+    speed_audio_frame(frame_cycles);
     g_last_timing.pacing_cycles = (uint32_t)gb_frame_cycles;
     g_last_timing.pacing_ms = sdl_now_ms() - pacing_start_ms;
     g_timing_vsync_total += g_last_timing.pacing_ms;
     g_timing_frame_count++;
     g_last_frame_time = SDL_GetTicks();
+
+    handle_events_before_frame();
+    before_frame();
 }
 
 bool gb_platform_get_smooth_lcd_transitions(void) {
@@ -5999,7 +7809,8 @@ void gb_platform_set_smooth_lcd_transitions(bool enabled) {
 
 void gb_platform_set_title(const char* title) {
     if (g_window && !g_benchmark_mode) {
-        SDL_SetWindowTitle(g_window, title);
+        const char* game_name = game_get_name();
+        SDL_SetWindowTitle(g_window, (game_name && game_name[0]) ? game_name : title);
     }
 }
 
@@ -6099,6 +7910,10 @@ static bool save_savestate_slot(GBContext* ctx, int slot) {
     sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
     const bool success = gb_platform_save_state_path(ctx, filename);
     set_savestate_status("Save", slot, success, filename);
+    const std::string number = std::to_string(slot + 1);
+    post_state_notice(success ? "Saved state to slot " + number + "."
+                              : "Failed to save state to slot " + number + ".",
+                      g_notify_save_load || !success);
     return success;
 }
 
@@ -6110,8 +7925,14 @@ static bool load_savestate_slot(GBContext* ctx, int slot) {
 
     char filename[512];
     sdl_get_savestate_path(filename, sizeof(filename), ctx, slot);
-    const bool success = gb_platform_load_state_path(ctx, filename);
-    set_savestate_status("Load", slot, success, filename);
+    const bool present = savestate_slot_exists(ctx, slot, NULL);
+    const bool success = present && gb_platform_load_state_path(ctx, filename);
+    set_savestate_status("Load", slot, success, present ? filename : "Slot is empty");
+    const std::string number = std::to_string(slot + 1);
+    post_state_notice(success   ? "Loaded state from slot " + number + "."
+                      : present ? "Failed to load state from slot " + number + "."
+                                : "State slot " + number + " is empty.",
+                      g_notify_save_load || !success);
     return success;
 }
 
@@ -6121,10 +7942,91 @@ static bool load_savestate_slot(GBContext* ctx, int slot) {
  * counter has to resync to the restored frame count. gb_custom_reset() and
  * gb_ws_reapply() already run inside gb_context_load_state_file(). */
 static void apply_post_load_host_state(GBContext* ctx) {
+    /* Preemptive frames' states are the old timeline's. Paused, run enough
+     * frames to refill them, as RetroArch runs one after a paused load, so the
+     * next frame advance already responds a frame sooner. */
+    preempt_reset();
+    if (g_user_paused) {
+        g_frame_advance_pending += preemptive_frames();
+    }
+    /* Rewind keeps its states, so a load can be rewound past; the frame on
+     * screen is the loaded one now, so the first step back lands on the
+     * newest state, the one before the frame shown until now. */
+    g_rewind_newest_on_screen = false;
     reset_audio_output_buffer(true);
     g_last_guest_framebuffer_valid = false;
     g_present_count = ctx ? ctx->completed_frames : 0;
     g_last_frame_time = SDL_GetTicks();
+}
+
+/* ---- Restart Game ----
+ * The machine as it was before its first frame (gb_before_first_frame) is
+ * kept, and Restart Game loads it back, as RetroArch's Restart resets the
+ * core in place: the window, the settings, rewind and the preset stay, and it
+ * happens between frames like a state load. The cart's battery RAM is the
+ * current one (a power cycle keeps the save), written to disk first. */
+static void keep_boot_state(GBContext* ctx) {
+    if (ctx != g_registered_ctx || !g_boot_state.empty()) return;
+    g_boot_state.resize(gb_state_size(ctx));
+    gb_state_save(ctx, g_boot_state.data());
+}
+
+static bool can_restart_game(void) {
+    return g_registered_ctx && g_boot_state.size() == gb_state_size(g_registered_ctx);
+}
+
+static void request_restart_game(void) {
+    g_restart_pending = can_restart_game();
+    close_menus();
+}
+
+static void run_pending_restart(void) {
+    GBContext* ctx = g_registered_ctx;
+    if (!g_restart_pending || !ctx) return;
+    g_restart_pending = false;
+    if (!can_restart_game()) return;
+    if (ctx->eram && ctx->eram_size) gb_context_save_ram(ctx);
+    const std::vector<uint8_t> eram(ctx->eram, ctx->eram + ctx->eram_size);
+    const auto rtc = ctx->rtc;
+    gb_state_load(ctx, g_boot_state.data());
+    if (!eram.empty()) memcpy(ctx->eram, eram.data(), eram.size());
+    ctx->rtc = rtc;
+    if (gb_custom_reset) gb_custom_reset(ctx);
+    apply_post_load_host_state(ctx);
+    g_savestate_status = "Restarted the game.";
+    fprintf(stderr, "[SDL] Restarted the game\n");
+}
+
+/* ---- Quit / Return to Launcher ----
+ * A launcher that started this game (gb_platform_set_launcher_return_enabled)
+ * takes exit code 64 back. The pre-boot launcher runs inside this program,
+ * before the game, so returning to it starts the program again with the
+ * launcher asked for, once this process has saved and closed (atexit runs
+ * after main has destroyed the context, which writes the battery RAM). */
+static void relaunch_with_launcher(void) {
+    if (!gb_host_relaunch("GBRECOMP_LAUNCHER", "1", "GBRECOMP_NO_LAUNCHER")) {
+        fprintf(stderr, "[SDL] Could not start the launcher again\n");
+    }
+}
+
+static bool launcher_available(void) {
+#ifdef RECOMP_LAUNCHER
+    return g_launcher_return_enabled || gb_host_can_relaunch();
+#else
+    return g_launcher_return_enabled;
+#endif
+}
+
+static void request_exit(GBPlatformExitAction action) {
+    g_exit_action = action;
+    if (action == GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER && !g_launcher_return_enabled) {
+        static bool relaunch_registered = false;
+        if (!relaunch_registered) atexit(relaunch_with_launcher);
+        relaunch_registered = true;
+    }
+    SDL_Event quit_event = {};
+    quit_event.type = SDL_QUIT;
+    SDL_PushEvent(&quit_event);
 }
 
 bool gb_platform_savestate_slot_path(const GBContext* ctx, int slot,
@@ -6324,6 +8226,10 @@ static const char* hardware_mode_pref_to_string(GBHardwareModePref mode) {
  * the CGB look can flip the dropdown. */
 static GBHardwareModePref hardware_mode_default_for_cart(const GBContext* ctx) {
     if (!ctx) return GB_HARDWARE_MODE_DMG;
+    const int game_pref = game_default_hardware_mode();
+    if (game_pref > GB_HARDWARE_MODE_AUTO && game_pref <= GB_HARDWARE_MODE_GBA) {
+        return static_cast<GBHardwareModePref>(game_pref);
+    }
     if (ctx->config.cartridge_requires_cgb) return GB_HARDWARE_MODE_CGB;
     if (ctx->config.cartridge_supports_sgb) return GB_HARDWARE_MODE_SGB;
     if (ctx->config.cartridge_supports_cgb) return GB_HARDWARE_MODE_CGB;
@@ -6428,10 +8334,10 @@ void gb_platform_set_game_id(GBContext* ctx, const char* game_id) {
      * later launches. */
     try_load_sgb_cart_border_cache();
 
-    /* Scan cheats/<game_id>/*.cht. Cart-agnostic -- works on any
-     * Game Boy game that has libretro cheat files dropped into
-     * the cheats/ folder. */
-    gb_cheats_load(g_active_game_id.c_str());
+    /* This game's cheats: cheats/<game_id>/*.cht and cheats/<game_id>*.cht.
+     * Cart-agnostic -- works on any Game Boy game that has libretro cheat
+     * files dropped into the cheats/ folder. */
+    gb_cheats_load(g_active_game_id.c_str(), false);
 }
 
 /* Helpers for menu handlers to scope a Look setting to the active
@@ -6449,6 +8355,9 @@ static void set_active_game_pref_int(const char* key, int value) {
 
 void gb_platform_register_context(GBContext* ctx) {
     g_registered_ctx = ctx;
+    /* Restart Game's starting point, kept before the first frame runs. */
+    g_boot_state.clear();
+    gb_before_first_frame = keep_boot_state;
     GBPlatformCallbacks callbacks = {
         .on_audio_sample = on_audio_sample,
         .on_serial_byte = platform_on_serial_byte,
@@ -6458,6 +8367,11 @@ void gb_platform_register_context(GBContext* ctx) {
         .save_rtc_data = sdl_save_rtc_data
     };
     gb_set_platform_callbacks(ctx, &callbacks);
+
+    /* A build of one game has no game id (gb_platform_set_game_id, which
+     * loads the game's own cheats, is for builds that load a game), so
+     * every .cht in cheats/ is its, and cheats/<save id>/ too. */
+    gb_cheats_load(ctx ? ctx->save_id : "", true);
 
     /* Spin up the printer once. The actual output path/prefix is
      * resolved lazily on the first serial byte — register_context runs
@@ -6488,8 +8402,19 @@ void gb_platform_register_context(GBContext* ctx) {
     game_on_init(ctx);
     if (!gb_custom_render) gb_ws_arm(ctx);
     if (gb_custom_render) {
-        gb_custom_width = gb_custom_resolve_width(g_windowed_width, g_windowed_height);
-        if (gb_custom_requested_width < 0 && gb_custom_width == 160) gb_custom_width = 256;
+        /* A view that fills the window starts shaped like the screen; the
+         * window scale below then sizes the window around it. */
+        int ww = g_windowed_width, wh = g_windowed_height;
+        SDL_DisplayMode desktop;
+        if (gb_custom_requested_width < 0 && g_window &&
+            SDL_GetDesktopDisplayMode(SDL_GetWindowDisplayIndex(g_window), &desktop) == 0) {
+            ww = desktop.w;
+            wh = desktop.h;
+        }
+        gb_custom_resolve_size(ww, wh, g_render_scaling_mode == GB_RENDER_SCALING_PIXEL_PERFECT,
+                               &gb_custom_width, &gb_custom_height);
+        gb_custom_view_width = gb_custom_width;
+        gb_custom_view_height = gb_custom_height;
     }
     if (g_gbws_active || gb_custom_render) {
         recreate_streaming_texture();
@@ -6556,6 +8481,34 @@ uint8_t gb_platform_get_joypad(void) {
 }
 
 void gb_platform_vsync(uint32_t frame_cycles) { (void)frame_cycles; }
+uint64_t gb_platform_preempt_replays(void) { return 0; }
+void gb_platform_rewind_hold(int frames) { (void)frames; }
+void gb_platform_get_rewind_info(GBPlatformRewindInfo* out) {
+    if (out) *out = GBPlatformRewindInfo{};
+}
+void gb_platform_set_speed(int fast_forward, int max_speed, int vsync, int percent,
+                           int fast_forward_percent, int max_percent) {
+    (void)fast_forward; (void)max_speed; (void)vsync; (void)percent;
+    (void)fast_forward_percent; (void)max_percent;
+}
+void gb_platform_get_speed_info(GBPlatformSpeedInfo* out) {
+    if (out) *out = GBPlatformSpeedInfo{};
+}
+void gb_platform_set_window(int width, int height, int scaling_mode) {
+    (void)width; (void)height; (void)scaling_mode;
+}
+void gb_platform_get_window_info(GBPlatformWindowInfo* out) {
+    if (out) *out = GBPlatformWindowInfo{};
+}
+void gb_platform_set_menu(const char* open, int pause_in_menu, int dim_percent, int opacity_percent) {
+    (void)open; (void)pause_in_menu; (void)dim_percent; (void)opacity_percent;
+}
+void gb_platform_get_menu_info(GBPlatformMenuInfo* out) {
+    if (out) *out = GBPlatformMenuInfo{};
+}
+bool gb_platform_restart_game(void) { return false; }
+bool gb_platform_leave_game(const char* to) { (void)to; return false; }
+bool gb_platform_request_window_shot(const char* path) { (void)path; return false; }
 
 bool gb_platform_get_smooth_lcd_transitions(void) { return false; }
 

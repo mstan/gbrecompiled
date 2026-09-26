@@ -12,6 +12,7 @@ add_executable(gbrecomp
     src/ir/ir_builder.cpp
     src/ir/ir_optimizer.cpp
     src/codegen/c_emitter.cpp
+    src/codegen/exhaustive.cpp
     # Reuse the runtime's SHA-1 + SHA-256 so c_emitter can hash the
     # ROM at generation time and bake the digests into the generated
     # code (asset-loader integration uses SHA-1; the launcher-side

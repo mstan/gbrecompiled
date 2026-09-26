@@ -73,6 +73,7 @@ typedef struct {
     bool enable_bootrom;
     bool enable_audio;
     bool enable_serial;
+    bool compiled_halt_bug; /**< Dispatcher has native HALT-bug instruction variants. */
     uint32_t speed_percent; /**< 100 = normal, 200 = 2x, etc */
 } GBConfig;
 
@@ -117,6 +118,7 @@ typedef struct {
     uint64_t log_interval;   /**< Progress log cadence (0 disables progress logs) */
     bool compare_memory;     /**< Compare mutable memory/PPU state on every step */
     bool log_fallbacks;      /**< Log generated-to-interpreter fallback events */
+    bool quiet;             /**< Suppress successful per-run differential summaries. */
     bool fail_on_fallback;   /**< Treat generated-to-interpreter fallback as a mismatch */
     const char* input_script;/**< Optional scripted input in frame:buttons:duration or c<cycle>:buttons:duration format */
 } GBDifferentialOptions;
@@ -328,6 +330,16 @@ typedef struct GBContext {
     uint8_t* oam;         /**< Object Attribute Memory */
     uint8_t* hram;        /**< High RAM (0xFF80-0xFFFE) */
     uint8_t* io;          /**< I/O registers (0xFF00-0xFF7F) */
+    /* Memory past one WRAM bank (gb_context_set_wram_extension), or NULL. */
+    uint8_t* wram_ext;
+    uint32_t wram_ext_size;   /**< Bytes kept in states, mapped ones first */
+    uint16_t wram_ext_mapped; /**< Bytes seen at 0xE000 while SVBK selects wram_ext_bank */
+    uint8_t wram_ext_bank;
+    uint16_t wram_ext_cart_mapped;  /**< Bytes seen at 0xA000 in that bank instead of cartridge RAM */
+    uint32_t wram_ext_cart_offset;  /**< Where those start in wram_ext */
+    uint8_t wram_ext_bank2;         /**< Another bank with a window at 0xE000, 0 = none */
+    uint16_t wram_ext_mapped2;      /**< Bytes seen at 0xE000 while SVBK selects it */
+    uint32_t wram_ext_offset2;      /**< Where those start in wram_ext */
 
     /* Boot ROM (BIOS) — LLE boot. When boot_rom is loaded and the context is
      * reset without skip_bootrom, the real boot ROM is mapped at 0x0000 and
@@ -384,6 +396,17 @@ typedef struct GBContext {
     void* trace_file;     /**< FILE* for trace output */
     bool trace_entries_enabled;
     void* ppu_trace_file; /**< FILE* for focused PPU trace output */
+
+    /* Lag-frame hold (gb_frame_hold_hook). Host state; not in save states,
+     * which are taken at frame boundaries where no hold is active. */
+    struct {
+        uint8_t active;      /**< PPU/timers/APU wait at the end of line 143 */
+        uint8_t released;    /**< Hold ended: let line 143 finish once */
+        uint8_t suspended;   /**< Last hold hit the limit; wait for a frame to finish unaided */
+        uint32_t cycles;     /**< Dots the CPU has run during this hold */
+        uint64_t holds;      /**< Holds started */
+        uint64_t limit_hits; /**< Holds ended by gb_frame_hold_limit */
+    } frame_hold;
 } GBContext;
 
 /* ============================================================================
@@ -409,6 +432,31 @@ void gb_context_destroy(GBContext* ctx);
  * @param skip_bootrom If true, initialize to post-bootrom state
  */
 void gb_context_reset(GBContext* ctx, bool skip_bootrom);
+
+/* Opt-in memory for a game module whose table outgrows a WRAM bank: while
+ * SVBK selects `bank`, reads and writes of 0xE000 up to 0xE000 + `mapped`
+ * reach this zeroed buffer instead of echoing C000-DDFF, so a table in that
+ * bank continues past DFFF. Any other bank, and the rest of 0xE000-0xFDFF,
+ * keep the echo. All `size` bytes (the mapped ones first, then whatever the
+ * module keeps after them) go into rollback states and save-state files;
+ * a save state without them loads them zeroed. Call before the first state
+ * is taken; `mapped` is at most 0x1E00 and at most `size`. */
+bool gb_context_set_wram_extension(GBContext* ctx, uint8_t bank, uint16_t mapped, uint32_t size);
+/* Change what the extension answers for, at any time: `mapped` bytes at 0xE000
+ * as above, and `cart_mapped` bytes at 0xA000 from `cart_offset` in the
+ * buffer. While SVBK selects the extension's bank, 0xA000 up to 0xA000 +
+ * `cart_mapped` reads and writes the buffer instead of cartridge RAM, enabled
+ * or not, so a module maps it only while the game leaves cartridge RAM alone.
+ * Rollback states and save states restore neither mapping (they are host
+ * settings); the module sets them again after a load. */
+bool gb_context_map_wram_extension(GBContext* ctx, uint16_t mapped, uint16_t cart_mapped,
+                                   uint32_t cart_offset);
+/* A window for a second bank, for a table there that also outgrows it: while
+ * SVBK selects `bank`, 0xE000 up to 0xE000 + `mapped` reads and writes the
+ * buffer from `offset` instead of the echo. `bank` is not the extension's own;
+ * `mapped` 0 removes the window. A host setting like the others. */
+bool gb_context_map_wram_extension_bank(GBContext* ctx, uint8_t bank, uint16_t mapped,
+                                        uint32_t offset);
 
 /**
  * @brief Load a ROM into the context
@@ -456,6 +504,44 @@ bool gb_context_save_state_file(GBContext* ctx, const char* path);
  * @return true on success
  */
 bool gb_context_load_state_file(GBContext* ctx, const char* path);
+
+/* In-memory machine state for rollback (preemptive frames): the context,
+ * memories, PPU and APU a save state holds, plus what later frames also depend
+ * on -- the lag-frame hold, the extended view's OAM sidecar and a game
+ * module's own state (gb_game_state). Loading one keeps host settings, the
+ * memory layout and the extended view's geometry, so restoring a state and
+ * running the same frames with the same input reproduces them. IR and SGB
+ * state are left out, as in save states. */
+size_t gb_state_size(const GBContext* ctx);
+void gb_state_save(const GBContext* ctx, void* out);
+void gb_state_load(GBContext* ctx, const void* in);
+/* The same, passing over the PPU's finished picture (its framebuffers): save
+ * leaves those bytes of the buffer as they are, load keeps the live picture.
+ * Nothing reads the picture back, and a frame with the LCD on draws a whole
+ * new one, so such a frame ends exactly as from the full state. Rewind
+ * stores these, as RetroArch lets
+ * a core give it a lighter same-instance state; the picture is most of what
+ * changes from frame to frame. */
+void gb_state_save_no_picture(const GBContext* ctx, void* out);
+void gb_state_load_no_picture(GBContext* ctx, const void* in);
+
+/* A game module's host state that later frames depend on (hook bookkeeping,
+ * a custom view's latched lists), saved and loaded with gb_state_*. Zero size
+ * when the game has none. A save state file holds none of it: file_loaded
+ * (optional) runs after gb_context_load_state_file to rebuild what it can. */
+typedef struct {
+    size_t size;
+    void (*save)(const GBContext* ctx, void* out);
+    void (*load)(GBContext* ctx, const void* in);
+    void (*file_loaded)(GBContext* ctx);
+} GBGameState;
+extern GBGameState gb_game_state;
+
+/* Called by gb_reset_frame() before a context runs its first frame: the cart
+ * is loaded and reset but has not run, which is the machine a host restores to
+ * restart the game in place. Called again for a context set back to that point
+ * (completed_frames 0, nothing run); NULL by default. */
+extern void (*gb_before_first_frame)(GBContext* ctx);
 
 /* ============================================================================
  * Memory Access
@@ -569,6 +655,9 @@ void gb_call(GBContext* ctx, uint16_t addr);
  * @brief Return from a function
  */
 void gb_ret(GBContext* ctx);
+
+/** Execute RET's stack bus phases and its full 16 (or taken-conditional 20) cycles. */
+void gb_ret_timed(GBContext* ctx, uint32_t cycles);
 
 /**
  * @brief RST vector call
@@ -932,8 +1021,8 @@ void gb_platform_set_dump_frames(const char* frames);
  * game capability at gb_platform_register_context. See gb_widescreen.h. */
 void gb_ws_set_cli_request(int width);
 
-/* Runtime chokepoint for config-declared [[imm_override]] ALU-immediate
- * sites: the generator emits gbrt_imm_override8(ctx, bank, pc, orig) instead
+/* Runtime chokepoint for config-declared [[imm_override]] sites (ALU-immediate
+ * or LD r,n8 instructions): the generator emits gbrt_imm_override8(ctx, bank, pc, orig) instead
  * of the literal at reviewed instructions. With no hook installed the
  * original immediate is returned (behavior unchanged). An opt-in game module
  * (e.g. widescreen) installs the hook to widen specific bounds. */
@@ -941,6 +1030,34 @@ typedef uint8_t (*GBImmOverrideHook)(GBContext* ctx, uint8_t bank,
                                      uint16_t pc, uint8_t orig);
 extern GBImmOverrideHook gbrt_imm_override_hook;
 uint8_t gbrt_imm_override8(GBContext* ctx, uint8_t bank, uint16_t pc, uint8_t orig);
+
+/* Optional lag-frame removal, installed by a game module. The hook returns
+ * nonzero while the game's main loop has not finished the frame it is
+ * computing. If it does so when the PPU completes line 143, the PPU, timers,
+ * APU and serial port wait there while the CPU (with OAM DMA) keeps running,
+ * until the hook returns zero, the CPU halts, or gb_frame_hold_limit dots have
+ * run. The frame then enters VBlank as usual: the picture, interrupt timing and
+ * audio stream are unchanged; the game only gets more CPU time per frame.
+ * After a hold reaches the limit (a screen load, not a lag frame) no hold
+ * starts again until the hook reports a frame that finished unaided. */
+typedef int (*GBFrameHoldHook)(GBContext* ctx);
+extern GBFrameHoldHook gb_frame_hold_hook;
+extern uint32_t gb_frame_hold_limit;
+/* Called by the PPU at the end of line 143; true = wait there. */
+bool gb_frame_hold_at_vblank(GBContext* ctx);
+
+/* Optional instruction-boundary hook, installed by a game module. The
+ * scheduler calls it before dispatching the next instruction (gb_step and
+ * gb_debug_step, so both backends see it at the same boundaries), after any
+ * pending interrupt has been taken. Like an interrupt it may redirect
+ * execution: push ctx->pc and set a new one. Generated code only returns to
+ * the scheduler at such a boundary when something sets ctx->stopped, so a hook
+ * that needs one requests it from a point it already controls (for example an
+ * [[imm_override]] site). The generated dispatcher also runs on through calls
+ * and returns by itself; it offers each address it dispatches to
+ * game_dispatch_override(), which is where a game sees such a return. */
+typedef void (*GBStepHook)(GBContext* ctx);
+extern GBStepHook gb_step_hook;
 
 /**
  * @brief Set guest-frame numbers to dump by elapsed guest CYCLES (frame N = N*70224

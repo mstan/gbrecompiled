@@ -224,6 +224,31 @@ struct AnalyzerOptions {
         uint16_t end;       // exclusive
     };
     std::vector<DataRegion> data_regions;
+
+    // Bank-0 routines that consume inline argument bytes after the CALL.
+    // far_target: "dw addr ; db bank" naming code to follow. record_bytes > 0:
+    // zero-terminated list of records of that size; else arg_bytes long.
+    struct InlineCall {
+        uint16_t routine;
+        bool no_return;     // far-jump: nothing resumes after the inline bytes
+        bool far_target = true;
+        uint8_t arg_bytes = 3;
+        uint8_t record_bytes = 0;
+    };
+    std::vector<InlineCall> inline_calls;
+    // Also byte-scan every bank for CALL <inline routine> sites and seed their
+    // inline targets, so far-called code is found even when its caller is not.
+    bool scan_inline_calls = false;
+
+    // Aggressive-scan scope. scan_banks limits the linear code scan to these
+    // banks (empty = every bank). pointer_scan runs the 16-bit pointer probe,
+    // which tries each bank-0 pointer against every switchable bank -- very
+    // slow on large ROMs.
+    std::vector<uint8_t> scan_banks;
+    bool pointer_scan = true;
+
+    // Extra RST vectors followed by an inline dw jump table at each call site
+    std::vector<uint8_t> jump_table_rsts;
 };
 
 /**

@@ -2,7 +2,7 @@
  * @file cheats.h
  * @brief Libretro-style .cht cheat loader + applier.
  *
- * Reads `cheats/<game_id>/*.cht` files on cart launch and exposes
+ * Reads the game's .cht files from cheats/ on cart launch and exposes
  * the parsed entries to the UI. Two code types are supported:
  *
  *   - GameShark "01VVLLHH"  -> write byte $VV to RAM $HHLL each frame.
@@ -63,10 +63,22 @@ typedef struct {
     size_t     applied_offset[GB_CHEAT_OPS_PER_CHEAT];
 } GBCheat;
 
-/* Scan `cheats/<game_id>/*.cht` and parse every cheat into the
- * static cheat list. Replaces any previously-loaded cheats. Returns
- * the number of cheats loaded (>=0) or -1 on directory-not-found. */
-int gb_cheats_load(const char* game_id);
+/* Parse the game's .cht files into the static cheat list, replacing
+ * any previously-loaded cheats: every one in cheats/<game_id>/, and
+ * those loose in cheats/ itself -- all of them with `all_loose` (a
+ * build of one game), else those whose name starts with game_id.
+ * cheats/ is in the state folder (gb_host_state_path). Returns the
+ * number of cheats loaded. */
+int gb_cheats_load(const char* game_id, bool all_loose);
+
+/* Disable every cheat (restoring ROM patches) and load the files
+ * again, as the last gb_cheats_load did. */
+int gb_cheats_reload(GBContext* ctx);
+
+/* Where the last gb_cheats_load looked, for the menu: the cheats
+ * folder, and the game id whose folder in it was read ("" if none). */
+const char* gb_cheats_dir(void);
+const char* gb_cheats_game_id(void);
 
 /* Per-cart count + accessor for the parsed cheats. */
 int            gb_cheats_count(void);

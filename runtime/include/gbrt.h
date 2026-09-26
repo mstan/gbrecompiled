@@ -73,6 +73,7 @@ typedef struct {
     bool enable_bootrom;
     bool enable_audio;
     bool enable_serial;
+    bool compiled_halt_bug; /**< Dispatcher has native HALT-bug instruction variants. */
     uint32_t speed_percent; /**< 100 = normal, 200 = 2x, etc */
 } GBConfig;
 
@@ -117,6 +118,7 @@ typedef struct {
     uint64_t log_interval;   /**< Progress log cadence (0 disables progress logs) */
     bool compare_memory;     /**< Compare mutable memory/PPU state on every step */
     bool log_fallbacks;      /**< Log generated-to-interpreter fallback events */
+    bool quiet;             /**< Suppress successful per-run differential summaries. */
     bool fail_on_fallback;   /**< Treat generated-to-interpreter fallback as a mismatch */
     const char* input_script;/**< Optional scripted input in frame:buttons:duration or c<cycle>:buttons:duration format */
 } GBDifferentialOptions;
@@ -570,6 +572,9 @@ void gb_call(GBContext* ctx, uint16_t addr);
  */
 void gb_ret(GBContext* ctx);
 
+/** Execute RET's stack bus phases and its full 16 (or taken-conditional 20) cycles. */
+void gb_ret_timed(GBContext* ctx, uint32_t cycles);
+
 /**
  * @brief RST vector call
  */
@@ -932,8 +937,8 @@ void gb_platform_set_dump_frames(const char* frames);
  * game capability at gb_platform_register_context. See gb_widescreen.h. */
 void gb_ws_set_cli_request(int width);
 
-/* Runtime chokepoint for config-declared [[imm_override]] ALU-immediate
- * sites: the generator emits gbrt_imm_override8(ctx, bank, pc, orig) instead
+/* Runtime chokepoint for config-declared [[imm_override]] sites (ALU-immediate
+ * or LD r,n8 instructions): the generator emits gbrt_imm_override8(ctx, bank, pc, orig) instead
  * of the literal at reviewed instructions. With no hook installed the
  * original immediate is returned (behavior unchanged). An opt-in game module
  * (e.g. widescreen) installs the hook to widen specific bounds. */

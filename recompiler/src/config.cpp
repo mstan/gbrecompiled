@@ -102,6 +102,24 @@ std::optional<GameConfig> load_config(const std::string& path) {
                 config.trace_file = (config_dir / config.trace_file).string();
             }
         }
+        if (auto v = opts->get("scan_inline_calls")) config.scan_inline_calls = v->value_or(false);
+        if (auto v = opts->get("exhaustive_rom")) config.exhaustive_rom = v->value_or(false);
+        if (auto v = opts->get("resumable_instructions")) config.resumable_instructions = v->value_or(false);
+        if (auto v = opts->get("pointer_scan")) config.pointer_scan = v->value_or(true);
+        if (auto arr = opts->get_as<toml::array>("scan_banks")) {
+            for (auto& elem : *arr) {
+                if (auto b = elem.value<int64_t>()) {
+                    config.scan_banks.push_back(static_cast<uint8_t>(*b));
+                }
+            }
+        }
+        if (auto arr = opts->get_as<toml::array>("jump_table_rst")) {
+            for (auto& elem : *arr) {
+                if (auto v = elem.value<int64_t>()) {
+                    config.jump_table_rsts.push_back(static_cast<uint8_t>(*v));
+                }
+            }
+        }
         if (auto v = opts->get("dispatch_misses")) {
             config.dispatch_misses_file = v->value_or(std::string{});
             if (!config.dispatch_misses_file.empty() &&
@@ -171,6 +189,25 @@ std::optional<GameConfig> load_config(const std::string& path) {
                     config.imm_overrides.push_back(io);
                 } else {
                     std::cerr << "Warning: skipping incomplete imm_override entry\n";
+                }
+            }
+        }
+    }
+
+    // [[inline_call]]
+    if (auto calls = tbl["inline_call"].as_array()) {
+        for (auto& elem : *calls) {
+            if (auto t = elem.as_table()) {
+                InlineCallConfig ic{};
+                ic.routine   = static_cast<uint16_t>((*t)["routine"].value_or(int64_t{0}));
+                ic.no_return = (*t)["no_return"].value_or(false);
+                ic.far_target   = (*t)["far_target"].value_or(true);
+                ic.arg_bytes    = static_cast<uint8_t>((*t)["arg_bytes"].value_or(int64_t{3}));
+                ic.record_bytes = static_cast<uint8_t>((*t)["record_bytes"].value_or(int64_t{0}));
+                if (ic.routine != 0 && ic.routine < 0x4000) {
+                    config.inline_calls.push_back(ic);
+                } else {
+                    std::cerr << "Warning: skipping inline_call (routine must be in bank 0)\n";
                 }
             }
         }

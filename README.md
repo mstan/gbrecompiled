@@ -163,6 +163,36 @@ For games like Pokemon that need manually specified entry points:
 
 See [PokemonRedAndBlueRecomp](https://github.com/mstan/PokemonRedAndBlueRecomp) for a complete example of a TOML-configured game project.
 
+Discovery and code generation options for games whose code the default
+analysis does not reach:
+
+| Setting | What it does |
+|---|---|
+| `[[inline_call]]` `routine`, `no_return`, `far_target`, `arg_bytes`, `record_bytes` | A bank-0 routine that reads argument bytes placed after its `CALL` and returns past them. With `far_target` (the default) the arguments are `dw addr ; db bank` and the analyzer follows that far call (or far jump, with `no_return`); `record_bytes` > 0 reads a zero-terminated list of records of that size, otherwise `arg_bytes` (default 3) are skipped. |
+| `[options] scan_inline_calls = true` | Also byte-scan every bank for `CALL <inline routine>` sites and seed the far targets that look like code, so code reached only from unanalyzed callers is found. |
+| `[options] scan_banks = [0x00, 0x01, ...]` | Limit the aggressive linear scan to these banks (default: all). |
+| `[options] pointer_scan = false` | Skip the 16-bit pointer probe, which tries every bank-0 pointer against every switchable bank and is very slow on large ROMs. |
+| `[options] jump_table_rst = [0x00]` | RST vectors whose call sites are followed by an inline `dw` jump table, beyond the built-in detection. |
+| `[options] resumable_instructions = true` | A dispatch entry for every compiled instruction, so execution resumed at any PC re-enters compiled code instead of the interpreter. |
+| `[[imm_override]]` | Now also accepts `LD r,n8` sites, besides ALU immediates. |
+
+#### Exhaustive MBC5 ROM entries
+
+A game config can set `[options] exhaustive_rom = true` for a 2-256-bank MBC5
+image. This emits a native instruction entry for every ROM byte in both fixed
+and switchable mappings (including bank zero), plus HALT-bug fetch variants.
+The analyzed functions remain the fast path. Unanalyzed ROM entries use static
+address maps and operand-specialized native C functions; cross-window operands
+are read live. Every-byte `.asm` listings include data and overlapping candidates,
+so this is executable coverage rather than a semantic code/data classification.
+The `<prefix>_exhaustive.json` report records the ROM fingerprint and entry counts.
+Unknown executable RAM and illegal opcodes terminate with a diagnostic instead
+of using the interpreter. Generic RAM opcode helpers are disabled in this mode;
+games must provide compiled overlays or location-specific native RAM translations
+through `game_dispatch_override`. Explicit interpreter/differential modes remain
+available. `scan_banks` continues to control only the ordinary function-discovery
+pass.
+
 ---
 
 ## How It Works

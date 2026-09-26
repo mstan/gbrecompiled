@@ -213,7 +213,38 @@ static bool is_rst00_jump_table(const ROM& rom) {
     return rom.read_banked(0, 0x0008) == 0x87; // ADD A,A
 }
 
+static const AnalyzerOptions::InlineCall* find_inline_call(const AnalyzerOptions& options,
+                                                           uint16_t target) {
+    if (target >= 0x4000) return nullptr;
+    for (const auto& ic : options.inline_calls) {
+        if (ic.routine == target) return &ic;
+    }
+    return nullptr;
+}
+
+// Inline argument bytes following a CALL to an inline-argument routine.
+static uint16_t inline_args_length(const ROM& rom, uint8_t bank, uint16_t args,
+                                   const AnalyzerOptions::InlineCall& ic) {
+    if (ic.record_bytes == 0) return ic.arg_bytes;
+    uint16_t len = 0;
+    for (int i = 0; i < 256; ++i) {   // records until a zero terminator byte
+        uint16_t at = static_cast<uint16_t>(args + len);
+        if (rom.read_banked(at < 0x4000 ? 0 : bank, at) == 0) {
+            return static_cast<uint16_t>(len + 1);
+        }
+        len = static_cast<uint16_t>(len + ic.record_bytes);
+    }
+    return len;
+}
+
+// Bit (vector >> 3) set for RST vectors declared as jump tables in the game
+// config ([options] jump_table_rst). Set at the start of analyze().
+static uint8_t g_config_jump_table_rst_mask = 0;
+
 static bool is_jump_table_rst_vector(const ROM& rom, uint8_t rst_vector) {
+    if (g_config_jump_table_rst_mask & (1u << ((rst_vector >> 3) & 7))) {
+        return true;
+    }
     return (rst_vector == 0x00 && is_rst00_jump_table(rom)) ||
            (rst_vector == 0x28 && is_rst28_jump_table(rom));
 }
@@ -273,10 +304,17 @@ static std::vector<uint16_t> extract_rst_table_entries(const ROM& rom, uint16_t 
     // 4. An address at or past 0x8000 (not ROM)
     
     const int MAX_TABLE_ENTRIES = 64;  // Tetris has up to 44 entries in its main state machine
-    
+
+    // A handler placed right after the table bounds it: the table cannot
+    // overlap code it dispatches to.
+    uint32_t table_limit = 0x10000;
+
     for (int i = 0; i < MAX_TABLE_ENTRIES; i++) {
         uint16_t entry_addr = table_start + i * 2;
-        
+        if (static_cast<uint32_t>(entry_addr) + 2 > table_limit) {
+            break;
+        }
+
         // Make sure we can read 2 bytes
         size_t rom_offset;
         if (entry_addr < 0x4000) {
@@ -313,6 +351,9 @@ static std::vector<uint16_t> extract_rst_table_entries(const ROM& rom, uint16_t 
         
         // Add the target if it looks valid
         targets.push_back(target);
+        if (target > entry_addr && target < table_limit) {
+            table_limit = target;
+        }
     }
     
     return targets;
@@ -715,7 +756,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     result.rom = &rom;
     result.entry_point = 0x100;
     const AnnotationIndex annotations = build_annotation_index(rom, options);
-    
+
+    g_config_jump_table_rst_mask = 0;
+    for (uint8_t vec : options.jump_table_rsts) {
+        g_config_jump_table_rst_mask |= static_cast<uint8_t>(1u << ((vec >> 3) & 7));
+    }
+
     // Add standard GameBoy entry points
     result.interrupt_vectors = {0x40, 0x48, 0x50, 0x58, 0x60};  // Interrupt vectors
     
@@ -729,7 +775,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     // Pointer scanning discovers unreferenced code heuristically, so it belongs
     // to the aggressive scan.  --no-scan must remain strict recursive descent
     // from known/annotated/runtime-confirmed entry points.
-    if (options.aggressive_scan) {
+    if (options.aggressive_scan && options.pointer_scan) {
         find_pointer_entry_points(rom, result, work_queue, annotations);
     }
     
@@ -763,6 +809,47 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         result.strong_call_targets.insert(annotation.addr);
     }
 
+    // Far-call targets carried inline at CALL <routine> sites. The site itself
+    // is not trusted as code; only a target that looks like code is seeded.
+    if (options.scan_inline_calls && !options.inline_calls.empty()) {
+        size_t seeded = 0;
+        for (uint16_t bank = 0; bank < rom.bank_count(); ++bank) {
+            uint16_t start = (bank == 0) ? 0x0000 : 0x4000;
+            uint16_t end = (bank == 0) ? 0x4000 : 0x8000;
+            for (uint32_t addr = start; addr + 6 <= end; ++addr) {
+                if (rom.read_banked(static_cast<uint8_t>(bank), static_cast<uint16_t>(addr)) != 0xCD) continue;
+                uint16_t routine = static_cast<uint16_t>(
+                    rom.read_banked(static_cast<uint8_t>(bank), static_cast<uint16_t>(addr + 1)) |
+                    (rom.read_banked(static_cast<uint8_t>(bank), static_cast<uint16_t>(addr + 2)) << 8));
+                const AnalyzerOptions::InlineCall* ic = find_inline_call(options, routine);
+                if (!ic || !ic->far_target) continue;
+
+                uint16_t far_addr = static_cast<uint16_t>(
+                    rom.read_banked(static_cast<uint8_t>(bank), static_cast<uint16_t>(addr + 3)) |
+                    (rom.read_banked(static_cast<uint8_t>(bank), static_cast<uint16_t>(addr + 4)) << 8));
+                uint8_t far_bank = rom.read_banked(static_cast<uint8_t>(bank), static_cast<uint16_t>(addr + 5));
+                if (far_addr < 0x0100 || far_addr >= 0x8000 || far_bank >= rom.bank_count() ||
+                    (far_addr >= 0x4000 && far_bank == 0)) {
+                    continue;
+                }
+                uint8_t far_tbank = (far_addr < 0x4000) ? 0 : far_bank;
+                if (annotations.contains_data(far_tbank, far_addr) ||
+                    !is_likely_direct_branch_target(rom, far_tbank, far_addr)) {
+                    continue;
+                }
+                if (result.call_targets.insert(make_address(far_tbank, far_addr)).second) {
+                    result.strong_call_targets.insert(make_address(far_tbank, far_addr));
+                    // Queued before the generic seeding so the far bank wins as
+                    // the switchable-bank context for bank-0 targets.
+                    work_queue.push({make_address(far_tbank, far_addr), -1, -1, -1, -1, -1, -1, -1, -1,
+                                     far_bank ? far_bank : (uint8_t)1});
+                    ++seeded;
+                }
+            }
+        }
+        std::cout << "Seeded " << seeded << " inline far-call targets from byte scan\n";
+    }
+
     // Initial work queue seeding
     for (uint32_t target : result.call_targets) {
         uint8_t bank = get_bank(target);
@@ -785,6 +872,11 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         std::cerr << "Analyzing all " << known_banks.size() << " banks\n";
         for (uint8_t bank : known_banks) {
             if (bank == 0) continue;
+            if (!options.scan_banks.empty() &&
+                std::find(options.scan_banks.begin(), options.scan_banks.end(), bank) ==
+                    options.scan_banks.end()) {
+                continue;
+            }
 
             auto seed_bank_target = [&](uint16_t addr) {
                 uint32_t target = make_address(bank, addr);
@@ -1109,7 +1201,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         }
 
         if (instr.type == InstructionType::UNDEFINED) {
-             std::cout << "[ERROR] Undefined instruction at " << std::hex << (int)bank << ":" << offset << "\n";
+             std::cout << "[ERROR] Undefined instruction at " << std::hex << (int)bank << ":" << offset << std::dec << "\n";
              continue;
         }
 
@@ -1125,6 +1217,19 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             if (target < 0x4000) return 0;
             if (rom.header().mbc_type == MBCType::NONE) return 1;
             return current_switchable_bank;
+        };
+
+        // Bank the emitter may bind a direct CALL/JP to (255 = let the runtime
+        // dispatcher use the live bank). Only provable cases: bank 0, or a
+        // switchable-bank target reached from code in that same bank window
+        // (code executing from 0x4000-0x7FFF cannot switch its own bank away).
+        // The exploration guess above can be stale after a dynamic switch.
+        auto emit_target_bank = [&](uint16_t target) -> uint8_t {
+            if (target < 0x4000) return 0;
+            if (target >= 0x8000) return 255;
+            if (rom.header().mbc_type == MBCType::NONE) return 1;
+            if (!overlay && offset >= 0x4000 && bank > 0) return bank;
+            return 255;
         };
         
         if (instr.type == InstructionType::RST) {
@@ -1160,6 +1265,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             uint16_t target = instr.imm16;
             uint8_t tbank = target_bank(target);
             instr.resolved_target_bank = tbank;
+            result.instructions[idx].resolved_target_bank = emit_target_bank(target);
 
             bool target_valid = true;
             if (annotations.contains_data(tbank, target)) {
@@ -1181,6 +1287,48 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 }
             }
 
+            const AnalyzerOptions::InlineCall* inline_call = find_inline_call(options, target);
+
+            if (inline_call) {
+                // The routine consumes inline argument bytes and returns past
+                // them. Far calls/jumps carry "dw addr ; db bank" to follow.
+                uint16_t args = static_cast<uint16_t>(offset + instr.length);
+                uint8_t args_bank = (args < 0x4000) ? 0 : bank;
+                uint16_t far_addr = static_cast<uint16_t>(
+                    rom.read_banked(args_bank, args) |
+                    (rom.read_banked(args_bank, static_cast<uint16_t>(args + 1)) << 8));
+                uint8_t far_bank = rom.read_banked(args_bank, static_cast<uint16_t>(args + 2));
+                uint8_t far_tbank = (far_addr < 0x4000) ? 0 : far_bank;
+
+                if (!inline_call->far_target) {
+                    // Plain inline arguments: nothing to follow.
+                } else if (far_addr < 0x8000 && far_bank < rom.bank_count() &&
+                    !(far_addr >= 0x4000 && far_bank == 0) &&
+                    !annotations.contains_data(far_tbank, far_addr)) {
+                    uint32_t full_target = make_address(far_tbank, far_addr);
+                    result.call_targets.insert(full_target);
+                    result.strong_call_targets.insert(full_target);
+                    work_queue.push({full_target, -1, -1, -1, -1, -1, -1, -1, -1,
+                                     far_bank ? far_bank : (uint8_t)1});
+                    if (far_tbank != bank) {
+                        result.stats.cross_bank_calls++;
+                        result.bank_tracker.record_cross_bank_call(offset, far_addr, bank, far_tbank);
+                    }
+                } else if (options.verbose) {
+                    std::cout << "[ANALYSIS] Skipped inline call args at " << std::hex << (int)bank
+                              << ":" << offset << " -> " << (int)far_bank << ":" << far_addr
+                              << std::dec << "\n";
+                }
+
+                if (!inline_call->no_return) {
+                    uint16_t args_len = inline_args_length(rom, bank, args, *inline_call);
+                    uint32_t fall_through = make_address(bank, static_cast<uint16_t>(args + args_len));
+                    result.label_addresses.insert(fall_through);
+                    work_queue.push({fall_through, -1, -1, -1, -1, -1, -1, -1, -1, current_switchable_bank});
+                }
+                continue;
+            }
+
             uint32_t fall_through = make_address(bank, offset + instr.length);
             result.label_addresses.insert(fall_through);
             work_queue.push({fall_through, known_a, known_b, known_c, known_d, known_e, known_h, known_l, known_sp, current_switchable_bank});
@@ -1189,6 +1337,7 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
                 uint16_t target = instr.imm16;
                 uint8_t tbank = target_bank(target);
                 instr.resolved_target_bank = tbank;
+                result.instructions[idx].resolved_target_bank = emit_target_bank(target);
 
                 bool target_valid = true;
                 if (annotations.contains_data(tbank, target)) {
@@ -1352,8 +1501,12 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
 
         // Iterate through all known banks (and bank 0)
         std::vector<uint8_t> banks_to_scan;
-        banks_to_scan.push_back(0);
-        for (uint8_t b : known_banks) if (b > 0) banks_to_scan.push_back(b);
+        if (!options.scan_banks.empty()) {
+            banks_to_scan = options.scan_banks;
+        } else {
+            banks_to_scan.push_back(0);
+            for (uint8_t b : known_banks) if (b > 0) banks_to_scan.push_back(b);
+        }
 
         // Track regions found by aggressive scanning to avoid overlapping detection in future passes
         // (Since operands are not marked as 'visited' by the main analysis)
@@ -1499,7 +1652,15 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
             if (instr.is_jump || instr.is_return || instr.is_call) {
                 // CALLs fall through to next instruction after return
                 if (instr.is_call) {
-                    block.successors.push_back(make_address(block.bank, get_offset(curr) + instr.length));
+                    const AnalyzerOptions::InlineCall* inline_call = find_inline_call(options, instr.imm16);
+                    if (!inline_call) {
+                        block.successors.push_back(make_address(block.bank, get_offset(curr) + instr.length));
+                    } else if (!inline_call->no_return) {
+                        uint16_t args = static_cast<uint16_t>(get_offset(curr) + instr.length);
+                        block.successors.push_back(make_address(
+                            block.bank,
+                            static_cast<uint16_t>(args + inline_args_length(rom, block.bank, args, *inline_call))));
+                    }
                 }
                 break;
             }

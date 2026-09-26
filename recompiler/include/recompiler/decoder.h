@@ -263,6 +263,8 @@ public:
     
     Instruction decode(uint32_t full_addr) const;
     Instruction decode(uint16_t addr, uint8_t bank) const;
+    // Decode an explicitly fetched instruction window (also supports HALT bug).
+    Instruction decode_bytes(uint16_t addr, uint8_t bank, const uint8_t bytes[3]) const;
     
 private:
     void decode_main(Instruction& instr, uint8_t opcode, 
@@ -271,6 +273,9 @@ private:
     uint16_t read_u16(uint16_t addr, uint8_t bank) const;
     
     const ROM& rom_;
+    const uint8_t* instruction_bytes_ = nullptr;
+    uint16_t instruction_address_ = 0;
+    uint8_t read_byte(uint8_t bank, uint16_t addr) const;
 };
 
 /* ============================================================================

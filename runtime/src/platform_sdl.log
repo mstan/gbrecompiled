@@ -1,0 +1,4 @@
+2026-10-18: Guard SDL2.24 Joy-Con and NVIDIA Shield controller enum cases when
+building with SDL2.0.20 on Ubuntu22.04. Older builds retain the existing name
+based label fallback; modern SDL behavior and emulated hardware are unchanged.
+Reference: https://github.com/libsdl-org/SDL/blob/release-2.24.0/include/SDL_gamecontroller.h

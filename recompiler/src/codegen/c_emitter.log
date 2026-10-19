@@ -1,0 +1,4 @@
+2026-10-18: Android release targets use the ordinary generated game source list
+as a shared libmain.so. Respect a parent-provided SDL2 target; desktop builds
+remain executables. Preserve root extras.c/game_build.cmake and additional body
+hooks for Android rather than maintaining a second, incomplete source list.

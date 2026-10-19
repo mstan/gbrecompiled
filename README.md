@@ -2,6 +2,11 @@
 
 A **static recompiler** for original Game Boy ROMs that translates SM83 assembly into portable C code. Run classic Game Boy games as native executables — no traditional emulator required.
 
+Game-owned Android releases use the [shared Android host](platform/android/README.md).
+It builds the same generated game and additional bodies as `libmain.so`, with
+the native BIOS runtime, launcher and rb-engine. The setup imports and verifies
+user-owned ROM/firmware, then prefills the launcher; public APKs contain neither.
+
 > ### ⚠ This is a development fork. The canonical project is [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled) — go there for stable use.
 >
 > This repository (`mstan/gbrecompiled`) is a **personal development fork** by [@mstan](https://github.com/mstan), built on two upstreams: the original recompiler by [arcanite24](https://github.com/arcanite24) and the runtime/hardware work from the [GB-Recomp/gb-recompiled](https://github.com/GB-Recomp/gb-recompiled) fork (merged 2026-06), plus mstan's PPU fixes, TCP debug server, launcher hooks, and game-specific work (Megaman Xtreme 2, Pokemon Red/Blue). It may diverge from either upstream at any time.

@@ -1,0 +1,73 @@
+// Applied by a game-owned Android application; no private assets enter an APK.
+def g = project.ext.gbcGame
+def engine = file(g.engineRoot)
+def ui = file(g.uiRoot)
+def sdl = file(providers.gradleProperty('SDL2_SOURCE_DIR').get())
+def host = file(providers.gradleProperty('gbcHostCompiler').get())
+def bios = file(providers.gradleProperty('gbcBiosDir').orElse(new File(engine,'boot_roms').path).get())
+def digest = { File f -> java.security.MessageDigest.getInstance('SHA-256').digest(f.bytes).encodeHex().toString() }
+def signing = new Properties()
+def signingPath = providers.environmentVariable('GBRECOMP_SIGNING_PROPERTIES').orNull
+if (signingPath) file(signingPath).withInputStream { signing.load(it) }
+if (!signing.getProperty('storeFile')) throw new GradleException('GBRECOMP_SIGNING_PROPERTIES must name a private release signing properties file')
+def posix = { File f -> f.absolutePath.replace('\\','/') }
+def payload = layout.buildDirectory.dir('generated/publicAssets')
+tasks.register('stagePublicAssets', Sync) {
+    into payload
+    from(new File(ui,'assets/common/fonts')) { into 'payload/assets/fonts' }
+    from(new File(ui,'assets/common/img')) { into 'payload/assets/img' }
+    from(new File(ui,"assets/consoles/${g.console}/img")) { into 'payload/assets/img' }
+    from(new File(g.gameRoot,'recomp/launcher/boxart.tga')) { into 'payload/assets/img' }
+    if (g.dx) {
+        from(new File(g.gameRoot,'recomp/patches/sml2dx_v181.bps')) { into 'payload' }
+        from(new File(g.gameRoot,'recomp/patches/SML2DX_readme.txt')) { into 'payload' }
+    }
+}
+android {
+    namespace 'org.gbrecompiled'
+    compileSdk 35
+    ndkVersion '27.1.12297006'
+    defaultConfig {
+        applicationId g.applicationId
+        minSdk 24
+        targetSdk 35
+        versionCode g.versionCode
+        versionName g.version
+        manifestPlaceholders = [gameTitle:g.title]
+        buildConfigField 'String', 'GAME_TITLE', '"'+g.title+'"'
+        buildConfigField 'String', 'ROM_CRC', '"'+g.romCrc+'"'
+        buildConfigField 'int', 'ROM_SIZE', g.romSize.toString()
+        buildConfigField 'boolean', 'HAS_DX', g.dx.toString()
+        buildConfigField 'boolean', 'CGB_ONLY', (g.console=='gbc').toString()
+        buildConfigField 'String', 'DMG_SHA', '"'+digest(new File(bios,'dmg_boot.bin'))+'"'
+        buildConfigField 'String', 'CGB_SHA', '"'+digest(new File(bios,'cgb_boot.bin'))+'"'
+        externalNativeBuild.cmake {
+            arguments '-DANDROID_STL=c++_shared', "-DSDL2_SOURCE_DIR=${posix(sdl)}",
+                "-DGBC_GAME_ROOT=${posix(file(g.gameRoot))}", "-DGBC_GENERATED_DIR=${g.generatedDir}",
+                "-DRECOMP_UI_ROOT=${posix(ui)}", "-DGBRECOMP_HOST_COMPILER=${posix(host)}",
+                "-DGBRECOMP_BIOS_DIR=${posix(bios)}", '-DGBRT_BOOT_IMPLEMENTATION=LLE',
+                '-DGBRT_RAM_FALLBACK_IMPLEMENTATION=LLE', '-DGBRECOMP_GENERATED_OPT_LEVEL=1',
+                '-DGBRECOMP_ENABLE_IPO=OFF', "-DGBRECOMP_LAUNCHER_CONSOLE=${g.console}",
+                '-DCMAKE_BUILD_TYPE=MinSizeRel'
+            abiFilters 'arm64-v8a'
+            targets g.target
+        }
+    }
+    signingConfigs {
+        release {
+            storeFile file(signing.storeFile)
+            storePassword signing.storePassword
+            keyAlias signing.keyAlias
+            keyPassword signing.keyPassword ?: signing.storePassword
+        }
+    }
+    buildTypes.release { signingConfig signingConfigs.release; minifyEnabled false }
+    buildFeatures.buildConfig true
+    externalNativeBuild.cmake { path new File(engine,'platform/android/CMakeLists.txt'); version '3.22.1' }
+    sourceSets.main {
+        manifest.srcFile new File(engine,'platform/android/AndroidManifest.xml')
+        java.srcDirs = [new File(engine,'platform/android/java'),new File(sdl,'android-project/app/src/main/java')]
+        assets.srcDirs = [payload]
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'stagePublicAssets' }

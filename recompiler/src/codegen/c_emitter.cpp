@@ -4296,7 +4296,9 @@ GeneratedOutput generate_output(const ir::Program& program,
         cmake_ss << "    endforeach()\n";
         cmake_ss << "endif()\n\n";
         cmake_ss << "# Find SDL2\n";
-        cmake_ss << "find_package(SDL2 REQUIRED)\n\n";
+        cmake_ss << "if(NOT TARGET SDL2::SDL2)\n";
+        cmake_ss << "    find_package(SDL2 REQUIRED)\n";
+        cmake_ss << "endif()\n\n";
         cmake_ss << "# Build the runtime library via its own CMakeLists -- the single\n";
         cmake_ss << "# source of truth for runtime sources, include dirs, and link libs.\n";
         cmake_ss << "# Never duplicate the source list here (it drifts from the runtime).\n";
@@ -4308,7 +4310,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                 generated_source_files.push_back(extra_file.filename);
             }
         }
-        cmake_ss << "add_executable(" << options.output_prefix << "\n";
+        cmake_ss << "set(GBRECOMP_GAME_SOURCES\n";
         cmake_ss << "    " << options.output_prefix << "_main.c\n";
         cmake_ss << "    " << options.output_prefix << ".c\n";
         for (const auto& extra_file : output.extra_files) {
@@ -4318,6 +4320,12 @@ GeneratedOutput generate_output(const ir::Program& program,
         }
         cmake_ss << "    " << options.output_prefix << "_rom.c\n";
         cmake_ss << ")\n\n";
+        cmake_ss << "if(ANDROID)\n";
+        cmake_ss << "    add_library(" << options.output_prefix << " SHARED ${GBRECOMP_GAME_SOURCES})\n";
+        cmake_ss << "    set_target_properties(" << options.output_prefix << " PROPERTIES OUTPUT_NAME main)\n";
+        cmake_ss << "else()\n";
+        cmake_ss << "    add_executable(" << options.output_prefix << " ${GBRECOMP_GAME_SOURCES})\n";
+        cmake_ss << "endif()\n\n";
         cmake_ss << "# Pick up an optional extras.c from the project root (one level up).\n";
         cmake_ss << "# Game projects (e.g. Tetris, Pokemon Red/Blue) provide ROM-identity hooks\n";
         cmake_ss << "# (game_get_expected_crc32, game_get_valid_crcs) in this file.\n";

@@ -70,6 +70,36 @@ Instruction Decoder::decode(uint16_t addr, uint8_t bank) const {
     
     // Decode main instruction
     decode_main(instr, opcode, addr, bank);
+    // Potential guest data/stack access, excluding the instruction fetch.
+    // Conditional stack instructions retain their possible bus access.
+    switch (instr.type) {
+        case InstructionType::LD_R_HL:
+        case InstructionType::LD_A_BC: case InstructionType::LD_A_DE:
+        case InstructionType::LD_A_NN:
+        case InstructionType::LDH_A_N: case InstructionType::LDH_A_C:
+        case InstructionType::LD_A_HLI: case InstructionType::LD_A_HLD:
+        case InstructionType::ADD_A_HL: case InstructionType::ADC_A_HL:
+        case InstructionType::SUB_A_HL: case InstructionType::SBC_A_HL:
+        case InstructionType::AND_A_HL: case InstructionType::OR_A_HL:
+        case InstructionType::XOR_A_HL: case InstructionType::CP_A_HL:
+        case InstructionType::POP: case InstructionType::RET:
+        case InstructionType::RET_CC: case InstructionType::RETI:
+            instr.reads_memory = true;
+            break;
+        case InstructionType::LD_HL_R: case InstructionType::LD_HL_N:
+        case InstructionType::LD_BC_A: case InstructionType::LD_DE_A:
+        case InstructionType::LD_NN_A: case InstructionType::LD_NN_SP:
+        case InstructionType::LDH_N_A: case InstructionType::LDH_C_A:
+        case InstructionType::LD_HLI_A: case InstructionType::LD_HLD_A:
+        case InstructionType::PUSH: case InstructionType::CALL_NN:
+        case InstructionType::CALL_CC_NN: case InstructionType::RST:
+            instr.writes_memory = true;
+            break;
+        case InstructionType::INC_HL_IND: case InstructionType::DEC_HL_IND:
+            instr.reads_memory = instr.writes_memory = true;
+            break;
+        default: break;
+    }
     
     return instr;
 }
@@ -856,6 +886,8 @@ Instruction Decoder::decode_cb(uint16_t addr, uint8_t bank) const {
     instr.reg8_src = reg;
     instr.bit_index = bit;
     instr.cycles = is_hl ? 16 : 8;
+    instr.reads_memory = is_hl;
+    instr.writes_memory = is_hl && op_type != 1; // BIT only reads.
     
     switch (op_type) {
         case 0x00: // Rotates/shifts

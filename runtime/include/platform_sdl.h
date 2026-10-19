@@ -19,6 +19,8 @@ extern uint8_t g_joypad_buttons;
 extern uint8_t g_joypad_dpad;
 
 typedef struct GBContext GBContext;
+bool gb_platform_rewind(GBContext* ctx, uint32_t snapshots);
+bool gb_platform_rewind_frame(GBContext* ctx);
 
 typedef struct GBPlatformTimingInfo {
     double upload_ms;

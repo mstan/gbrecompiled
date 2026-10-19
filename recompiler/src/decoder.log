@@ -1,0 +1,11 @@
+2026-10-18: Populate decoded guest data/stack memory-access metadata for base
+and CB instructions (BIT [HL] reads only; modifying CB operations read/write;
+conditional stack operations describe their possible access).
+Reference: https://github.com/gbdev/pandocs/blob/master/src/CPU_Instruction_Set.md
+The fields were previously always zero. Keep memory accesses alone from proving
+a branch-target prefix; require the decoded store/DEC/JR NZ loop when setup
+extends beyond the original prefix window. Remove the previously dead load-only
+rejection: copy/fill routines are valid code. The first broad metadata candidate
+exposed an overly permissive prefix check and was rejected before integration.
+Validation: all 512 opcode access classifications; RST target with a long store
+initializer; wrong loop back edge rejected; real Super Mario Land 1 strict boot.

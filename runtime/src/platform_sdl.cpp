@@ -5,6 +5,7 @@
 
 #include "platform_sdl.h"
 #include "gbrt.h"   /* For GBPlatformCallbacks */
+#include "gb_snapshot.h"
 #include "ppu.h"
 #include "audio_stats.h"
 #include "gbrt_debug.h"
@@ -292,7 +293,8 @@ typedef enum GBInputAction {
     GB_INPUT_ACTION_TOGGLE_OVERLAY = 14,
     GB_INPUT_ACTION_TOGGLE_MUTE = 15,
     GB_INPUT_ACTION_TOGGLE_MENU = 16,
-    GB_INPUT_ACTION_COUNT = 17,
+    GB_INPUT_ACTION_REWIND = 17,
+    GB_INPUT_ACTION_COUNT = 18,
 } GBInputAction;
 typedef enum GBInputBindingKind {
     GB_INPUT_BINDING_NONE = 0,
@@ -409,6 +411,7 @@ static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Toggle Overlay",
     "Toggle Mute",
     "Toggle Menu",
+    "Rewind (Hold)",
 };
 
 static bool has_interpreter_activity(const GBContext* ctx) {
@@ -593,7 +596,7 @@ static uint32_t g_dump_frames[MAX_DUMP_FRAMES];
 static int g_dump_count = 0;
 static uint32_t g_dump_present_frames[MAX_DUMP_FRAMES];
 static int g_dump_present_count = 0;
-static char g_screenshot_prefix[64] = "screenshot";
+static std::string g_screenshot_prefix = "screenshot";
 
 /* Guest-CYCLE-based frame dump. Unlike g_dump_frames (keyed to rendered/presented
  * VBlank frames), this triggers on elapsed guest cycles, so it captures a frame
@@ -1146,6 +1149,7 @@ static const char* input_action_config_name(GBInputAction action) {
         case GB_INPUT_ACTION_TOGGLE_OVERLAY: return "toggle_overlay";
         case GB_INPUT_ACTION_TOGGLE_MUTE: return "toggle_mute";
         case GB_INPUT_ACTION_TOGGLE_MENU: return "toggle_menu";
+        case GB_INPUT_ACTION_REWIND: return "rewind";
         case GB_INPUT_ACTION_COUNT:
         default:
             return "unknown";
@@ -1310,6 +1314,7 @@ static void set_default_input_bindings(void) {
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MAX_SPEED][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_GRAVE);
     g_keyboard_bindings[GB_INPUT_ACTION_SAVE_STATE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F5);
     g_keyboard_bindings[GB_INPUT_ACTION_LOAD_STATE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F8);
+    g_keyboard_bindings[GB_INPUT_ACTION_REWIND][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_R);
     g_keyboard_bindings[GB_INPUT_ACTION_PREVIOUS_STATE_SLOT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F6);
     g_keyboard_bindings[GB_INPUT_ACTION_NEXT_STATE_SLOT][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F7);
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_OVERLAY][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F1);
@@ -2284,7 +2289,7 @@ void gb_platform_set_dump_present_frames(const char* frames) {
 }
 
 void gb_platform_set_screenshot_prefix(const char* prefix) {
-    if (prefix) snprintf(g_screenshot_prefix, sizeof(g_screenshot_prefix), "%s", prefix);
+    if (prefix) g_screenshot_prefix = prefix;
 }
 
 void gb_platform_set_dump_cycle_frames(const char* frames) {
@@ -2347,10 +2352,10 @@ void gb_platform_check_cycle_dump(GBContext* ctx) {
         if (!g_dump_cycle_done[i] && cyc >= g_dump_cycle_targets[i]) {
             const uint32_t* fb = gb_get_framebuffer(ctx);
             if (fb) {
-                char filename[160];
-                snprintf(filename, sizeof(filename), "%s_%05u.ppm",
-                         g_screenshot_prefix, g_dump_cycle_framenums[i]);
-                save_ppm(filename, fb, gb_ws_render_width(), GB_SCREEN_HEIGHT,
+                char suffix[48];
+                snprintf(suffix, sizeof(suffix), "_%05u.ppm", g_dump_cycle_framenums[i]);
+                const std::string filename = g_screenshot_prefix + suffix;
+                save_ppm(filename.c_str(), fb, gb_ws_render_width(), GB_SCREEN_HEIGHT,
                          (int)g_dump_cycle_framenums[i]);
             }
             g_dump_cycle_done[i] = true;
@@ -3210,21 +3215,22 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     if (count_guest_frame) {
         /* Handle Screenshot Dumping */
         if (frame_is_selected_for_dump(g_dump_frames, g_dump_count, (uint32_t)g_frame_count)) {
-            char filename[128];
-            snprintf(filename, sizeof(filename), "%s_%05d.ppm", g_screenshot_prefix, g_frame_count);
-            save_ppm(filename, framebuffer, presentation_width(), GB_SCREEN_HEIGHT, g_frame_count);
+            char suffix[48];
+            snprintf(suffix, sizeof(suffix), "_%05d.ppm", g_frame_count);
+            const std::string filename = g_screenshot_prefix + suffix;
+            save_ppm(filename.c_str(), framebuffer, presentation_width(), GB_SCREEN_HEIGHT, g_frame_count);
         }
     }
 
     if (frame_is_selected_for_dump(g_dump_present_frames, g_dump_present_count, (uint32_t)g_frame_count)) {
-        char filename[160];
-        snprintf(filename,
-                 sizeof(filename),
-                 "%s_guest_%05d_present_%06llu.ppm",
-                 g_screenshot_prefix,
+        char suffix[80];
+        snprintf(suffix,
+                 sizeof(suffix),
+                 "_guest_%05d_present_%06llu.ppm",
                  g_frame_count,
                  (unsigned long long)g_present_count);
-        save_ppm(filename, framebuffer, presentation_width(), GB_SCREEN_HEIGHT, g_frame_count);
+        const std::string filename = g_screenshot_prefix + suffix;
+        save_ppm(filename.c_str(), framebuffer, presentation_width(), GB_SCREEN_HEIGHT, g_frame_count);
     }
 
     if (g_benchmark_mode || g_app_suspended || !g_gl_context) {
@@ -5861,6 +5867,9 @@ void gb_platform_render_frame(const uint32_t* framebuffer) {
     }
 
     render_frame_internal(framebuffer, true);
+    if (g_registered_ctx && (g_frame_count % 3) == 0 && !gb_serial_link_is_active()) {
+        gb_rewind_capture(g_registered_ctx);
+    }
 }
 
 void gb_platform_present_framebuffer(const uint32_t* framebuffer) {
@@ -6123,8 +6132,24 @@ static bool load_savestate_slot(GBContext* ctx, int slot) {
 static void apply_post_load_host_state(GBContext* ctx) {
     reset_audio_output_buffer(true);
     g_last_guest_framebuffer_valid = false;
+    g_presented_frame = nullptr;
+    if (ctx) g_frame_count = (int)(ctx->completed_frames + (ctx->frame_done ? 1 : 0));
     g_present_count = ctx ? ctx->completed_frames : 0;
     g_last_frame_time = SDL_GetTicks();
+}
+
+bool gb_platform_rewind(GBContext* ctx, uint32_t snapshots) {
+    if (gb_serial_link_is_active() || !gb_rewind_step(ctx, snapshots)) return false;
+    apply_post_load_host_state(ctx);
+    return true;
+}
+
+bool gb_platform_rewind_frame(GBContext* ctx) {
+    if (!input_action_is_pressed(GB_INPUT_ACTION_REWIND) || gb_serial_link_is_active()) return false;
+    gb_platform_rewind(ctx, 1);
+    /* Hold at the oldest available record once history is exhausted. Event
+     * polling and presentation continue; no abandoned guest stack survives. */
+    return true;
 }
 
 bool gb_platform_savestate_slot_path(const GBContext* ctx, int slot,
@@ -6449,6 +6474,7 @@ static void set_active_game_pref_int(const char* key, int value) {
 
 void gb_platform_register_context(GBContext* ctx) {
     g_registered_ctx = ctx;
+    gb_rewind_enable(ctx, 600, 64u * 1024u * 1024u);
     GBPlatformCallbacks callbacks = {
         .on_audio_sample = on_audio_sample,
         .on_serial_byte = platform_on_serial_byte,
@@ -6573,5 +6599,7 @@ void gb_platform_check_cycle_dump(GBContext* ctx) { (void)ctx; }
 void gb_platform_set_screenshot_prefix(const char* prefix) { (void)prefix; }
 
 void gb_platform_register_context(GBContext* ctx) { (void)ctx; }
+bool gb_platform_rewind(GBContext* ctx, uint32_t snapshots) { (void)ctx; (void)snapshots; return false; }
+bool gb_platform_rewind_frame(GBContext* ctx) { (void)ctx; return false; }
 
 #endif /* GB_HAS_SDL2 */

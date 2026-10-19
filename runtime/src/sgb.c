@@ -136,6 +136,44 @@ GBSgbState* gb_sgb_create(void) {
     return sgb;
 }
 
+size_t gb_sgb_state_size(void) {
+    return sizeof(GBSgbState) + GB_SCREEN_WIDTH * GB_SCREEN_HEIGHT * sizeof(uint16_t);
+}
+
+bool gb_sgb_save_state(const GBSgbState* sgb, void* data, size_t size) {
+    if (!sgb || !data || size != gb_sgb_state_size()) return false;
+    GBSgbState copy = *sgb;
+    copy.freeze_buffer = NULL;
+    memset(data, 0, size);
+    memcpy(data, &copy, sizeof(copy));
+    if (sgb->freeze_buffer) {
+        memcpy((uint8_t*)data + sizeof(copy), sgb->freeze_buffer,
+               size - sizeof(copy));
+    }
+    return true;
+}
+
+bool gb_sgb_load_state(GBSgbState* sgb, const void* data, size_t size) {
+    if (!sgb || !data || size != gb_sgb_state_size()) return false;
+    GBSgbState copy;
+    memcpy(&copy, data, sizeof(copy));
+    if (copy.freeze_buffer || copy.rx_state > SGB_RX_RECEIVING ||
+        copy.rx_bit_index > 128 || copy.sequence_total > SGB_MAX_PACKETS ||
+        copy.sequence_received > SGB_MAX_PACKETS || copy.mask_mode > 3 ||
+        (copy.mlt_req_players != 1 && copy.mlt_req_players != 2 && copy.mlt_req_players != 4)) {
+        return false;
+    }
+    uint16_t* frozen = (uint16_t*)malloc(size - sizeof(copy));
+    if (!frozen) return false;
+    memcpy(frozen, (const uint8_t*)data + sizeof(copy), size - sizeof(copy));
+    copy.freeze_buffer = frozen;
+    copy.display_palettes = sgb->display_palettes;
+    copy.display_border = sgb->display_border;
+    free(sgb->freeze_buffer);
+    *sgb = copy;
+    return true;
+}
+
 void gb_sgb_destroy(GBSgbState* sgb) {
     if (!sgb) return;
     free(sgb->freeze_buffer);

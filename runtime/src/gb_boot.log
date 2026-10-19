@@ -1,0 +1,15 @@
+[gb_boot_start / gb_boot_dispatch]
+Ghidra: Reuses the SM83 decoder/analyzer/emitter for the supplied firmware;
+no BIOS routine is guessed, replaced or stubbed in the LLE build.
+Rationale: A developer build choice selects real BIOS execution or the existing
+post-boot HLE. LLE is the default, requires the matching external firmware, starts
+at PC 0, routes mapped BIOS addresses before cartridge dispatch, and lets FF50
+perform the handoff. BIOS native bodies are produced at build time, including
+their SHA-256 identity, without embedding or distributing the raw firmware.
+
+[launcher firmware paths]
+Validate picked firmware against the same exact size and SHA-256 as native
+dispatch. Remember only per-model paths in the writable state directory; never
+copy raw BIOS images. The System panel supports normal LLE startup, including
+switching a multi-body game between DMG and CGB modes. Missing cached firmware
+prevents skip-launcher startup. HLE builds expose no BIOS runtime selector.

@@ -1,8 +1,13 @@
 # runtime/CMakeLists.txt
 # GameBoy Runtime Library
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 add_library(gbrt STATIC
     src/gbrt.c
+    src/gb_boot.c
+    src/gb_snapshot.c
+    src/gb_rewind.c
     src/differential.c
     src/cosim_state.c
     src/interpreter.c
@@ -13,6 +18,7 @@ add_library(gbrt STATIC
     src/psg_shadow.c
     src/color_lut.c
     src/debug_server.c
+    src/gb_debug_json.c
     # Default game hooks — one strong symbol per TU so a partial extras.c
     # overrides cleanly (no multiple-definition, no weak-symbol reliance).
     src/game_defaults/game_default_on_init.c
@@ -54,6 +60,59 @@ add_library(gbrt STATIC
 # pthread for the BGB link recv thread
 find_package(Threads REQUIRED)
 target_link_libraries(gbrt PUBLIC Threads::Threads)
+
+find_package(ZLIB REQUIRED)
+if(NOT TARGET retcomm_rbengine)
+    add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../external/rbengine"
+                     "${CMAKE_CURRENT_BINARY_DIR}/rbengine")
+endif()
+target_link_libraries(gbrt PUBLIC ZLIB::ZLIB retcomm_rbengine::retcomm_rbengine)
+
+set(GBRT_BOOT_IMPLEMENTATION "LLE" CACHE STRING "Developer BIOS implementation: LLE or HLE")
+set(GBRT_RAM_FALLBACK_IMPLEMENTATION "LLE" CACHE STRING "Developer uncovered-RAM fallback: LLE or HLE")
+set_property(CACHE GBRT_RAM_FALLBACK_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(GBRT_RAM_FALLBACK_IMPLEMENTATION STREQUAL "HLE")
+    target_compile_definitions(gbrt PUBLIC GBRT_RAM_HLE=1)
+elseif(GBRT_RAM_FALLBACK_IMPLEMENTATION STREQUAL "LLE")
+    target_compile_definitions(gbrt PUBLIC GBRT_RAM_HLE=0)
+else()
+    message(FATAL_ERROR "GBRT_RAM_FALLBACK_IMPLEMENTATION must be LLE or HLE")
+endif()
+set_property(CACHE GBRT_BOOT_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(GBRT_BOOT_IMPLEMENTATION STREQUAL "HLE")
+    target_compile_definitions(gbrt PUBLIC GBRT_HLE=1)
+elseif(GBRT_BOOT_IMPLEMENTATION STREQUAL "LLE")
+    target_compile_definitions(gbrt PUBLIC GBRT_HLE=0)
+    set(GBRECOMP_BIOS_DIR "${CMAKE_CURRENT_LIST_DIR}/../boot_roms" CACHE PATH "Private build-time BIOS images")
+    if(TARGET gbrecomp AND NOT CMAKE_CROSSCOMPILING)
+        set(_gb_host_compiler "$<TARGET_FILE:gbrecomp>")
+        set(_gb_host_dependency gbrecomp)
+    else()
+        if(NOT GBRECOMP_HOST_COMPILER)
+            find_program(GBRECOMP_HOST_COMPILER NAMES gbrecomp REQUIRED)
+        endif()
+        set(_gb_host_compiler "${GBRECOMP_HOST_COMPILER}")
+        set(_gb_host_dependency "${GBRECOMP_HOST_COMPILER}")
+    endif()
+    foreach(_gb_model IN ITEMS dmg cgb)
+        set(_gb_bios "${GBRECOMP_BIOS_DIR}/${_gb_model}_boot.bin")
+        if(NOT EXISTS "${_gb_bios}")
+            message(FATAL_ERROR "LLE needs ${_gb_bios}; set GBRECOMP_BIOS_DIR to your private firmware directory")
+        endif()
+        set(_gb_generated "${CMAKE_CURRENT_BINARY_DIR}/bios/${_gb_model}")
+        set(_gb_native "${_gb_generated}/gbrt_bios_${_gb_model}_native.c")
+        add_custom_command(OUTPUT "${_gb_native}"
+            COMMAND "${_gb_host_compiler}" --compile-bios "${_gb_bios}"
+                    --model "${_gb_model}" --output "${_gb_generated}"
+            DEPENDS ${_gb_host_dependency} "${_gb_bios}"
+            COMMENT "Recompiling the real ${_gb_model} BIOS"
+            VERBATIM)
+        target_sources(gbrt PRIVATE "${_gb_native}")
+        target_include_directories(gbrt PRIVATE "${_gb_generated}")
+    endforeach()
+else()
+    message(FATAL_ERROR "GBRT_BOOT_IMPLEMENTATION must be LLE or HLE")
+endif()
 
 # Online netplay relay client (rendezvous-server HTTP, via libcurl). OFF by
 # default: linking libcurl drags in its whole TLS/HTTP2/HTTP3/SSH/brotli DLL
@@ -106,7 +165,12 @@ set(GBRT_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/imgui")
 if(GBRECOMP_RECOMP_UI AND EXISTS "${RECOMP_UI_ROOT}/src/third_party/imgui/imgui.h")
     set(GBRT_IMGUI_DIR "${RECOMP_UI_ROOT}/src/third_party/imgui")
 endif()
-find_package(SDL2 QUIET)
+if(TARGET SDL2::SDL2)
+    set(SDL2_FOUND TRUE)
+else()
+    find_package(SDL2 QUIET)
+endif()
+set_property(TARGET gbrt PROPERTY GBRT_IMGUI_DIR "${GBRT_IMGUI_DIR}")
 if(SDL2_FOUND)
     target_sources(gbrt PRIVATE
         ${GBRT_IMGUI_DIR}/imgui.cpp
@@ -203,6 +267,8 @@ if(SDL2_FOUND)
         # The GLES2 headers mark these dllimport, so the ANGLE import libs are
         # required at link time; the matching DLLs ship next to the binary.
         target_link_libraries(gbrt PUBLIC GLESv2 EGL)
+    elseif(ANDROID)
+        target_link_libraries(gbrt PUBLIC GLESv2 EGL log android)
     else()
         find_package(OpenGL QUIET)
         if(TARGET OpenGL::GL)

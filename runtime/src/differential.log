@@ -1,0 +1,5 @@
+2026-10-18: The diagnostic boot gate intentionally retains an independent
+interpreter BIOS leg; ordinary LLE boot uses the compiled native firmware.
+The old DMG-only escape warning now excludes CGB firmware, which legitimately
+executes its second mapped region at 0x200..0x8ff before FF50 unmapping.
+Validation: native DMG/CGB handoff fixtures and MMX2 boot gate CPU comparison.

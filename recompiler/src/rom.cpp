@@ -221,6 +221,23 @@ std::optional<ROM> ROM::load_from_buffer(std::vector<uint8_t> data,
     return rom;
 }
 
+std::optional<ROM> ROM::load_boot_rom(const std::filesystem::path& path, bool cgb) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return std::nullopt;
+    ROM rom;
+    rom.data_ = std::vector<uint8_t>(std::istreambuf_iterator<char>(file), {});
+    if (rom.data_.size() != (cgb ? 0x900u : 0x100u)) return std::nullopt;
+    rom.name_ = cgb ? "CGB boot ROM" : "DMG boot ROM";
+    rom.path_ = path;
+    rom.header_ = {};
+    rom.header_.mbc_type = MBCType::NONE;
+    rom.header_.rom_banks = 1;
+    rom.header_.rom_size_bytes = rom.data_.size();
+    rom.header_.is_cgb = cgb;
+    rom.valid_ = true;
+    return rom;
+}
+
 bool ROM::parse_header() {
     // Entry point (0x100-0x103)
     std::copy_n(data_.data() + 0x100, 4, header_.entry_point);

@@ -90,6 +90,8 @@ struct GeneratorOptions {
     bool bss_rom_data = false;
 
     std::string runtime_dir;             // Path to runtime/ (relative to output_dir)
+    std::string compiler_path;           // Host producer used for native BIOS generation
+    bool boot_rom = false;
 
 
     // Cycle counting

@@ -169,6 +169,9 @@ public:
      */
     static std::optional<ROM> load_from_buffer(std::vector<uint8_t> data,
                                                 const std::string& name);
+    /* Firmware has no cartridge header. Keep the exact image and give the
+     * normal decoder/analyzer its hardware mapping metadata explicitly. */
+    static std::optional<ROM> load_boot_rom(const std::filesystem::path& path, bool cgb);
     
     // Access ROM data
     const uint8_t* data() const { return data_.data(); }

@@ -1,0 +1,6 @@
+[gb_rewind_capture / gb_rewind_step]
+Ghidra: Host history adapter; no guest address or hardware behavior inferred.
+Rationale: The shared rb-engine owns compressed snapshots. Bound depth and bytes,
+reset before uint32 sequence wrap, and discard an abandoned future only after a
+successful transactional restore. Process capture/restore/failure counts stay
+monotonic. The caller must be outside generated guest functions when restoring.

@@ -1,0 +1,7 @@
+2026-10-18: Directory selections now prefill their exact ROM path and reset a
+previous selection. GBRECOMP_ROM_PATH takes precedence for unattended tests;
+all explicit paths still pass the existing SHA/CRC gate. Wrong/missing explicit
+paths and unattended missing-cache launches fail without a native picker.
+Automatic scan/cache verification now honors its existing quiet flag.
+Regression: two distinct synthetic ROM identities, switching selections,
+environment precedence, missing path, wrong identity and empty unattended setup.

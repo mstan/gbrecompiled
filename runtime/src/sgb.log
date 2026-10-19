@@ -1,0 +1,5 @@
+[gb_sgb_save_state / gb_sgb_load_state]
+Ghidra: Host snapshot contract; no ROM address or hardware behavior changed.
+Rationale: Save the packet receiver, palettes, border and freeze image without
+persisting the freeze allocation address. Allocate before replacing live state;
+retain the owner's display preferences when loading.

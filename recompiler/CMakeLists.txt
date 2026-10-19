@@ -1,9 +1,9 @@
 # Recompiler tool (gbrecomp)
 
-add_executable(gbrecomp
-    src/main.cpp
+add_library(gbrecomp_core STATIC
     src/config.cpp
     src/rom.cpp
+    src/ram_overlay.cpp
     src/decoder.cpp
     src/analyzer.cpp
     src/bank_tracker.cpp
@@ -24,7 +24,7 @@ add_executable(gbrecomp
     ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/bps_patch.c
 )
 
-target_include_directories(gbrecomp
+target_include_directories(gbrecomp_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include
@@ -33,15 +33,21 @@ target_include_directories(gbrecomp
 )
 
 # Enable position-independent code for shared library support
-set_target_properties(gbrecomp PROPERTIES
+set_target_properties(gbrecomp_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
 # Platform-specific settings
 if(APPLE)
-    target_compile_definitions(gbrecomp PRIVATE GB_PLATFORM_MACOS)
+    target_compile_definitions(gbrecomp_core PRIVATE GB_PLATFORM_MACOS)
 elseif(WIN32)
-    target_compile_definitions(gbrecomp PRIVATE GB_PLATFORM_WINDOWS)
+    target_compile_definitions(gbrecomp_core PRIVATE GB_PLATFORM_WINDOWS)
 else()
-    target_compile_definitions(gbrecomp PRIVATE GB_PLATFORM_LINUX)
+    target_compile_definitions(gbrecomp_core PRIVATE GB_PLATFORM_LINUX)
 endif()
+
+find_package(Threads REQUIRED)
+target_link_libraries(gbrecomp_core PUBLIC Threads::Threads)
+add_executable(gbrecomp src/main.cpp)
+target_link_libraries(gbrecomp PRIVATE gbrecomp_core)
+target_include_directories(gbrecomp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tomlplusplus)

@@ -37,6 +37,11 @@ void        gb_sgb_destroy(GBSgbState* sgb);
 /** Reset all packet state. Call when the cart is (re)loaded. */
 void gb_sgb_reset(GBSgbState* sgb);
 
+/* Opaque snapshot; excludes host pointers and display preferences. */
+size_t gb_sgb_state_size(void);
+bool gb_sgb_save_state(const GBSgbState* sgb, void* data, size_t size);
+bool gb_sgb_load_state(GBSgbState* sgb, const void* data, size_t size);
+
 /**
  * Whether the cart's header advertises SGB features (cart byte 0x146 == 0x03).
  * Used by the platform to decide whether to enable the engine.

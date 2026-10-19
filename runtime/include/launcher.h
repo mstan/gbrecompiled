@@ -18,6 +18,12 @@
  */
 void launcher_init(void);
 
+/* A directory launcher can prefill its selected cart. The explicit
+ * GBRECOMP_ROM_PATH environment variable takes precedence. Identity checks
+ * still apply; an invalid explicit selection fails without opening a dialog. */
+void launcher_set_rom_hint(const char *path);
+const char *launcher_get_rom_hint(void);
+
 /**
  * Register the SHA-256 digest (lowercase 64-char hex) of the exact ROM this
  * binary was recompiled from. When set, launcher_get_rom_path() enforces an

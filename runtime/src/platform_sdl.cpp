@@ -736,12 +736,16 @@ static const char* controller_type_name(SDL_GameControllerType type) {
         case SDL_CONTROLLER_TYPE_PS4: return "PlayStation 4";
         case SDL_CONTROLLER_TYPE_PS5: return "PlayStation 5";
         case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO: return "Nintendo Switch Pro";
+#if SDL_VERSION_ATLEAST(2, 24, 0)
         case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT: return "Joy-Con Left";
         case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: return "Joy-Con Right";
         case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return "Joy-Con Pair";
+#endif
         case SDL_CONTROLLER_TYPE_GOOGLE_STADIA: return "Stadia";
         case SDL_CONTROLLER_TYPE_AMAZON_LUNA: return "Luna";
+#if SDL_VERSION_ATLEAST(2, 24, 0)
         case SDL_CONTROLLER_TYPE_NVIDIA_SHIELD: return "NVIDIA Shield";
+#endif
         case SDL_CONTROLLER_TYPE_VIRTUAL: return "Virtual";
         case SDL_CONTROLLER_TYPE_UNKNOWN:
         default:
@@ -757,7 +761,9 @@ static GBControllerLabelProfile detect_controller_label_profile(SDL_GameControll
             case SDL_CONTROLLER_TYPE_XBOXONE:
             case SDL_CONTROLLER_TYPE_GOOGLE_STADIA:
             case SDL_CONTROLLER_TYPE_AMAZON_LUNA:
+#if SDL_VERSION_ATLEAST(2, 24, 0)
             case SDL_CONTROLLER_TYPE_NVIDIA_SHIELD:
+#endif
                 return GB_CONTROLLER_LABEL_XBOX;
 
             case SDL_CONTROLLER_TYPE_PS3:
@@ -766,9 +772,11 @@ static GBControllerLabelProfile detect_controller_label_profile(SDL_GameControll
                 return GB_CONTROLLER_LABEL_PLAYSTATION;
 
             case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#if SDL_VERSION_ATLEAST(2, 24, 0)
             case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
             case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
             case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
                 return GB_CONTROLLER_LABEL_NINTENDO;
 
             default:

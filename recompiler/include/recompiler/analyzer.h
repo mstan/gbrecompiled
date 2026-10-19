@@ -199,6 +199,7 @@ struct AnalyzerOptions {
     
     // Explicit list of entry points to analyze (in addition to standard ones)
     std::vector<uint32_t> entry_points;
+    bool boot_rom = false;             // Firmware starts at 0; no cart vectors/header
 
     bool analyze_all_banks = true;      // Analyze all ROM banks
     bool detect_computed_jumps = true;  // Try to resolve JP HL targets

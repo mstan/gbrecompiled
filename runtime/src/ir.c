@@ -32,6 +32,27 @@ void gb_ir_destroy(GBIRState* ir) {
     free(ir);
 }
 
+size_t gb_ir_state_size(void) { return 3; }
+
+bool gb_ir_save_state(const GBIRState* ir, void* data, size_t size) {
+    if (!ir || !data || size != gb_ir_state_size()) return false;
+    uint8_t* bytes = (uint8_t*)data;
+    bytes[0] = ir->local_led;
+    bytes[1] = ir->peer_led;
+    bytes[2] = ir->read_enable_bits;
+    return true;
+}
+
+bool gb_ir_load_state(GBIRState* ir, const void* data, size_t size) {
+    if (!ir || !data || size != gb_ir_state_size()) return false;
+    const uint8_t* bytes = (const uint8_t*)data;
+    if (bytes[0] > 1 || bytes[1] > 1 || (bytes[2] & 0x3f)) return false;
+    ir->local_led = bytes[0] != 0;
+    ir->peer_led = bytes[1] != 0;
+    ir->read_enable_bits = bytes[2];
+    return true;
+}
+
 void gb_ir_reset(GBIRState* ir) {
     if (!ir) return;
     GBIRSendCallback cb = ir->send_cb;

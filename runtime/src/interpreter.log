@@ -1,0 +1,14 @@
+[gb_interpret accounting and RAM fallback selection]
+Ghidra: Instruction semantics are unchanged. This fixes host accounting on
+existing branch/call/return exits; no unknown ROM routine is inferred.
+Rationale: Every exit records the session once. LLE decodes actual instructions;
+the historical RAM shortcuts are an explicit developer HLE build selection.
+Generated dispatch checks AOT copied-code bodies first. Unmatched RAM enters
+this accounted path, so dynamic shortcuts cannot masquerade as static coverage.
+
+[RET/RETI stack timing]
+Use the shared timed return for RET, taken RET cc and RETI. The two stack reads
+follow the fetch/conditional idle cycles, matching SameBoy ret and ret_cc.
+Total instruction cycles and one accounting exit are retained; partial hardware
+ticks do not advance EI's instruction delay. See the always-on MMX2 dispatch
+evidence and reference in gbrt.log.

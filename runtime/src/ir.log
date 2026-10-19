@@ -1,0 +1,4 @@
+[gb_ir_save_state / gb_ir_load_state]
+Ghidra: Host snapshot contract; no ROM address or hardware behavior changed.
+Rationale: Preserve the emulated LED and receiver state while retaining the
+live transport callback and its user pointer; loading must not send a packet.

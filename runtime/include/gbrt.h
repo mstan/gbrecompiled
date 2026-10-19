@@ -10,6 +10,13 @@
 #ifndef GBRT_H
 #define GBRT_H
 
+#ifndef GBRT_HLE
+#define GBRT_HLE 0
+#endif
+#ifndef GBRT_RAM_HLE
+#define GBRT_RAM_HLE 0
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -132,6 +139,13 @@ typedef struct {
 } GBDifferentialResult;
 
 #define GBRT_INTERPRETER_HOTSPOT_CAPACITY 16
+#define GBRT_DISPATCH_HISTORY_CAPACITY 64
+
+typedef struct {
+    uint32_t cycles;
+    uint16_t addr, sp, bank;
+    uint8_t boot_active, dma_active;
+} GBDispatchRecord;
 
 typedef struct {
     uint8_t valid;           /**< Slot contains a tracked hotspot */
@@ -319,6 +333,7 @@ typedef struct GBContext {
     /* Memory pointers */
     uint8_t* rom;         /**< ROM data */
     size_t rom_size;
+    uint8_t rom_sha256[32]; /**< Immutable identity cached at ROM load. */
     uint8_t* eram;        /**< External RAM */
     size_t eram_size;
     uint8_t eram_dirty;   /**< Set when ERAM is written; cleared after flush */
@@ -336,6 +351,8 @@ typedef struct GBContext {
     uint8_t* boot_rom;        /**< Boot ROM buffer, or NULL */
     size_t   boot_rom_size;   /**< 256 (DMG/MGB/SGB) or 2304 (CGB) */
     uint8_t  boot_rom_active; /**< Boot ROM currently mapped + executing */
+    uint8_t boot_rom_sha256[32];
+    void* rewind; /**< Owned rb-engine history; never part of guest state. */
     
     /* RTC state (MBC3) */
     struct {
@@ -374,6 +391,8 @@ typedef struct GBContext {
     uint8_t last_unimplemented_bank; /**< Bank of the most recent unsupported opcode */
     uint16_t last_unimplemented_addr; /**< Address of the most recent unsupported opcode */
     GBInterpreterHotspot interpreter_hotspots[GBRT_INTERPRETER_HOTSPOT_CAPACITY]; /**< Top interpreter entry hotspots */
+    GBDispatchRecord dispatch_history[GBRT_DISPATCH_HISTORY_CAPACITY]; /**< Always-on, process-local dispatch ring. */
+    uint64_t dispatch_history_count; /**< Lifetime observations, not guest state. */
     uint64_t completed_frames; /**< Number of completed guest frames */
     
     /* Platform interface */
@@ -569,6 +588,9 @@ void gb_call(GBContext* ctx, uint16_t addr);
  * @brief Return from a function
  */
 void gb_ret(GBContext* ctx);
+/* Complete RET/RETI with stack bus reads on their actual M-cycles. The
+ * conditional form includes the extra taken-condition M-cycle. */
+void gb_ret_timed(GBContext* ctx, bool conditional, bool reti);
 
 /**
  * @brief RST vector call

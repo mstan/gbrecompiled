@@ -7,7 +7,9 @@
 #include "launcher_ui_seam.h"
 #include "game_extras.h"
 #include "gb_host_paths.h"
+#include "gb_boot.h"
 #include "debug_server.h"
+#include "launcher.h"
 
 #include "recomp_launcher.h"   // recomp-ui C ABI
 #include "launcher_profile.h"  // launcher_profile_apply()
@@ -64,6 +66,46 @@ static int seam_file_readable(const char* path) {
     if (!f) return 0;
     fclose(f);
     return 1;
+}
+
+static void seam_write_rom_cfg(const char* path, const char* rom);
+
+static int seam_bios_is_cgb(const char* rom) {
+    const char* platform = game_get_platform();
+    if (platform && (!strcmp(platform, "gbc") || !strcmp(platform, "cgb"))) return 1;
+    FILE* file = rom && *rom ? fopen(rom, "rb") : NULL;
+    int flag = 0;
+    if (file) {
+        if (!fseek(file, 0x143, SEEK_SET)) flag = fgetc(file);
+        fclose(file);
+    }
+    return flag >= 0 && (flag & 0x80) != 0;
+}
+
+static int seam_verify_bios(void* opaque, const char* path, const char* rom,
+                            RecompLauncherCBiosVerify* out) {
+    (void)opaque;
+    memset(out, 0, sizeof(*out));
+    bool cgb = seam_bios_is_cgb(rom);
+    char cached[4096];
+    if (path && *path && !gb_boot_verify_file(path, false) && !gb_boot_verify_file(path, true)) {
+        snprintf(out->detail, sizeof(out->detail), "BIOS file is missing or differs from this build's firmware.");
+        return 1;
+    }
+    out->ok = gb_boot_verify_file(path, cgb) || gb_boot_resolve_path(cgb, cached, sizeof(cached));
+    snprintf(out->detail, sizeof(out->detail), out->ok ? "%s BIOS ready." :
+             "Select the real %s BIOS compiled into this build.", cgb ? "CGB" : "DMG");
+    return 1;
+}
+
+static int seam_persist_setup(void* opaque, const char* rom, const char* bios) {
+    (void)opaque;
+    if (rom && *rom) {
+        char cache[4096];
+        gb_host_state_path("rom.cfg", cache, sizeof(cache));
+        seam_write_rom_cfg(cache, rom);
+    }
+    return !bios || !*bios || gb_boot_remember_path(bios) ? 0 : -1;
 }
 
 /* Case-insensitive ".gb" / ".gbc" / ".sgb" suffix test — the same set as
@@ -282,6 +324,9 @@ int gb_launcher_preboot(void) {
      * unchanged — a wrong cart seeded here shows "not verified" and PLAY stays
      * disabled. The Linux AppRun did this for AppImages only, in shell; here
      * every packaging form gets it. */
+    const char* rom_hint = launcher_get_rom_hint();
+    if (rom_hint && *rom_hint)
+        snprintf(initial_rom, sizeof(initial_rom), "%s", rom_hint);
     if (!seam_file_readable(initial_rom))
         if (!seam_find_local_rom(exe_dir, initial_rom, sizeof(initial_rom)))
             initial_rom[0] = '\0';
@@ -295,6 +340,7 @@ int gb_launcher_preboot(void) {
      * run that has no ROM must see it. */
     if (seam_read_int(prefs_path, "launcher.skip", 0) != 0 &&
         seam_file_readable(initial_rom) &&
+        (GBRT_HLE || gb_boot_resolve_path(seam_bios_is_cgb(initial_rom), (char[4096]){0}, 4096)) &&
         !(SDL_getenv("GBRECOMP_LAUNCHER") && SDL_getenv("GBRECOMP_LAUNCHER")[0] == '1')) {
         return GB_LAUNCHER_LAUNCH;   /* boot straight in; nothing shown */
     }
@@ -321,6 +367,11 @@ int gb_launcher_preboot(void) {
     ls.widescreen    = seam_read_int(prefs_path, "video.widescreen", 0);
     ls.player_src[0] = 1;   /* keyboard */
     ls.skip_launcher = 0;
+    if (!GBRT_HLE) {
+        char bios[4096];
+        if (gb_boot_resolve_path(seam_bios_is_cgb(initial_rom), bios, sizeof(bios)))
+            snprintf(ls.bios_path, sizeof(ls.bios_path), "%s", bios);
+    }
 
     /* ── game identity + capabilities ── */
     RecompLauncherCGameInfo gi;
@@ -328,6 +379,13 @@ int gb_launcher_preboot(void) {
     const char* platform = game_get_platform();
     launcher_profile_apply(platform && platform[0] ? platform : "gbc", &gi);
     gi.name = game_get_name();
+    if (!GBRT_HLE) {
+        gi.has_bios = 1;
+        gi.bios_name = "Game Boy BIOS";
+        gi.bios_verify_for_rom = seam_verify_bios;
+        gi.persist_setup = seam_persist_setup;
+        gi.host_persists_paths = 1;
+    }
 #if RECOMP_UI_ENABLE_MODS
     gi.mods = game_get_mods(exe_dir);
 #endif
@@ -393,6 +451,8 @@ int gb_launcher_preboot(void) {
 
     if (rc == 1) return GB_LAUNCHER_QUIT;         /* user closed the launcher */
     if (rc != 0) return GB_LAUNCHER_UNAVAILABLE;  /* couldn't init: fall back  */
+    if (!GBRT_HLE && ls.bios_path[0] && !gb_boot_remember_path(ls.bios_path))
+        return GB_LAUNCHER_UNAVAILABLE;
 
     /* LAUNCH: persist the chosen settings so load_runtime_preferences() (called
      * moments later in gb_platform_init) picks them up. Keybinds were written

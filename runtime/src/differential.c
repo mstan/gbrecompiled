@@ -1176,18 +1176,16 @@ bool gb_run_boot_gate(GBContext* lle_ctx,
     gbrt_interp_fallback_logging = false;
 
     /* Phase 1: run the real boot ROM (BIOS) to the handoff (0xFF50 unmap). */
-    /* The BIOS is NOT compiled cart code — generated dispatch keys on PC and
-     * would run the cartridge's 0x0000, ignoring the boot-ROM overlay (which
-     * only redirects gb_read8). The interpreter fetches opcodes via gb_read8,
-     * so it honors the overlay and actually executes the BIOS. */
+    /* This diagnostic deliberately uses the reference interpreter. Ordinary
+     * LLE startup dispatches the separately compiled native BIOS; keeping this
+     * leg independent lets the gate compare the post-boot CPU initialization. */
     uint16_t prev_pc = lle_ctx->pc;
     int escapes_logged = 0;
     while (lle_ctx->boot_rom_active && lle_ctx->cycles < cycle_cap) {
         gb_debug_step(lle_ctx, GB_EXECUTION_INTERPRETER);
-        /* The DMG boot ROM never executes outside 0x0000-0x00FF until it writes
-         * 0xFF50 and falls through to 0x0100. If pc leaves BIOS space while the
-         * BIOS is still mapped, that's a control-flow escape (the bug). */
-        if (escapes_logged < 8 && lle_ctx->boot_rom_active && lle_ctx->pc >= 0x0100 &&
+        /* DMG firmware stays below 0x100 until FF50. CGB firmware also maps
+         * 0x200..0x8ff and legitimately jumps there while still active. */
+        if (lle_ctx->config.model != GB_MODEL_CGB && escapes_logged < 8 && lle_ctx->boot_rom_active && lle_ctx->pc >= 0x0100 &&
             prev_pc < 0x0100) {
             uint16_t sp = lle_ctx->sp;
             fprintf(stderr,

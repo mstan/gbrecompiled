@@ -20,6 +20,10 @@
 #include "platform_sdl.h"
 #include "gb_custom_view.h"
 #include "gb_widescreen.h"
+#include "gb_snapshot.h"
+#include "gb_debug_json.h"
+#include "gb_boot.h"
+#include "cosim_state.h"
 /* Declarations only — gb_printer.c owns STB_IMAGE_WRITE_IMPLEMENTATION. */
 #include "stb_image_write.h"
 
@@ -28,6 +32,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <limits.h>
+#include <errno.h>
 
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
@@ -56,7 +62,7 @@ static int  s_recv_len = 0;
  * ate its terminator, concatenating two JSON objects on one line and
  * desynchronizing every subsequent response. Queue whole lines instead: a
  * message is either fully enqueued or fully dropped, never split. */
-#define SEND_BUF_SIZE (1 << 20)
+#define SEND_BUF_SIZE (1 << 23)
 static char     s_send_buf[SEND_BUF_SIZE];
 static uint32_t s_send_head = 0;   /* next byte to transmit */
 static uint32_t s_send_tail = 0;   /* next free byte */
@@ -175,59 +181,21 @@ static void set_nonblocking(sock_t s)
 
 /* ---- JSON helpers (hand-parsed, no library) ---- */
 
-/* Find the VALUE of `key` in a flat JSON object.
- *
- * A plain strstr for "key" also matches the key name appearing as somebody
- * else's string value -- {"type":"key","key":"Right"} used to resolve
- * `key` against the `type` value and hand back an empty string. So only accept
- * a match that is followed by a colon and preceded by an object/member start.
- * Escapes are still not processed (see docs/DEBUG_SERVER.md). */
+/* Shared top-level scalar parsing, including escaped Windows/UTF-8 paths. */
 static const char *json_get_str(const char *json, const char *key,
                                  char *out, int out_sz)
 {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const size_t plen = strlen(pattern);
-    const char *p = json;
-    for (;;) {
-        p = strstr(p, pattern);
-        if (!p) return NULL;
-        /* Preceded by the start of a member: { or , (whitespace allowed). */
-        const char *before = p;
-        while (before > json && (before[-1] == ' ' || before[-1] == '\t' ||
-                                 before[-1] == '\n' || before[-1] == '\r'))
-            --before;
-        const int member_start = (before == json) ||
-                                 (before[-1] == '{') || (before[-1] == ',');
-        /* Followed by a colon: it is a key, not a value. */
-        const char *after = p + plen;
-        while (*after == ' ' || *after == '\t') ++after;
-        if (member_start && *after == ':') { p = after; break; }
-        p += plen;
-    }
-    while (*p == ' ' || *p == ':') p++;
-    if (*p == '"') {
-        p++;
-        int i = 0;
-        while (*p && *p != '"' && i < out_sz - 1)
-            out[i++] = *p++;
-        out[i] = '\0';
-        return out;
-    }
-    {
-        int i = 0;
-        while (*p && *p != ',' && *p != '}' && *p != ' ' && i < out_sz - 1)
-            out[i++] = *p++;
-        out[i] = '\0';
-        return out;
-    }
+    return out_sz > 0 && gb_debug_json_get(json, key, out, (size_t)out_sz) ? out : NULL;
 }
 
 static int json_get_int(const char *json, const char *key, int def)
 {
     char buf[64];
     if (!json_get_str(json, key, buf, sizeof(buf))) return def;
-    return atoi(buf);
+    char* end = NULL;
+    errno = 0;
+    long result = strtol(buf, &end, 10);
+    return !errno && end != buf && !*end && result >= INT_MIN && result <= INT_MAX ? (int)result : def;
 }
 
 /* Escape a string for embedding in a JSON reply. Paths are the reason this
@@ -446,6 +414,103 @@ static void handle_get_registers(int id, const char *json)
              s_ctx->ime,
              s_ctx->rom_bank, s_ctx->ram_bank,
              (unsigned long long)s_frame_count);
+}
+
+static void handle_capabilities(int id, const char* json)
+{
+    (void)json;
+    send_fmt("{\"id\":%d,\"ok\":true,\"protocol\":\"recomp-debug\",\"version\":1,"
+             "\"system\":\"gbc\",\"cpu\":\"sm83\",\"phase\":\"%s\",\"boot\":\"%s\","
+             "\"snapshots\":\"rb-engine\",\"frame_ring\":true,\"coverage_counters\":true,"
+             "\"commands\":[\"registers\",\"read_mem\",\"set_keyinput\",\"savestate_save\","
+             "\"savestate_load\",\"screenshot\",\"misses\",\"counters\",\"state_hash\",\"run_status\","
+             "\"history\",\"dispatch_history\",\"frame_range\",\"rewind\",\"rewind_info\"]}",
+             id, s_ctx ? "game" : "launcher", gb_boot_implementation());
+}
+
+static void handle_run_status(int id, const char* json)
+{
+    (void)json;
+    send_fmt("{\"id\":%d,\"ok\":true,\"running\":%s,\"paused\":%s,"
+             "\"frame\":%llu,\"guest_frame\":%llu,\"boot_active\":%s,\"boot\":\"%s\"}",
+             id, s_ctx && !s_paused ? "true" : "false", s_paused ? "true" : "false",
+             (unsigned long long)s_frame_count,
+             (unsigned long long)(s_ctx ? s_ctx->completed_frames : 0),
+             s_ctx && s_ctx->boot_rom_active ? "true" : "false", gb_boot_implementation());
+}
+
+static void handle_registers(int id, const char* json)
+{
+    (void)json;
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    gb_pack_flags(s_ctx);
+    send_fmt("{\"id\":%d,\"ok\":true,\"cpu\":\"sm83\",\"a\":%u,\"f\":%u,"
+             "\"b\":%u,\"c\":%u,\"d\":%u,\"e\":%u,\"h\":%u,\"l\":%u,"
+             "\"sp\":%u,\"pc\":%u,\"ime\":%u,\"rom_bank\":%u}", id,
+             s_ctx->a, s_ctx->f, s_ctx->b, s_ctx->c, s_ctx->d, s_ctx->e,
+             s_ctx->h, s_ctx->l, s_ctx->sp, s_ctx->pc, s_ctx->ime, s_ctx->rom_bank);
+}
+
+static void handle_counters(int id, const char* json)
+{
+    (void)json;
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    send_fmt("{\"id\":%d,\"ok\":true,\"sync_frames\":%llu,\"guest_frame\":%llu,"
+             "\"cycles_elapsed\":%u,\"dispatch_fallbacks\":%llu,\"interpreter_instructions\":%llu}",
+             id, (unsigned long long)s_frame_count, (unsigned long long)s_ctx->completed_frames,
+             s_ctx->cycles, (unsigned long long)s_ctx->total_dispatch_fallbacks,
+             (unsigned long long)s_ctx->total_interpreter_instructions);
+}
+
+static void handle_dispatch_history(int id, const char* json)
+{
+    (void)json;
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    char records[8192];
+    size_t used = 0;
+    uint64_t count = s_ctx->dispatch_history_count;
+    uint64_t first = count > GBRT_DISPATCH_HISTORY_CAPACITY ? count - GBRT_DISPATCH_HISTORY_CAPACITY : 0;
+    for (uint64_t i = first; i < count; ++i) {
+        const GBDispatchRecord* r = &s_ctx->dispatch_history[i % GBRT_DISPATCH_HISTORY_CAPACITY];
+        used += (size_t)snprintf(records + used, sizeof(records) - used,
+            "%s{\"cycles\":%u,\"pc\":%u,\"sp\":%u,\"bank\":%u,\"boot_active\":%u,\"dma_active\":%u}",
+            i == first ? "" : ",", r->cycles, r->addr, r->sp, r->bank, r->boot_active, r->dma_active);
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,\"total\":%llu,\"records\":[%s]}",
+             id, (unsigned long long)count, records);
+}
+
+static void handle_state_hash(int id, const char* json)
+{
+    (void)json;
+    if (!s_ctx) { send_err(id, "no context"); return; }
+    CosimSubHashes sub;
+    uint64_t hash = gb_cosim_state_hash(s_ctx, &sub);
+    char fields[2048];
+    size_t used = 0;
+    for (int i = 0; i < GB_COSIM_SUBHASH_COUNT; ++i) {
+        used += (size_t)snprintf(fields + used, sizeof(fields) - used,
+            "%s\"%s\":\"%016llx\"", i ? "," : "", gb_cosim_subhash_name(i),
+            (unsigned long long)gb_cosim_subhash_by_index(&sub, i));
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,\"hash\":\"%016llx\",\"pc\":%u,\"subsystems\":{%s}}",
+             id, (unsigned long long)hash, s_ctx->pc, fields);
+}
+
+static void handle_read_mem(int id, const char* json)
+{
+    char address[32];
+    if (!s_ctx || !json_get_str(json, "addr", address, sizeof(address))) { send_err(id, "missing context/addr"); return; }
+    char* end;
+    errno = 0;
+    unsigned long addr = strtoul(address, &end, 0);
+    int len = json_get_int(json, "len", 1);
+    if (errno || end == address || *end || addr > 0xffff || len < 1 || len > 4096 ||
+        (unsigned long)len > 0x10000 - addr) { send_err(id, "invalid address range"); return; }
+    char hex[8193];
+    for (int i = 0; i < len; ++i) snprintf(hex + i * 2, 3, "%02x",
+        peek_byte((uint16_t)(addr + i), -1, -1, -1, -1));
+    send_fmt("{\"id\":%d,\"ok\":true,\"addr\":%lu,\"len\":%d,\"hex\":\"%s\"}", id, addr, len, hex);
 }
 
 static void handle_read_ram(int id, const char *json)
@@ -799,6 +864,16 @@ static void handle_set_input(int id, const char *json)
     reply_input(id, "set_input");
 }
 
+static void handle_set_keyinput(int id, const char* json)
+{
+    int value = json_get_int(json, "value", -1);
+    if (value < 0 || value > 1023) { send_err(id, "missing/invalid value"); return; }
+    int pressed = (~value) & 255;
+    s_input_override = ((pressed & 15) << 4) | ((pressed >> 4) & 15);
+    s_input_frames = 0;
+    send_ok(id);
+}
+
 static void handle_clear_input(int id, const char *json)
 {
     (void)json;
@@ -955,6 +1030,29 @@ static void handle_save_slot_path(int id, const char *json)
              id, slot, esc, exists ? "true" : "false");
 }
 
+static void handle_rewind_info(int id, const char *json)
+{
+    (void)json;
+    GBRewindInfo info = gb_rewind_info(s_ctx);
+    send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"rb-engine\",\"count\":%u,\"depth\":%u,"
+             "\"bytes\":%llu,\"byte_limit\":%llu,\"interval_frames\":3,"
+             "\"captures\":%llu,\"restores\":%llu,\"failures\":%llu}",
+             id, info.count, info.depth, (unsigned long long)info.bytes,
+             (unsigned long long)info.byte_limit, (unsigned long long)info.captures,
+             (unsigned long long)info.restores, (unsigned long long)info.failures);
+}
+
+static void handle_rewind(int id, const char *json)
+{
+    int snapshots = json_get_int(json, "snapshots", 1);
+    if (!s_ctx || snapshots <= 0 || !gb_platform_rewind(s_ctx, (uint32_t)snapshots)) {
+        send_err(id, "rewind unavailable");
+        return;
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,\"guest_frame\":%llu}", id,
+             (unsigned long long)s_ctx->completed_frames);
+}
+
 /* ---- Screenshot ----
  *
  * Writes the PRESENTED frame: the composited custom/wide frame when a
@@ -1046,10 +1144,7 @@ static int write_png(const char *path, const uint32_t *fb, int w, int h)
 static void handle_screenshot(int id, const char *json)
 {
     char path[512];
-    if (!json_get_str(json, "path", path, sizeof(path)) || !path[0]) {
-        snprintf(path, sizeof(path), "gb_shot_%05llu.ppm",
-                 (unsigned long long)s_frame_count);
-    }
+    bool to_file = json_get_str(json, "path", path, sizeof(path)) && path[0];
 
     const uint32_t *fb = NULL;
     int w = 0, h = 0;
@@ -1068,6 +1163,25 @@ static void handle_screenshot(int id, const char *json)
         return;
     }
     if (!fb || w <= 0 || h <= 0) { send_err(id, "no frame available"); return; }
+
+    if (!to_file) {
+        if (w > GB_CUSTOM_MAX_WIDTH || h > GB_SCREEN_HEIGHT) { send_err(id, "invalid frame dimensions"); return; }
+        size_t pixels = (size_t)w * h;
+        char* response = (char*)malloc(pixels * 6 + 256);
+        if (!response) { send_err(id, "alloc failed"); return; }
+        int prefix = snprintf(response, 256, "{\"id\":%d,\"ok\":true,\"w\":%d,\"h\":%d,\"source\":\"%s\",\"data\":\"",
+                              id, w, h, source_is_present ? "presented" : "composed");
+        static const char digits[] = "0123456789abcdef";
+        char* target = response + prefix;
+        for (size_t i = 0; i < pixels; ++i) for (int shift = 16; shift >= 0; shift -= 8) {
+            unsigned byte = (fb[i] >> shift) & 255;
+            *target++ = digits[byte >> 4]; *target++ = digits[byte & 15];
+        }
+        memcpy(target, "\"}", 3);
+        send_line(response);
+        free(response);
+        return;
+    }
 
     int ok = path_ends_with_png(path) ? write_png(path, fb, w, h)
                                       : write_ppm(path, fb, w, h);
@@ -1615,7 +1729,7 @@ static volatile int s_preboot_stop = 0;
 static int preboot_command_allowed(const char *cmd)
 {
     static const char *const allowed[] = {
-        "ping", "help", "frame", "sdl_event", "key", "mouse", "quit", NULL
+        "ping", "help", "frame", "sdl_event", "key", "mouse", "quit", "capabilities", "run_status", NULL
     };
     for (int i = 0; allowed[i]; i++)
         if (strcmp(cmd, allowed[i]) == 0) return 1;
@@ -1687,6 +1801,16 @@ static void handle_help(int id, const char *json);
 
 static const CmdEntry s_commands[] = {
     { "ping",              "connectivity check; returns the current frame",                              handle_ping },
+    { "capabilities",      "shared debug protocol, phase, CPU and backend capabilities",                  handle_capabilities },
+    { "run_status",        "running state and monotonic observation/guest timeline frame numbers",        handle_run_status },
+    { "registers",         "numeric CPU-specific register fields, shared command name",                   handle_registers },
+    { "counters",          "live machine and process coverage counters",                                  handle_counters },
+    { "state_hash",        "canonical guest-state subhashes plus PC; read-only",                           handle_state_hash },
+    { "read_mem",          "side-effect-free memory; numeric or 0x-prefixed addr, len up to 4096",         handle_read_mem },
+    { "set_keyinput",      "ecosystem active-low KEYINPUT mask (A B Select Start Right Left Up Down)",     handle_set_keyinput },
+    { "savestate_save",    "shared save command; path or slot",                                            handle_save_state },
+    { "savestate_load",    "shared load command; path or slot",                                            handle_load_state },
+    { "misses",            "always-on interpreter sites and lifetime counters",                            handle_interp_fallbacks },
     { "help",              "list every built-in command with a one-line summary",                        handle_help },
     { "frame",             "current frame number and last reported function",                            handle_frame },
     { "get_registers",     "SM83 register + flag state, bank and frame",                                 handle_get_registers },
@@ -1711,12 +1835,15 @@ static const CmdEntry s_commands[] = {
     { "save_state",        "save state to {path} or the runtime's own {slot:N} file",                    handle_save_state },
     { "load_state",        "load state from {path} or {slot:N}, with the in-game post-load hooks",       handle_load_state },
     { "save_slot_path",    "resolve the <save_id>.stateN file for a slot without touching it",           handle_save_slot_path },
+    { "rewind_info",       "rb-engine history depth, bytes and lifetime capture/restore counters",       handle_rewind_info },
+    { "rewind",            "restore N stored snapshots and discard the abandoned future",                handle_rewind },
     { "screenshot",        "write the presented frame; .png gives PNG, anything else PPM",               handle_screenshot },
     { "pause",             "pause at the next frame boundary",                                           handle_pause },
     { "continue",          "resume; also cancels a pending step / run_to_frame",                         handle_continue },
     { "step",              "run N frames then re-pause; emits step_done",                                handle_step },
     { "run_to_frame",      "resume and pause at an absolute frame; emits run_to_done",                   handle_run_to_frame },
     { "history",           "frame-ring window: count, oldest, newest",                                   handle_history },
+    { "dispatch_history",  "always-on native dispatch ring, oldest to newest",                            handle_dispatch_history },
     { "get_frame",         "one historical frame record (CPU + PPU + banks + game data)",                handle_get_frame },
     { "frame_range",       "a span of historical frames, max 200",                                       handle_frame_range },
     { "frame_timeseries",  "compact per-frame timeseries over a span, max 200",                          handle_frame_timeseries },
@@ -1752,6 +1879,9 @@ static void handle_help(int id, const char *json)
 static void process_command(const char *line)
 {
     char cmd[64];
+    const char* first = line;
+    while (*first == ' ' || *first == '\t') ++first;
+    if (*first == '{' && !gb_debug_json_valid(line)) { send_err(0, "invalid JSON"); return; }
     if (!json_get_str(line, "cmd", cmd, sizeof(cmd))) {
         strncpy(cmd, line, sizeof(cmd) - 1);
         cmd[sizeof(cmd) - 1] = '\0';

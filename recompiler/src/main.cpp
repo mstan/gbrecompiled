@@ -6,6 +6,7 @@
 #include "recompiler/rom.h"
 #include "recompiler/decoder.h"
 #include "recompiler/analyzer.h"
+#include "recompiler/ram_overlay.h"
 #include "recompiler/symbol_table.h"
 #include "recompiler/config.h"
 #include "recompiler/ir/ir.h"
@@ -26,6 +27,7 @@
 #include <filesystem>
 
 namespace fs = std::filesystem;
+static std::string host_compiler_path;
 
 void print_banner() {
     std::cout << R"(
@@ -79,86 +81,6 @@ void print_usage(const char* program) {
     std::cout << "                        multi-game launcher build).\n";
     std::cout << "  -h, --help            Show this help\n";
     std::cout << "\nCLI flags override TOML config values.\n";
-}
-
-static std::vector<uint16_t> find_oam_dma_overlay_destinations(const std::vector<uint8_t>& data,
-                                                               uint16_t source_addr,
-                                                               uint16_t overlay_size) {
-    std::vector<uint16_t> destinations;
-    if (overlay_size == 0 || overlay_size > 0xFF || data.size() < 14) {
-        return destinations;
-    }
-
-    for (size_t i = 0; i + 13 < data.size(); ++i) {
-        if (data[i] != 0x0E ||       // LD C,imm8
-            data[i + 2] != 0x06 ||   // LD B,imm8
-            data[i + 4] != 0x21 ||   // LD HL,imm16
-            data[i + 7] != 0x2A ||   // LDI A,(HL)
-            data[i + 8] != 0xE2 ||   // LD (C),A
-            data[i + 9] != 0x0C ||   // INC C
-            data[i + 10] != 0x05 ||  // DEC B
-            data[i + 11] != 0x20 ||  // JR NZ,rel8
-            data[i + 12] != 0xFA ||  // rel8 = -6
-            data[i + 13] != 0xC9) {  // RET
-            continue;
-        }
-
-        uint8_t count = data[i + 3];
-        uint16_t copied_source = static_cast<uint16_t>(data[i + 5] | (data[i + 6] << 8));
-        if (count != overlay_size || copied_source != source_addr) {
-            continue;
-        }
-
-        destinations.push_back(static_cast<uint16_t>(0xFF00 | data[i + 1]));
-    }
-
-    std::sort(destinations.begin(), destinations.end());
-    destinations.erase(std::unique(destinations.begin(), destinations.end()), destinations.end());
-    return destinations;
-}
-
-static std::vector<gbrecomp::AnalyzerOptions::RamOverlay> detect_oam_dma_overlays(const gbrecomp::ROM& rom) {
-    const std::vector<uint8_t>& data = rom.bytes();
-    const std::vector<uint8_t> wait_pattern = {0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9};
-    std::vector<gbrecomp::AnalyzerOptions::RamOverlay> overlays;
-
-    auto it = std::search(data.begin(), data.end(), wait_pattern.begin(), wait_pattern.end());
-    if (it == data.end()) {
-        return overlays;
-    }
-
-    size_t rom_idx = static_cast<size_t>(std::distance(data.begin(), it));
-    size_t overlay_start = rom_idx;
-    uint16_t overlay_size = static_cast<uint16_t>(wait_pattern.size());
-
-    // Many games copy the full helper starting with LD A,imm8 before the
-    // standard wait loop body. If that prefix is present, compile the actual
-    // copied entry point instead of the inner loop.
-    if (rom_idx >= 2 && data[rom_idx - 2] == 0x3E) {
-        overlay_start = rom_idx - 2;
-        overlay_size += 2;
-    }
-
-    uint8_t bank = static_cast<uint8_t>(overlay_start / 0x4000);
-    uint16_t offset = static_cast<uint16_t>(overlay_start % 0x4000);
-    if (bank > 0) {
-        offset = static_cast<uint16_t>(offset + 0x4000);
-    }
-
-    std::vector<uint16_t> destinations = find_oam_dma_overlay_destinations(data, offset, overlay_size);
-    if (destinations.empty()) {
-        destinations.push_back(0xFF80);
-    }
-
-    for (uint16_t ram_addr : destinations) {
-        gbrecomp::AnalyzerOptions::RamOverlay overlay;
-        overlay.ram_addr = ram_addr;
-        overlay.rom_addr = gbrecomp::AnalysisResult::make_addr(bank, offset);
-        overlay.size = overlay_size;
-        overlays.push_back(overlay);
-    }
-
-    return overlays;
 }
 
 static void append_codegen_ram_overlays(
@@ -738,31 +660,12 @@ static std::string make_android_jni_src_cmake(const fs::path& output_dir,
     ss << "else()\n";
     ss << "    set(GBRECOMP_SDL_MAIN_TARGET \"\")\n";
     ss << "endif()\n\n";
-    ss << "add_library(gbrt STATIC\n";
-    ss << "    ${GBRT_DIR}/src/gbrt.c\n";
-    ss << "    ${GBRT_DIR}/src/differential.c\n";
-    ss << "    ${GBRT_DIR}/src/cosim_state.c\n";
-    ss << "    ${GBRT_DIR}/src/ppu.c\n";
-    ss << "    ${GBRT_DIR}/src/audio.c\n";
-    ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
-    ss << "    ${GBRT_DIR}/src/interpreter.c\n";
-    ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
-    ss << ")\n\n";
-    ss << "target_sources(gbrt PRIVATE\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_draw.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_tables.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_widgets.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdl2.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
-    ss << ")\n";
-    ss << "target_include_directories(gbrt PUBLIC\n";
-    ss << "    ${GBRT_DIR}/include\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui\n";
-    ss << ")\n";
-    ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n";
-    ss << "target_compile_features(gbrt PUBLIC c_std_11 cxx_std_17)\n";
-    ss << "target_link_libraries(gbrt PUBLIC ${GBRECOMP_SDL_TARGET})\n\n";
+    ss << "if(NOT TARGET SDL2::SDL2)\n";
+    ss << "    add_library(SDL2::SDL2 ALIAS ${GBRECOMP_SDL_TARGET})\n";
+    ss << "endif()\n";
+    ss << "set(GBRECOMP_RECOMP_UI OFF CACHE BOOL \"Build the shared preboot launcher\")\n";
+    ss << "set(GBRECOMP_HOST_COMPILER \"" << host_compiler_path << "\" CACHE FILEPATH \"Host gbrecomp\")\n";
+    ss << "add_subdirectory(${GBRT_DIR} ${CMAKE_CURRENT_BINARY_DIR}/gbrt_build)\n\n";
     ss << "add_library(main SHARED\n";
     for (const auto& filename : generated_source_files) {
         ss << "    ${GBRECOMP_OUT_DIR}/" << filename << "\n";
@@ -864,9 +767,23 @@ static std::string make_launcher_source(const std::string& launcher_name,
 #include <string.h>
 
 #include "platform_sdl.h"
+extern "C" {
+#include "launcher.h"
+}
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
+
+// The bundled and shared-launcher ImGui versions use different renderer
+// signatures. Resolve the backend actually selected by the runtime build.
+static void draw_launcher_frame(ImDrawData* data, SDL_Renderer*,
+                                void (*draw)(ImDrawData*)) {
+    draw(data);
+}
+static void draw_launcher_frame(ImDrawData* data, SDL_Renderer* renderer,
+                                void (*draw)(ImDrawData*, SDL_Renderer*)) {
+    draw(data, renderer);
+}
 
 typedef int (*GBLauncherMainFn)(int argc, char* argv[]);
 
@@ -877,10 +794,25 @@ typedef struct {
     GBLauncherMainFn main_fn;
 } GBLauncherGame;
 
+static GBDispatchFn g_launcher_dispatch;
+static GBDispatchFn g_launcher_dispatch_call;
+extern "C" void gb_dispatch(GBContext* ctx, uint16_t address) {
+    if (!g_launcher_dispatch) abort();
+    g_launcher_dispatch(ctx, address);
+}
+extern "C" void gb_dispatch_call(GBContext* ctx, uint16_t address) {
+    if (!g_launcher_dispatch_call) abort();
+    g_launcher_dispatch_call(ctx, address);
+}
+
 )LAUNCHER";
     for (const MultiRomModule& module : modules) {
         ss << "static int launch_" << module.output_prefix << "(int argc, char* argv[]) {\n";
-        ss << "    return " << module.output_prefix << "_main(argc, argv);\n";
+        ss << "    g_launcher_dispatch = " << module.output_prefix << "__gb_dispatch;\n";
+        ss << "    g_launcher_dispatch_call = " << module.output_prefix << "__gb_dispatch_call;\n";
+        ss << "    int result = " << module.output_prefix << "_main(argc, argv);\n";
+        ss << "    g_launcher_dispatch = g_launcher_dispatch_call = NULL;\n";
+        ss << "    return result;\n";
         ss << "}\n";
     }
     ss << "\n";
@@ -1154,7 +1086,7 @@ static int run_graphical_launcher(const GBLauncherGame** out_selected) {
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 11, 14, 19, 255);
         SDL_RenderClear(renderer);
-        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+        draw_launcher_frame(ImGui::GetDrawData(), renderer, ImGui_ImplSDLRenderer2_RenderDrawData);
         SDL_RenderPresent(renderer);
     }
 
@@ -1227,6 +1159,7 @@ int main(int argc, char* argv[]) {
         }
 
         fprintf(stderr, "[LAUNCH] Starting %s [%s]\n", selected->title, selected->id);
+        launcher_set_rom_hint(selected->rom_path);
         gb_platform_set_launcher_return_enabled(true);
         int rc = selected->main_fn(forwarded_argc, forwarded_argv);
         if (rc == GB_PLATFORM_RETURN_TO_LAUNCHER_EXIT_CODE) {
@@ -1304,30 +1237,8 @@ static std::string make_multi_rom_cmake(const std::string& project_name,
     ss << "endif()\n\n";
     ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
     ss << "find_package(SDL2 REQUIRED)\n\n";
-    ss << "add_library(gbrt STATIC\n";
-    ss << "    ${GBRT_DIR}/src/gbrt.c\n";
-    ss << "    ${GBRT_DIR}/src/differential.c\n";
-    ss << "    ${GBRT_DIR}/src/cosim_state.c\n";
-    ss << "    ${GBRT_DIR}/src/ppu.c\n";
-    ss << "    ${GBRT_DIR}/src/audio.c\n";
-    ss << "    ${GBRT_DIR}/src/audio_stats.c\n";
-    ss << "    ${GBRT_DIR}/src/interpreter.c\n";
-    ss << "    ${GBRT_DIR}/src/platform_sdl.cpp\n";
-    ss << ")\n\n";
-    ss << "target_sources(gbrt PRIVATE\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_draw.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_tables.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/imgui_widgets.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdl2.cpp\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui/backends/imgui_impl_sdlrenderer2.cpp\n";
-    ss << ")\n";
-    ss << "target_include_directories(gbrt PUBLIC\n";
-    ss << "    ${GBRT_DIR}/include\n";
-    ss << "    ${GBRT_DIR}/vendor/imgui\n";
-    ss << ")\n";
-    ss << "target_link_libraries(gbrt PUBLIC SDL2::SDL2)\n";
-    ss << "target_compile_definitions(gbrt PUBLIC GB_HAS_SDL2)\n\n";
+    ss << "set(GBRECOMP_HOST_COMPILER \"" << host_compiler_path << "\" CACHE FILEPATH \"Host gbrecomp\")\n";
+    ss << "add_subdirectory(${GBRT_DIR} ${CMAKE_CURRENT_BINARY_DIR}/gbrt_build)\n\n";
     ss << "add_executable(" << project_name << "\n";
     for (const std::string& filename : executable_sources) {
         ss << "    " << filename << "\n";
@@ -1351,6 +1262,8 @@ static std::string make_multi_rom_cmake(const std::string& project_name,
     ss << "        message(STATUS \"GB Recompiled: IPO/LTO not enabled (${GBRECOMP_IPO_ERROR})\")\n";
     ss << "    endif()\n";
     ss << "endif()\n\n";
+    ss << "get_target_property(_gb_imgui gbrt GBRT_IMGUI_DIR)\n";
+    ss << "target_sources(" << project_name << " PRIVATE ${_gb_imgui}/backends/imgui_impl_sdlrenderer2.cpp)\n";
     ss << "target_link_libraries(" << project_name << " gbrt)\n";
     return ss.str();
 }
@@ -1450,7 +1363,7 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     analyze_opts.annotations = gbrecomp::build_analysis_annotations(symbol_table);
 
     const std::vector<gbrecomp::AnalyzerOptions::RamOverlay> dma_overlays =
-        detect_oam_dma_overlays(rom);
+        gbrecomp::detect_oam_dma_overlays(rom);
     for (const auto& overlay : dma_overlays) {
         uint8_t bank = static_cast<uint8_t>(overlay.rom_addr >> 16);
         uint16_t offset = static_cast<uint16_t>(overlay.rom_addr & 0xFFFF);
@@ -1516,6 +1429,43 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     return true;
 }
 
+static int compile_boot_rom(int argc, char* argv[]) {
+    if (argc != 7 || std::string(argv[3]) != "--model" ||
+        std::string(argv[5]) != "--output" ||
+        (std::string(argv[4]) != "dmg" && std::string(argv[4]) != "cgb")) {
+        std::cerr << "Usage: gbrecomp --compile-bios FILE --model dmg|cgb --output DIR\n";
+        return 1;
+    }
+    const bool cgb = std::string(argv[4]) == "cgb";
+    auto rom = gbrecomp::ROM::load_boot_rom(argv[2], cgb);
+    if (!rom) { std::cerr << "Cannot load exact-size boot ROM: " << argv[2] << '\n'; return 1; }
+    gbrecomp::AnalyzerOptions analysis_options;
+    analysis_options.boot_rom = true;
+    analysis_options.aggressive_scan = false;
+    analysis_options.add_builtin_rom_annotations = false;
+    auto analysis = gbrecomp::analyze(*rom, analysis_options);
+    gbrecomp::ir::IRBuilder builder;
+    auto program = builder.build(analysis, rom->name());
+    gbrecomp::codegen::GeneratorOptions options;
+    options.output_prefix = cgb ? "gbrt_bios_cgb" : "gbrt_bios_dmg";
+    options.output_dir = argv[6];
+    options.body_only = true;
+    options.use_prefixed_symbols = true;
+    options.boot_rom = true;
+    options.emit_main_entry_point = false;
+    options.emit_cmake = false;
+    options.parallel_codegen_jobs = 1;
+    auto output = gbrecomp::codegen::generate_output(program, rom->data(), rom->size(), options);
+    if (!gbrecomp::codegen::write_output(output, options.output_dir)) return 1;
+    // A predictable compilation output lets runtime CMake depend on the host
+    // producer without a second configure for a variable source-list pass.
+    std::ofstream native(fs::path(options.output_dir) / (options.output_prefix + "_native.c"));
+    native << output.source_content << '\n' << output.rom_data_content << '\n';
+    for (const auto& [bank, source] : output.bank_sources) native << source << '\n';
+    for (const auto& file : output.extra_files) if (file.is_source) native << file.content << '\n';
+    return native ? 0 : 1;
+}
+
 int main(int argc, char* argv[]) {
     // Parse command line
     if (argc < 2) {
@@ -1523,6 +1473,10 @@ int main(int argc, char* argv[]) {
         print_usage(argv[0]);
         return 1;
     }
+
+    if (fs::exists(fs::absolute(argv[0]))) host_compiler_path = fs::absolute(argv[0]).generic_string();
+
+    if (std::string(argv[1]) == "--compile-bios") return compile_boot_rom(argc, argv);
 
     // Tier-0: `--harvest <interp_fallbacks.log> [--manifest <dispatch_misses.toml>]`
     // folds a runtime interpreter-fallback log into a dispatch-miss manifest
@@ -1987,7 +1941,7 @@ int main(int argc, char* argv[]) {
     analyze_opts.annotations = gbrecomp::build_analysis_annotations(symbol_table);
 
     const std::vector<gbrecomp::AnalyzerOptions::RamOverlay> dma_overlays =
-        detect_oam_dma_overlays(rom);
+        gbrecomp::detect_oam_dma_overlays(rom);
     for (const auto& overlay : dma_overlays) {
             uint8_t bank = static_cast<uint8_t>(overlay.rom_addr >> 16);
             uint16_t offset = static_cast<uint16_t>(overlay.rom_addr & 0xFFFF);
@@ -2118,6 +2072,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     gen_opts.runtime_dir = game_config.runtime_dir;
+    if (fs::exists(fs::absolute(argv[0]))) gen_opts.compiler_path = fs::absolute(argv[0]).generic_string();
     gen_opts.valid_crcs = game_config.valid_crcs;
     for (const auto& io : game_config.imm_overrides) {
         gen_opts.imm_override_sites.insert(

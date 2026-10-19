@@ -1,0 +1,25 @@
+[snapshot integration]
+Ghidra: Host snapshot ownership; no guest address or new hardware behavior.
+Rationale: Move the existing scalar snapshot inventory to the common memory
+codec, cache immutable ROM/BIOS identities at load, and destroy rb-engine history
+with the owning context. Loading a new image invalidates old rewind history.
+
+[RET stack bus timing]
+Ghidra: This changes architectural RET/RETI, not a guessed game routine. The
+known copied MMX2 DMA body is documented in its README. The always-on dispatch
+ring shows FF80 -> FF87 (DMA active) -> FFFF, SP CFE7.
+Reference: SameBoy/Core/sm83_cpu.c ret/ret_cc/cycle_read; Pan Docs OAM DMA:
+https://github.com/gbdev/pandocs/blob/master/src/OAM_DMA_Transfer.md
+Rationale: RET reads stack low/high after its fetch M-cycle and the following
+M-cycle; taken RET cc adds an idle M-cycle before those reads. Reading both
+bytes before any cycles returned blocked-bus FF at DMA completion. Split ticks
+retain total 16/20 CPU cycles and resolve EI once at instruction completion.
+RETI enables IME at completion. DMA already uses CPU cycles in both normal and
+CGB double speed; changing its speed was disproved by source review.
+Regression fixtures use WRAM stacks, both speeds, and DMA ending before,
+between or after stack reads. The earlier HRAM-stack fixture hid this bug.
+
+[dispatch history]
+Keep 64 process-local dispatcher PC/bank/SP/cycle/BIOS/DMA observations without
+arming a trace. Snapshot restore preserves the ring and lifetime count.
+Strict failure prints its tail; TCP dispatch_history reads it.

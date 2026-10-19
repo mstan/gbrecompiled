@@ -26,6 +26,7 @@
 
 static char s_cfg_path[512] = {0};
 static char s_rom_path[512] = {0};
+static char s_rom_hint[512] = {0};
 static char s_state_dir[512] = {0};      /* writable, user-visible (with trailing sep) */
 static char s_asset_dir[512] = {0};      /* read-only payload shipped with the exe */
 static char s_expected_sha256[65] = {0};  /* gen-time ROM digest, "" = disabled */
@@ -38,6 +39,16 @@ static char s_last_error[256] = {0};      /* reason for the most recent failure 
 static int  s_verify_quiet = 0;
 
 const char *launcher_last_error(void) { return s_last_error; }
+
+void launcher_set_rom_hint(const char *path) {
+    snprintf(s_rom_hint, sizeof(s_rom_hint), "%s", path ? path : "");
+    s_rom_path[0] = '\0';
+}
+
+const char *launcher_get_rom_hint(void) {
+    const char *explicit_path = getenv("GBRECOMP_ROM_PATH");
+    return explicit_path && *explicit_path ? explicit_path : s_rom_hint;
+}
 
 void launcher_set_expected_sha256(const char *hex) {
     if (hex && hex[0]) {
@@ -335,7 +346,7 @@ static int verify_rom(const char *path, char *resolved, size_t resolved_sz) {
             return changed ? 2 : 1;
         }
 #ifdef _WIN32
-        MessageBoxA(NULL,
+        if (!s_verify_quiet) MessageBoxA(NULL,
             "ROM SHA-256 mismatch!\n\nThis is not the ROM this build expects,\n"
             "and no enhancement patch could turn it into one.\n\n"
             "Please select the correct (stock) ROM.",
@@ -374,7 +385,7 @@ static int verify_rom(const char *path, char *resolved, size_t resolved_sz) {
     snprintf(s_last_error, sizeof(s_last_error), "ROM CRC32 mismatch (got %08X)", actual);
     fprintf(stderr, "[Launcher] %s\n", msg);
 #ifdef _WIN32
-    MessageBoxA(NULL, msg, "Wrong ROM", MB_ICONWARNING | MB_OK);
+    if (!s_verify_quiet) MessageBoxA(NULL, msg, "Wrong ROM", MB_ICONWARNING | MB_OK);
 #endif
     return 0;
 }
@@ -448,12 +459,29 @@ static int find_acceptable_rom_in_dir(const char *dir, char *resolved, size_t re
 const char *launcher_get_rom_path(void) {
     if (s_rom_path[0]) return s_rom_path;
 
+    const char *hint = launcher_get_rom_hint();
+    if (hint && *hint) {
+        char resolved[512];
+        s_verify_quiet = 1;
+        int verified = file_exists(hint) && verify_rom(hint, resolved, sizeof(resolved));
+        s_verify_quiet = 0;
+        if (!verified) {
+            fprintf(stderr, "[Launcher] Selected ROM is missing or does not match this build: %s\n", hint);
+            return NULL;
+        }
+        snprintf(s_rom_path, sizeof(s_rom_path), "%s", resolved);
+        printf("[Launcher] ROM: %s (selected)\n", s_rom_path);
+        return s_rom_path;
+    }
+
     /* Try cached path */
     char cached[512];
     rom_cfg_read(cached, sizeof(cached));
     if (cached[0] && file_exists(cached)) {
         char resolved[512];
+        s_verify_quiet = 1;
         int rc = verify_rom(cached, resolved, sizeof(resolved));
+        s_verify_quiet = 0;
         if (rc) {
             snprintf(s_rom_path, sizeof(s_rom_path), "%s", resolved);
             if (rc == 2) rom_cfg_write(s_rom_path);  /* cache the patched ROM */
@@ -480,6 +508,16 @@ const char *launcher_get_rom_path(void) {
             printf("[Launcher] ROM: %s (found beside the program)\n", s_rom_path);
             return s_rom_path;
         }
+    }
+
+    const char *headless = getenv("GBRECOMP_HEADLESS");
+    const char *no_launcher = getenv("GBRECOMP_NO_LAUNCHER");
+    const char *benchmark = getenv("GBRECOMP_BENCHMARK");
+    if ((headless && !strcmp(headless, "1")) ||
+        (no_launcher && !strcmp(no_launcher, "1")) ||
+        (benchmark && !strcmp(benchmark, "1"))) {
+        fprintf(stderr, "[Launcher] Unattended launch requires a matching GBRECOMP_ROM_PATH or rom.cfg\n");
+        return NULL;
     }
 
     /* Open file picker, loop until valid or cancelled */

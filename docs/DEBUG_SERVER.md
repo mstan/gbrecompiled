@@ -28,8 +28,37 @@ A ready-made Python client lives in each game repo as `tools/tcp.py`
 * One client at a time. The listener accepts a new client when the previous one
   disconnects; disconnecting also clears the pause state and any input override.
 * Port: 4370 by default, or `$GBRECOMP_DEBUG_PORT`.
-* The JSON parser is hand-written and does **not** process escapes. Send paths
-  with forward slashes (`F:/Projects/...`), never backslashes.
+* Strings support JSON escapes, including Windows backslashes and Unicode
+  surrogate pairs. Malformed input, truncated values, embedded NUL and duplicate
+  requested members are rejected. Command fields come from the top-level object.
+
+### Ecosystem command names
+
+`capabilities` identifies the CPU, phase, selected BIOS implementation and
+snapshot backend. Shared command names include `registers`, `read_mem`,
+`set_keyinput`, `savestate_save`, `savestate_load`, `state_hash`, `counters`,
+`misses` and `run_status`. `dispatch_history` reads the always-on 64-entry native
+dispatch ring (PC, bank, SP, cycle and BIOS/DMA flags). Restore preserves its
+lifetime count and records. Existing GB commands remain available. Registers have
+numeric SM83 fields; ARM register names are not synthesized. `read_mem` takes a
+numeric address or a `0x`-prefixed string and returns side-effect-free backing
+memory in `hex`, with a maximum of 4096 bytes per request.
+
+`set_keyinput` takes the ecosystem active-low mask in `value`: bits 0..7 are
+A, B, Select, Start, Right, Left, Up, Down; unsupported L/R bits have no effect.
+The existing `set_input` command instead takes GB letters or an active-high GB
+mask. `state_hash` reports the existing canonical device/memory subhashes and PC;
+it excludes presentation buffers and host state and is not a compatibility
+certificate for different builds.
+
+`screenshot` without `path` returns the last presented image as
+`{"w":W,"h":H,"data":"<RGB hex>","source":"presented"}`. With `path`, it
+retains the PNG/PPM file interface below. If no presented image exists, a composed
+fallback is explicitly labeled `source:"composed"`.
+
+`run_status.frame` counts observations monotonically while `guest_frame` follows
+the restored guest timeline. Lifetime interpreter counters and the always-on
+frame ring are preserved across file loads and rewind.
 
 ### Frame boundaries
 
@@ -74,6 +103,16 @@ therefore loads over TCP and vice versa.
 | `save_state` | `path` (str) or `slot` (int, 0-based) | `path`, `frame` | `gb_context_save_state_file()`. |
 | `load_state` | `path` (str) or `slot` (int, 0-based) | `path`, `frame` | Runs the same post-load hooks as the in-game load. |
 | `save_slot_path` | `slot` (int, default 0) | `slot`, `path`, `exists` | Resolve a slot file without touching it. |
+| `rewind_info` | — | backend, count/depth, bytes/limit, captures/restores/failures | Always-on rb-engine history, one capture every 3 completed run frames. |
+| `rewind` | `snapshots` (int, default 1) | `guest_frame` | Restore older history and discard the abandoned future. Unavailable during a live cable session. |
+
+The file and rewind paths use the same transactional compressed codec. Invalid,
+truncated, corrupt or incompatible blobs leave the live machine untouched.
+Version-1 raw states are incompatible. BIOS mapping, full serial state, SGB/IR
+and registered game-enhancement state are included alongside CPU, memory, PPU,
+APU and RTC. ROM/BIOS SHA-256, hardware, build implementation and opaque-section
+ABI checks prevent cross-profile loads. This is a same-ABI format; it does not
+claim portable state compatibility between arbitrary compilers or future builds.
 
 `load_state` post-load hooks, in order: `gb_ws_reapply()` and `gb_custom_reset()`
 inside `gb_context_load_state_file()`, so the widescreen sidecar and any custom
@@ -144,14 +183,12 @@ the OS foreground window or `SDL_GetKeyboardState()`, so it works:
 | `mod` | `0` | `keysym.mod` bitmask. |
 
 A press is two commands, `down:1` then `down:0` — deliberately, because "held
-across N frames" is the interesting case. Pair it with `pause` + `step` for a
-run with no wall-clock timing in it at all:
+across N frames" is the interesting case. Let the game run and inspect the
+always-on frame ring to identify the observations covered by the held input:
 
 ```python
-d.pause()
-d.sdl_event(key="A", down=1)   # handled immediately, still paused
-d.step(4)                      # the guest polls the joypad 4 times
-held = d.read_ram(0xFF80, 1)[0]
+d.sdl_event(key="A", down=1)
+# Query history/frame_range while the game continues running.
 d.sdl_event(key="A", down=0)
 ```
 
@@ -176,7 +213,7 @@ and Join-Direct fields, or the built-in ROM browser's Folder/File boxes).
 `SDL_TextInputEvent.text` holds 31 characters, so anything longer is split
 across as many events as it needs — the reply's `events` count says how many —
 and a text field appends them, so a full file path arrives intact. Splits fall
-on UTF-8 boundaries. Remember that the request parser does not process escapes.
+on UTF-8 boundaries. The request parser processes JSON string escapes.
 
 ### Replies
 

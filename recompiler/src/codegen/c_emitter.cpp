@@ -955,104 +955,27 @@ static const ir::BasicBlock* find_safe_local_target_block(const ir::Program& pro
     if (current_body == nullptr || current_body->bank != bank || current_body->may_switch_rom_bank) {
         return nullptr;
     }
+    if ((addr >= 0x8000) != (current_body->entry_address >= 0x8000)) return nullptr;
 
     return find_block_in_body(program, current_body, bank, addr);
 }
 
-static bool block_has_external_predecessor(const ir::BasicBlock& block,
-                                           const std::set<uint32_t>& current_function_blocks) {
-    for (uint32_t pred_addr : block.predecessors) {
-        if (!current_function_blocks.count(pred_addr)) {
-            return true;
+/* gb_tick may yield after every guest instruction (frame boundary, IRQ or
+ * run budget). Every decoded instruction boundary must therefore be a native
+ * resume point. These are labels in existing bodies, never new functions. */
+static std::set<uint16_t> collect_instruction_pcs(const ir::Program& program,
+                                                const std::vector<uint32_t>& block_ids,
+                                                uint16_t entry_address) {
+    std::set<uint16_t> pcs = {entry_address};
+    for (uint32_t id : block_ids) {
+        auto it = program.blocks.find(id);
+        if (it == program.blocks.end()) continue;
+        pcs.insert(it->second.start_address);
+        for (const auto& instr : it->second.instructions) {
+            if (instr.has_source_location) pcs.insert(instr.source_address);
         }
     }
-    return false;
-}
-
-static std::set<uint16_t> collect_dispatchable_pcs_for_body(const ir::Program& program,
-                                                            const EmittedBody& body) {
-    std::set<uint16_t> dispatchable_pcs;
-    std::set<uint16_t> available_pcs;
-    std::set<uint32_t> current_body_blocks;
-
-    for (uint32_t block_id : body.block_ids) {
-        auto block_it = program.blocks.find(block_id);
-        if (block_it == program.blocks.end()) {
-            continue;
-        }
-
-        const ir::BasicBlock& block = block_it->second;
-        current_body_blocks.insert(make_full_address(block.bank, block.start_address));
-    }
-
-    for (uint32_t block_id : body.block_ids) {
-        auto block_it = program.blocks.find(block_id);
-        if (block_it == program.blocks.end()) {
-            continue;
-        }
-
-        const ir::BasicBlock& block = block_it->second;
-        available_pcs.insert(block.start_address);
-        if (body.may_switch_rom_bank) {
-            dispatchable_pcs.insert(block.start_address);
-        } else if (block.is_entry ||
-                   block_has_external_predecessor(block, current_body_blocks)) {
-            dispatchable_pcs.insert(block.start_address);
-        }
-        for (const auto& instr : block.instructions) {
-            if (instr.has_source_location) {
-                available_pcs.insert(instr.source_address);
-            }
-        }
-    }
-
-    dispatchable_pcs.insert(body.entry_address);
-
-    for (uint32_t block_id : body.block_ids) {
-        auto block_it = program.blocks.find(block_id);
-        if (block_it == program.blocks.end()) {
-            continue;
-        }
-
-        const ir::BasicBlock& block = block_it->second;
-        for (size_t instr_index = 0; instr_index < block.instructions.size(); ++instr_index) {
-            const auto& instr = block.instructions[instr_index];
-            if (!instr.has_source_location) {
-                continue;
-            }
-
-            uint16_t next_pc = 0;
-            if (instr_index + 1 < block.instructions.size()) {
-                const auto& next_instr = block.instructions[instr_index + 1];
-                if (next_instr.has_source_location) {
-                    next_pc = next_instr.source_address;
-                }
-            } else {
-                next_pc = block.end_address;
-            }
-
-            if (next_pc == 0) {
-                continue;
-            }
-            if (!available_pcs.count(next_pc) && next_pc != body.entry_address) {
-                continue;
-            }
-
-            switch (instr.opcode) {
-                case ir::Opcode::CALL:
-                case ir::Opcode::CALL_CC:
-                case ir::Opcode::RST:
-                case ir::Opcode::HALT:
-                case ir::Opcode::STOP:
-                    dispatchable_pcs.insert(next_pc);
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-
-    return dispatchable_pcs;
+    return pcs;
 }
 
 static std::vector<EmittedBody> build_emitted_bodies(
@@ -1539,7 +1462,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                         << std::setw(4) << target << std::dec << "; return;\n";
                 } else {
                     std::string target_func = program.make_function_name(tbank, target);
-                    bool func_exists = program.functions.find(target_func) != program.functions.end();
+                    bool func_exists = target < 0x8000 && program.functions.find(target_func) != program.functions.end();
                     const ir::BasicBlock* local_target_block =
                         find_safe_local_target_block(program, current_body, tbank, target);
                     
@@ -1651,7 +1574,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                 emit_indent(); out << "} /* " << cond << " */\n";
             } else {
                 std::string target_func = program.make_function_name(tbank, target);
-                bool func_exists = program.functions.find(target_func) != program.functions.end();
+                bool func_exists = target < 0x8000 && program.functions.find(target_func) != program.functions.end();
                 const ir::BasicBlock* local_target_block =
                     find_safe_local_target_block(program, current_body, tbank, target);
 
@@ -1745,7 +1668,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                 emit_indent(); out << "return;\n";
             } else {
                 std::string func_name = program.make_function_name(target_bank, target);
-                bool func_exists = program.functions.find(func_name) != program.functions.end();
+                bool func_exists = target < 0x8000 && program.functions.find(func_name) != program.functions.end();
                 bool did_inline = false;
 
                 if (func_exists && inlineable_functions.count(func_name)) {
@@ -1835,7 +1758,7 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                 emit_indent(); out << "} /* " << cond << " */\n";
             } else {
                 std::string func_name = program.make_function_name(target_bank, target);
-                bool func_exists = program.functions.find(func_name) != program.functions.end();
+                bool func_exists = target < 0x8000 && program.functions.find(func_name) != program.functions.end();
                 
                 int taken_cycles = instr.cycles_branch_taken;
 
@@ -1904,11 +1827,9 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         }
             
         case ir::Opcode::RET:
-            out << "gb_ret(ctx);\n";
             if (options.emit_cycle_counting && group_cycles > 0) {
-                emit_indent();
-                out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
-            }
+                out << "gb_ret_timed(ctx, false, false);\n";
+            } else out << "gb_ret(ctx);\n";
             emit_indent();
             out << "return;\n";
             break;
@@ -1919,10 +1840,9 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
                                (instr.src.value.condition == 1) ? "ctx->f_z" :
                                (instr.src.value.condition == 2) ? "!ctx->f_c" : "ctx->f_c";
             out << "if (" << expr << ") {\n";
-            emit_indent(); out << "    gb_ret(ctx);\n";
             if (options.emit_cycle_counting) {
-                emit_indent(); out << "    gb_tick(ctx, 20); /* RET_CC cycles always 20 if taken */\n";
-            }
+                emit_indent(); out << "    gb_ret_timed(ctx, true, false);\n";
+            } else { emit_indent(); out << "    gb_ret(ctx);\n"; }
             emit_indent(); out << "    return;\n";
             emit_indent(); out << "} /* " << cond << " */\n";
             // Not taken: update PC and tick
@@ -1937,11 +1857,9 @@ static void emit_ir_instruction(std::ostream& out, const ir::IRInstruction& inst
         }
             
         case ir::Opcode::RETI:
-            out << "ctx->ime = 1;\n";
-            emit_indent(); out << "gb_ret(ctx);\n";
             if (options.emit_cycle_counting && group_cycles > 0) {
-                emit_indent(); out << "gb_tick(ctx, " << (int)group_cycles << ");\n";
-            }
+                out << "gb_ret_timed(ctx, false, true);\n";
+            } else { out << "ctx->ime = 1; ctx->ime_pending = 0; gb_ret(ctx);\n"; }
             emit_indent(); out << "return;\n";
             break;
             
@@ -2333,6 +2251,8 @@ GeneratedOutput generate_output(const ir::Program& program,
     header_ss << "const GBConfig* " << options.output_prefix << "_default_config(void);\n";
     header_ss << "void " << options.output_prefix << "_run(GBContext* ctx);\n";
     header_ss << "void " << options.output_prefix << "_init(GBContext* ctx);\n";
+    header_ss << "void " << dispatch_function_name(options) << "(GBContext* ctx, uint16_t addr);\n";
+    header_ss << "void " << dispatch_call_function_name(options) << "(GBContext* ctx, uint16_t addr);\n";
     header_ss << "int " << module_main_name(options) << "(int argc, char* argv[]);\n";
     if (emits_body_descriptor(options)) {
         /* This module's entry in the multi-body table (runtime/gb_body.h). The
@@ -2700,93 +2620,11 @@ GeneratedOutput generate_output(const ir::Program& program,
     std::set<std::string> inlineable_functions;
     
     auto collect_dispatchable_pcs = [&](const ir::Function& func) {
-        std::set<uint16_t> dispatchable_pcs;
-        std::set<uint16_t> available_pcs;
-        std::set<uint32_t> current_function_blocks;
-
-        for (uint32_t block_id : func.block_ids) {
-            auto block_it = program.blocks.find(block_id);
-            if (block_it == program.blocks.end()) {
-                continue;
-            }
-
-            const ir::BasicBlock& block = block_it->second;
-            current_function_blocks.insert((static_cast<uint32_t>(block.bank) << 16) |
-                                           static_cast<uint32_t>(block.start_address));
-        }
-
-        for (uint32_t block_id : func.block_ids) {
-            auto block_it = program.blocks.find(block_id);
-            if (block_it == program.blocks.end()) {
-                continue;
-            }
-
-            const ir::BasicBlock& block = block_it->second;
-            available_pcs.insert(block.start_address);
-            if (func.may_switch_rom_bank) {
-                dispatchable_pcs.insert(block.start_address);
-            } else if (block.is_entry ||
-                       block_has_external_predecessor(block, current_function_blocks)) {
-                dispatchable_pcs.insert(block.start_address);
-            }
-            for (const auto& instr : block.instructions) {
-                if (instr.has_source_location) {
-                    available_pcs.insert(instr.source_address);
-                }
-            }
-        }
-
-        dispatchable_pcs.insert(func.entry_address);
-
-        for (uint32_t block_id : func.block_ids) {
-            auto block_it = program.blocks.find(block_id);
-            if (block_it == program.blocks.end()) {
-                continue;
-            }
-
-            const ir::BasicBlock& block = block_it->second;
-            for (size_t instr_index = 0; instr_index < block.instructions.size(); ++instr_index) {
-                const auto& instr = block.instructions[instr_index];
-                if (!instr.has_source_location) {
-                    continue;
-                }
-
-                uint16_t next_pc = 0;
-                if (instr_index + 1 < block.instructions.size()) {
-                    const auto& next_instr = block.instructions[instr_index + 1];
-                    if (next_instr.has_source_location) {
-                        next_pc = next_instr.source_address;
-                    }
-                } else {
-                    next_pc = block.end_address;
-                }
-
-                if (next_pc == 0) {
-                    continue;
-                }
-                if (!available_pcs.count(next_pc) && next_pc != func.entry_address) {
-                    continue;
-                }
-
-                switch (instr.opcode) {
-                    case ir::Opcode::CALL:
-                    case ir::Opcode::CALL_CC:
-                    case ir::Opcode::RST:
-                    case ir::Opcode::HALT:
-                    case ir::Opcode::STOP:
-                        dispatchable_pcs.insert(next_pc);
-                        break;
-                    default:
-                        break;
-                }
-            }
-        }
-
-        return dispatchable_pcs;
+        return collect_instruction_pcs(program, func.block_ids, func.entry_address);
     };
 
     // Group functions by address for the switch statement.
-    // Only keep normal execution resume points here; single-step can fall back to the interpreter.
+    // All decoded guest instruction boundaries can resume through native labels.
     struct DispatchEntry {
         uint8_t bank;
         std::string name;
@@ -2832,6 +2670,23 @@ GeneratedOutput generate_output(const ir::Program& program,
         if (overlay.bytes.empty()) {
             continue;
         }
+        // The analyzer resolves overlapping RAM aliases in declaration order.
+        // A later incompatible byte image must never authorize that first
+        // image's native body. Leave that variant to accounted discovery.
+        bool conflicting_image = false;
+        for (const auto& earlier : compiled_ram_overlays) {
+            uint32_t first = std::max<uint32_t>(overlay.ram_addr, earlier.ram_addr);
+            uint32_t end = std::min<uint32_t>(overlay.ram_addr + overlay.bytes.size(),
+                                            earlier.ram_addr + earlier.bytes.size());
+            for (uint32_t addr = first; addr < end; ++addr) {
+                if (overlay.bytes[addr - overlay.ram_addr] != earlier.bytes[addr - earlier.ram_addr]) {
+                    conflicting_image = true;
+                    break;
+                }
+            }
+            if (conflicting_image) break;
+        }
+        if (conflicting_image) continue;
 
         CompiledRamOverlay compiled_overlay;
         compiled_overlay.ram_addr = overlay.ram_addr;
@@ -3012,7 +2867,7 @@ GeneratedOutput generate_output(const ir::Program& program,
 
         source_ss << "static uint8_t "
                   << module_link_name(options, "try_dispatch_compiled_ram_overlay")
-                  << "(GBContext* ctx, uint16_t addr, uint8_t bank) {\n";
+                  << "(GBContext* ctx, uint16_t addr) {\n";
         for (size_t overlay_index = 0; overlay_index < compiled_ram_overlays.size(); ++overlay_index) {
             const auto& overlay = compiled_ram_overlays[overlay_index];
             const std::string match_name = module_link_name(
@@ -3029,7 +2884,7 @@ GeneratedOutput generate_output(const ir::Program& program,
             for (uint16_t dispatch_addr : overlay.dispatch_addrs) {
                 source_ss << "            case " << hex_literal(dispatch_addr, 4) << ":\n";
                 source_ss << "                " << dispatch_page_name(static_cast<uint8_t>(dispatch_addr >> 8))
-                          << "(ctx, addr, bank);\n";
+                          << "(ctx, addr, 0); /* Matched RAM uses the canonical RAM body. */\n";
                 source_ss << "                return 1;\n";
             }
             source_ss << "            default:\n";
@@ -3062,10 +2917,13 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "void " << dispatch_function_name(options) << "(GBContext* ctx, uint16_t addr) {\n";
     source_ss << "    ctx->pc = addr;\n";
     source_ss << "    while (!ctx->stopped && !ctx->halted) {\n";
+    if (options.boot_rom) {
+        source_ss << "        if (!ctx->boot_rom_active) return;\n";
+    }
     source_ss << "        addr = ctx->pc;\n";
     source_ss << "        uint8_t bank = ctx->rom_bank;\n";
     source_ss << "        if (addr < 0x4000) bank = 0;\n";
-    source_ss << "        if (game_dispatch_override(ctx, addr)) {\n";
+    source_ss << "        if (" << (options.boot_rom ? "0 && " : "") << "game_dispatch_override(ctx, addr)) {\n";
     source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
     source_ss << "            continue;\n";
     source_ss << "        }\n";
@@ -3078,21 +2936,11 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "        if (gbrt_trace_enabled) {\n";
     source_ss << "            fprintf(stderr, \"[TRACE] Dispatch 0x%04X (Bank %d)\\n\", addr, bank);\n";
     source_ss << "        }\n";
-    source_ss << "        if (gbrt_try_execute_hram_stub(ctx, addr)) {\n";
-    source_ss << "            if (ctx->single_step_mode) break;\n";
-    source_ss << "            continue;\n";
-    source_ss << "        }\n";
-    source_ss << "        if (gbrt_try_execute_highmem_stub(ctx, addr)) {\n";
-    source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
-    source_ss << "            continue;\n";
-    source_ss << "        }\n";
-    source_ss << "        if (gbrt_try_execute_ram_stub(ctx, addr)) {\n";
-    source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
-    source_ss << "            continue;\n";
-    source_ss << "        }\n";
+    // Checked copied-code bodies precede any dynamic decoder. Unmatched RAM
+    // enters the accounted interpreter, whose optional HLE is build-selected.
     if (!compiled_ram_overlays.empty()) {
         source_ss << "        if (" << module_link_name(options, "try_dispatch_compiled_ram_overlay")
-                  << "(ctx, addr, bank)) {\n";
+                  << "(ctx, addr)) {\n";
         source_ss << "            if (ctx->single_step_mode || ctx->stopped) break;\n";
         source_ss << "            continue;\n";
         source_ss << "        }\n";
@@ -3176,7 +3024,7 @@ GeneratedOutput generate_output(const ir::Program& program,
             if (it == program.blocks.end()) continue;
             block_labels_by_addr[it->second.start_address] = it->second.label;
         }
-        std::set<uint16_t> dispatchable_pcs = collect_dispatchable_pcs_for_body(program, body);
+        std::set<uint16_t> dispatchable_pcs = collect_instruction_pcs(program, body.block_ids, body.entry_address);
         auto wrapper_pcs_it = wrapper_dispatchable_pcs_by_body_name.find(body.name);
         if (wrapper_pcs_it != wrapper_dispatchable_pcs_by_body_name.end()) {
             dispatchable_pcs.insert(wrapper_pcs_it->second.begin(), wrapper_pcs_it->second.end());
@@ -3250,6 +3098,9 @@ GeneratedOutput generate_output(const ir::Program& program,
                                     is_last_in_group,
                                     &body,
                                     inlineable_functions);
+                if (options.boot_rom && is_last_in_group) {
+                    func_ss << "    if (!ctx->boot_rom_active) return;\n";
+                }
             }
 
             bool falls_through = true;
@@ -3276,7 +3127,8 @@ GeneratedOutput generate_output(const ir::Program& program,
                 bool fallthrough_exists_in_body = false;
                 for (uint32_t fn_block_id : sorted_block_ids) {
                     auto fn_block_it = program.blocks.find(fn_block_id);
-                    if (fn_block_it != program.blocks.end() &&
+                    if ((fallthrough_addr >= 0x8000) == (body.entry_address >= 0x8000) &&
+                        fn_block_it != program.blocks.end() &&
                         fn_block_it->second.start_address == fallthrough_addr) {
                         fallthrough_exists_in_body = true;
                         break;
@@ -3296,7 +3148,7 @@ GeneratedOutput generate_output(const ir::Program& program,
                     for (const auto& kv : program.functions) {
                         const ir::Function& target_func = kv.second;
                         if (target_func.bank == body.bank &&
-                            target_func.entry_address == fallthrough_addr) {
+                            target_func.entry_address == fallthrough_addr && fallthrough_addr < 0x8000) {
                             func_ss << "    /* fallthrough to function */\n";
 
                             if (inlineable_functions.count(target_func.name)) {
@@ -3440,7 +3292,7 @@ GeneratedOutput generate_output(const ir::Program& program,
     source_ss << "        .cgb_compatibility_mode = false,\n";
     source_ss << "        .cartridge_supports_cgb = " << (rom_is_cgb ? "true" : "false") << ",\n";
     source_ss << "        .cartridge_requires_cgb = " << (rom_is_cgb_only ? "true" : "false") << ",\n";
-    source_ss << "        .enable_bootrom = false,\n";
+    source_ss << "        .enable_bootrom = !GBRT_HLE,\n";
     source_ss << "        .enable_audio = true,\n";
     source_ss << "        .enable_serial = true,\n";
     source_ss << "        .speed_percent = 100,\n";
@@ -3623,6 +3475,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         main_ss << "#include \"gb_body.h\"\n";
     }
     main_ss << "#include \"gbrt.h\"\n";
+    main_ss << "#include \"gb_boot.h\"\n";
     main_ss << "#include \"audio.h\"\n";
     main_ss << "#include \"audio_stats.h\"\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
@@ -4186,6 +4039,7 @@ GeneratedOutput generate_output(const ir::Program& program,
         main_ss << "#endif\n";
     }
     main_ss << "    " << init_call << "(ctx);\n";
+    main_ss << "    if (!gb_boot_start(ctx, boot_rom_path)) { gb_context_destroy(ctx); return 1; }\n";
     main_ss << "    int exit_code = 0;\n";
     main_ss << "\n";
     main_ss << "#ifdef GB_HAS_SDL2\n";
@@ -4204,6 +4058,12 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "    const uint32_t lcd_smooth_slice_cycles = 70224u;\n";
     main_ss << "    bool running = true;\n";
     main_ss << "    while (running) {\n";
+    main_ss << "        if (gb_platform_rewind_frame(ctx)) {\n";
+    main_ss << "            if (!gb_platform_poll_events(ctx)) break;\n";
+    main_ss << "            gb_platform_present_framebuffer(gb_get_framebuffer(ctx));\n";
+    main_ss << "            gb_platform_vsync(70224u);\n";
+    main_ss << "            continue;\n";
+    main_ss << "        }\n";
     main_ss << "        double emu_ms = 0.0;\n";
     main_ss << "        double render_ms = 0.0;\n";
     main_ss << "        double upload_ms = 0.0;\n";
@@ -4411,6 +4271,10 @@ GeneratedOutput generate_output(const ir::Program& program,
 
         cmake_ss << "# Runtime library path (relative to this output directory)\n";
         cmake_ss << "set(GBRT_DIR \"${CMAKE_CURRENT_SOURCE_DIR}/" << runtime_path << "\")\n\n";
+        if (!options.compiler_path.empty()) {
+            cmake_ss << "set(GBRECOMP_HOST_COMPILER \"" << options.compiler_path
+                     << "\" CACHE FILEPATH \"Host gbrecomp for native BIOS compilation\")\n";
+        }
         cmake_ss << "# Locate the recomp-ui launcher checkout (sibling of the gbcrecomp tree).\n";
         cmake_ss << "# The depth of this generated project varies per game, and some link the\n";
         cmake_ss << "# runtime through a symlink (which defeats lexical ../ walking), so probe a\n";

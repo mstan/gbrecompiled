@@ -79,6 +79,12 @@ static void add_annotation_data_range(AnnotationIndex& annotations,
 static AnnotationIndex build_annotation_index(const ROM& rom, const AnalyzerOptions& options) {
     AnnotationIndex annotations;
 
+    if (options.boot_rom && rom.size() == 0x900) {
+        // Hardware mapping, not a hint: this hole exposes the cartridge even
+        // while the CGB BIOS remains mapped on either side of it.
+        add_annotation_data_range(annotations, 0, 0x100, 0x100);
+    }
+
     if (options.add_builtin_rom_annotations && rom.size() >= 0x150) {
         add_annotation_data_range(annotations, 0, 0x0104, 0x30);
         add_annotation_data_range(annotations, 0, 0x0134, 0x1c);
@@ -433,7 +439,6 @@ static int is_likely_valid_code(const ROM& rom, uint8_t bank, uint16_t addr) {
     int instructions_checked = 0;
     const int MAX_CHECK = 64;
     int nop_count = 0;
-    int ld_count = 0;
     int control_flow_count = 0;
     int math_count = 0;
 
@@ -461,7 +466,6 @@ static int is_likely_valid_code(const ROM& rom, uint8_t bank, uint16_t addr) {
             }
         }
 
-        if (instr.reads_memory || instr.writes_memory) ld_count++;
         if (instr.is_call || instr.is_jump || instr.is_return) control_flow_count++;
         
         // Math/Logic
@@ -489,8 +493,6 @@ static int is_likely_valid_code(const ROM& rom, uint8_t bank, uint16_t addr) {
         // Terminator Check
         if (instr.is_return && !instr.is_conditional) {
             if (instructions_checked < 2) return 0; 
-            // Avoid load-only functions discovered via scanning
-            if (ld_count >= instructions_checked && instructions_checked > 2) return 0;
             return (curr + instr.length - addr);
         }
         
@@ -503,8 +505,8 @@ static int is_likely_valid_code(const ROM& rom, uint8_t bank, uint16_t addr) {
         if (curr >= 0x8000) return 0;
         instructions_checked++;
         
-        // High density of loads (indicative of data or large tables)
-        if (instructions_checked >= 15 && ld_count == instructions_checked) return 0;
+        // Load/store-only sequences can be real copy/fill routines. Memory
+        // metadata was previously unset, so load-density rejection was dead.
     }
 
     return 0;
@@ -524,6 +526,8 @@ static bool has_plausible_branch_prefix(const ROM& rom, uint8_t bank, uint16_t a
     int instructions_checked = 0;
     int nop_count = 0;
     bool saw_memory_or_control = false;
+    bool saw_control = false;
+    Instruction previous = {}, before_previous = {};
 
     while (instructions_checked < 8 && curr < 0x8000) {
         Instruction instr = decoder.decode(curr, bank);
@@ -550,6 +554,7 @@ static bool has_plausible_branch_prefix(const ROM& rom, uint8_t bank, uint16_t a
         if (instr.reads_memory || instr.writes_memory || instr.is_call || instr.is_jump || instr.is_return) {
             saw_memory_or_control = true;
         }
+        saw_control |= instr.is_call || instr.is_jump || instr.is_return;
 
         instructions_checked++;
 
@@ -565,10 +570,23 @@ static bool has_plausible_branch_prefix(const ROM& rom, uint8_t bank, uint16_t a
             return saw_memory_or_control;
         }
 
+        before_previous = previous;
+        previous = instr;
         curr += instr.length;
     }
 
-    return instructions_checked >= 5 && saw_memory_or_control;
+    if (instructions_checked >= 5 && saw_control) return true;
+    // A setup prefix may end immediately before its first loop branch. Prove
+    // the adjacent store/DEC B or C/JR NZ back edge; memory operations alone
+    // do not establish a code prefix.
+    if (instructions_checked == 8 && curr <= 0x7ffe &&
+        before_previous.writes_memory && before_previous.opcode == 0x22 &&
+        (previous.opcode == 0x05 || previous.opcode == 0x0d)) {
+        Instruction branch = decoder.decode(curr, bank);
+        return branch.opcode == 0x20 &&
+            static_cast<uint16_t>(curr + branch.length + branch.offset) == before_previous.address;
+    }
+    return false;
 }
 
 static bool is_likely_direct_branch_target(const ROM& rom, uint8_t bank, uint16_t addr) {
@@ -713,11 +731,11 @@ static void load_trace_entry_points(const std::string& path,
 AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     AnalysisResult result;
     result.rom = &rom;
-    result.entry_point = 0x100;
-    const AnnotationIndex annotations = build_annotation_index(rom, options);
+    result.entry_point = options.boot_rom ? 0 : 0x100;
+    AnnotationIndex annotations = build_annotation_index(rom, options);
     
     // Add standard GameBoy entry points
-    result.interrupt_vectors = {0x40, 0x48, 0x50, 0x58, 0x60};  // Interrupt vectors
+    if (!options.boot_rom) result.interrupt_vectors = {0x40, 0x48, 0x50, 0x58, 0x60};
     
     Decoder decoder(rom);
     
@@ -734,13 +752,13 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     }
     
     // Entry point is always a function (bank 0)
-    result.call_targets.insert(make_address(0, 0x100));
-    result.strong_call_targets.insert(make_address(0, 0x100));
+    result.call_targets.insert(make_address(0, result.entry_point));
+    result.strong_call_targets.insert(make_address(0, result.entry_point));
     
     // RST vectors
     bool skip_rst30 = rst28_uses_rst30(rom);
     for (uint16_t vec : {0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38}) {
-        if (is_rst_padding(rom, vec)) continue;
+        if (options.boot_rom || is_rst_padding(rom, vec)) continue;
         if (vec == 0x30 && skip_rst30) continue;
         result.call_targets.insert(make_address(0, vec));
         result.strong_call_targets.insert(make_address(0, vec));
@@ -842,6 +860,8 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
     
     // Multi-pass analysis
     bool scanning_pass = false;
+    std::set<uint32_t> recovered_pointer_tables;
+    std::set<uint32_t> aggressive_regions;
 
     // Explore all reachable code
     while (true) {
@@ -914,8 +934,6 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         }
         if (rom_offset >= rom.size()) continue;
         
-        visited.insert(addr);
-        
         // Decode instruction
         Instruction instr;
         if (overlay) {
@@ -927,6 +945,11 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         } else {
             instr = decoder.decode(offset, bank);
         }
+        // Copied spans may contain bytes after RET. A reachable instruction
+        // still needs all of its operand bytes inside the proven RAM image.
+        if (overlay && static_cast<uint32_t>(offset) + instr.length >
+                       static_cast<uint32_t>(overlay->ram_addr) + overlay->size) continue;
+        visited.insert(addr);
 
         /* -------------------------------------------------------------
          * Constant Propagation (A and HL)
@@ -1342,6 +1365,72 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
         }
     } // End work_queue loop
 
+    // An indexed pointer load may call JP HL through a one-instruction RST
+    // trampoline. Recover only tables whose full extent is given by a decoded
+    // unconditional branch immediately around them; never scan to a guessed end.
+    bool recovered_new_targets = false;
+    for (const Instruction& load : result.instructions) {
+        if (load.opcode != 0x21 || load.address > 0x7ff8) continue;
+        uint32_t load_key = make_address(load.bank, load.address);
+        if (recovered_pointer_tables.count(load_key)) continue;
+        auto instruction = [&](uint16_t address) { return result.get_instruction(load.bank, address); };
+        const Instruction* add = instruction(load.address + 3);
+        const Instruction* low = instruction(load.address + 4);
+        const Instruction* high = instruction(load.address + 5);
+        const Instruction* finish = instruction(load.address + 6);
+        const Instruction* jump = instruction(load.address + 7);
+        if (!add || (add->opcode != 0x09 && add->opcode != 0x19) ||
+            !low || low->opcode != 0x2a || !high || high->opcode != 0x66 ||
+            !finish || finish->opcode != 0x6f || !jump) continue;
+        if (jump->opcode != 0xe9 && !(jump->type == InstructionType::RST &&
+            rom.read_banked(0, jump->rst_vector) == 0xe9)) continue;
+        uint16_t base = load.imm16;
+        if (base >= 0x8000 || (base >= 0x4000 && !load.bank)) continue;
+        uint8_t table_bank = base < 0x4000 ? 0 : load.bank;
+        uint32_t end = 0;
+        const Instruction* skip = base >= 2 ? result.get_instruction(table_bank, base - 2) : nullptr;
+        if (skip && skip->opcode == 0x18)
+            end = base + static_cast<int8_t>(rom.read_banked(table_bank, base - 1));
+        else {
+            skip = base >= 3 ? result.get_instruction(table_bank, base - 3) : nullptr;
+            if (skip && skip->opcode == 0xc3) end = skip->imm16;
+        }
+        uint32_t limit = base < 0x4000 ? 0x4000 : 0x8000;
+        if (end <= base || end > limit || ((end - base) & 1)) continue;
+        std::vector<uint32_t> targets;
+        bool valid = true;
+        for (uint32_t pos = base; pos < end; pos += 2) {
+            if (annotations.has_function(table_bank, static_cast<uint16_t>(pos)) ||
+                annotations.has_function(table_bank, static_cast<uint16_t>(pos + 1))) { valid = false; break; }
+            uint16_t target = rom.read_banked(table_bank, pos) |
+                (rom.read_banked(table_bank, pos + 1) << 8);
+            uint8_t target_bank = target < 0x4000 ? 0 : load.bank;
+            if (target >= 0x8000 || (target >= 0x4000 && !target_bank) ||
+                (target_bank == table_bank && target >= base && target < end) ||
+                annotations.contains_data(target_bank, target) || is_data_region(options, target_bank, target) ||
+                decoder.decode(target, target_bank).type == InstructionType::UNDEFINED) { valid = false; break; }
+            targets.push_back(make_address(target_bank, target));
+        }
+        if (!valid) continue;
+        recovered_pointer_tables.insert(load_key);
+        add_annotation_data_range(annotations, table_bank, base, static_cast<uint16_t>(end - base));
+        for (uint32_t target : targets) {
+            result.call_targets.insert(target);
+            result.branch_entry_targets.insert(target);
+            result.computed_jump_targets.insert(target);
+            result.label_addresses.insert(target);
+            if (!visited.count(target)) {
+                uint8_t bank = get_bank(target);
+                work_queue.push({target, -1, -1, -1, -1, -1, -1, -1, -1, static_cast<uint8_t>(bank ? bank : 1)});
+                recovered_new_targets = true;
+            }
+        }
+        if (options.verbose) std::cout << "[ANALYSIS] Branch-bounded pointer table "
+            << std::hex << (int)table_bank << ":" << base << ".." << end << std::dec
+            << " entries=" << targets.size() << "\n";
+    }
+    if (recovered_new_targets) continue;
+
     // Aggressive Code Scanning
     if (options.aggressive_scan && !scanning_pass) {
         scanning_pass = true; // prevent infinite loops if we find nothing new
@@ -1357,8 +1446,6 @@ AnalysisResult analyze(const ROM& rom, const AnalyzerOptions& options) {
 
         // Track regions found by aggressive scanning to avoid overlapping detection in future passes
         // (Since operands are not marked as 'visited' by the main analysis)
-        static std::set<uint32_t> aggressive_regions;
-
         for (uint8_t bank : banks_to_scan) {
             uint16_t start_addr = (bank == 0) ? 0x0000 : 0x4000;
             uint16_t end_addr = (bank == 0) ? 0x3FFF : 0x7FFF;

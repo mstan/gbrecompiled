@@ -211,7 +211,50 @@ The generated code links against `libgbrt`, which provides:
 | `--verbose` | Show detailed analysis statistics |
 | `--use-trace <file>` | Seed analyzer with runtime trace |
 
-At runtime, interpreter fallbacks are logged to `interp_fallbacks.log` with bank and address. Add these addresses to your TOML config to eliminate fallbacks in the next build.
+At runtime, interpreter fallbacks are logged to `interp_fallbacks.log` with bank and address. Investigate discovery and native resume coverage before changing configuration; an interior resume PC belongs to its existing function. Interpreter activity is discovery evidence, not a static-coverage pass.
+
+### BIOS implementations and rewind
+
+BIOS startup is a **developer build choice**. The default
+`-DGBRT_BOOT_IMPLEMENTATION=LLE` compiles the supplied real DMG and CGB firmware
+through the SM83 recompiler and starts it at PC zero. Put private `dmg_boot.bin`
+(256 bytes) and `cgb_boot.bin` (2304 bytes) in `boot_roms/`, or configure
+`-DGBRECOMP_BIOS_DIR=/your/private/bios`. Select the matching firmware in the
+launcher's System panel, supply `--boot-rom PATH`, or
+place the matching image under `bios/` in the writable game directory. The
+picker remembers paths separately in `bios_dmg.cfg` and `bios_cgb.cfg`, so
+switching between a DMG game and its color enhancement keeps both selections.
+The
+runtime verifies it against the firmware compiled into the native body. Missing
+or different firmware is an error. Raw BIOS files are neither embedded nor
+redistributed.
+
+`-DGBRT_BOOT_IMPLEMENTATION=HLE` retains the existing post-boot initialization
+behind the same startup interface. This choice has no runtime toggle. Generated
+projects record their host producer for native firmware generation; cross
+builds can set `GBRECOMP_HOST_COMPILER` to a separately built host `gbrecomp`.
+`GBRT_RAM_FALLBACK_IMPLEMENTATION=LLE|HLE` separately selects the uncovered-RAM
+reference interpreter or the historical native shortcuts (default LLE). Checked
+AOT copied-code bodies run first in either build. Any remaining fallback is
+accounted and does not qualify as fully static. Other devices continue to use
+their existing hardware implementations.
+
+For coverage qualification, `GBRECOMP_STRICT_STATIC=1` exits on the first
+dispatch miss or interpreter entry. It records the counters before failing;
+ordinary discovery runs retain the interpreter bridge and always-on site data.
+Automated launches should set `GBRECOMP_ROM_PATH` to the matching private ROM.
+The directory launcher prefills the selected cart, and unattended runs with no
+matching ROM fail with a diagnostic instead of opening a native file dialog.
+
+File states and rewind now share a versioned, compressed memory codec and the
+pinned `external/rbengine` history library. Initialize submodules before building.
+Hold **R** to rewind; the binding can be changed in the controls menu.
+History captures every three completed run frames and is bounded by 600 records
+and 64 MiB. Rewinding discards the abandoned future when play resumes. Live cable
+sessions cannot rewind. ROM, BIOS, hardware, implementation and ABI checks reject
+incompatible states; the previous version-1 raw struct files are rejected.
+Game enhancements that affect future execution register their state through
+`GBSnapshotExtension`; host pointers and lifetime coverage counters stay live.
 
 A TCP debug server listens on `localhost:4370` for runtime inspection and control:
 register state, memory, the always-on frame ring, watchpoints, frame stepping,

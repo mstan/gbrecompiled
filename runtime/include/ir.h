@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +44,9 @@ typedef struct GBIRState GBIRState;
 GBIRState* gb_ir_create(void);
 void       gb_ir_destroy(GBIRState* ir);
 void       gb_ir_reset(GBIRState* ir);
+size_t gb_ir_state_size(void);
+bool gb_ir_save_state(const GBIRState* ir, void* data, size_t size);
+bool gb_ir_load_state(GBIRState* ir, const void* data, size_t size);
 
 /* Cart-side: hooks for IO read/write at $FF56. */
 void    gb_ir_write_rp(GBIRState* ir, uint8_t value);

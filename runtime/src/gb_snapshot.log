@@ -1,0 +1,8 @@
+[gb_snapshot_serialize / gb_snapshot_deserialize]
+Ghidra: Host snapshot integration; no ROM address or hardware behavior inferred.
+Rationale: One compressed, versioned codec serves disk and rb-engine. Complete
+validation and staging precede mutation. The boot mapping, full serial state,
+SGB receiver/border/freeze image and IR registers join the existing CPU, memory,
+PPU, APU and RTC inventory. ROM/BIOS SHA-256, hardware, build profile and ABI gates
+reject incompatible blobs. Host pointers and process coverage counters stay live.
+Version 1 states are deliberately rejected, not silently misinterpreted.

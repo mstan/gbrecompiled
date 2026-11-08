@@ -3,6 +3,7 @@
 #include "ppu.h"
 #include "ir.h"
 #include "sgb.h"
+#include "gb_widescreen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +80,24 @@ int main(void) {
     ctx->boot_rom_sha256[0] ^= 1;
     CHECK(ctx->wram[12] == 77);
     free(saved);
+
+    /* Expanded RAM and input replay share the validated codec; restoring must
+     * retain the live rb-engine allocation and host mappings. */
+    CHECK(gb_context_set_wram_extension(ctx, 3, 0x1000, 0x2000));
+    ctx->wram_ext[0x1234] = 0xa7;
+    ctx->frame_hold.suspended = 1;
+    ctx->frame_hold.holds = 19;
+    g_gbws_oam_x16[3] = -27;
+    void* slot = malloc(gb_state_size(ctx));
+    CHECK(slot && gb_state_save(ctx, slot));
+    ctx->wram_ext[0x1234] = 0;
+    ctx->frame_hold.suspended = 0;
+    g_gbws_oam_x16[3] = 0;
+    CHECK(gb_state_load(ctx, slot));
+    CHECK(ctx->wram_ext[0x1234] == 0xa7 && ctx->frame_hold.suspended);
+    CHECK(ctx->frame_hold.holds == 19 && g_gbws_oam_x16[3] == -27);
+    CHECK(ctx->wram_ext_mapped == 0x1000 && ctx->wram_ext_bank == 3);
+    free(slot);
 
     ctx->boot_rom_active = 0;
     ctx->serial_transfer.deferred = 0;

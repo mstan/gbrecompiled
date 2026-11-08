@@ -533,7 +533,6 @@ static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Select",
     "Start",
     "Fast Forward (Hold)",
-    "Rewind (Hold)",
     "Fast Forward",   /* a toggle; "toggle_max_speed" in prefs, its old name */
     "Save State",
     "Load State",
@@ -7426,7 +7425,6 @@ static bool rewind_held(void) {
 static void rewind_free(void) {
     if (g_registered_ctx) gb_rewind_clear(g_registered_ctx);
 }
-static void rewind_end_reversed_frame(GBContext*) {}
 static bool rewind_step_back(void) { return false; } /* host loop owns restores */
 static void rewind_push(void) {} /* completed-frame presenter owns captures */
 static const char* rewind_status_text(void) {

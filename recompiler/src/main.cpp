@@ -1414,8 +1414,14 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     gen_opts.bss_rom_data = options.bss_rom_data;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
-    auto output = gbrecomp::codegen::generate_output(
-        ir_program, rom.data(), rom.size(), gen_opts);
+    gbrecomp::codegen::GeneratedOutput output;
+    try {
+        output = gbrecomp::codegen::generate_output(
+            ir_program, rom.data(), rom.size(), gen_opts);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
 
     if (!gbrecomp::codegen::write_output(output, output_dir.string())) {
         std::cerr << "Error: Failed to write output files for " << rom_path << "\n";

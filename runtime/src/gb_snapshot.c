@@ -30,6 +30,9 @@
 
 GBGameState gb_game_state;
 static const GBSnapshotExtension* state_extension;
+bool gb_snapshot_has_opaque_game_state(void) {
+    return state_extension != NULL || gb_game_state.size != 0;
+}
 bool gb_snapshot_set_extension(const GBSnapshotExtension* extension) {
     if (extension && (!extension->id || !extension->id[0] || strlen(extension->id) >= 64 ||
         !extension->size || !extension->save || !extension->validate || !extension->restore)) return false;

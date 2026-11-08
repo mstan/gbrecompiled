@@ -5303,10 +5303,14 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                 save_runtime_preferences();
             }
             int preempt_frames = preemptive_frames();
+            const bool preempt_eligible = !gb_snapshot_has_opaque_game_state();
+            ImGui::BeginDisabled(!preempt_eligible);
             if (ImGui::SliderInt("Preemptive Frames", &preempt_frames, 0, GB_PREEMPT_MAX_FRAMES)) {
                 g_preemptive_frames_pref = preempt_frames;
                 save_runtime_preferences();
             }
+            ImGui::EndDisabled();
+            if (!preempt_eligible) ImGui::TextDisabled("Unavailable for this game's current module.");
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Replays each input change into this many past frames, as RetroArch\n"
                                   "does, so the game responds that many frames sooner. Set it no\n"
@@ -7361,7 +7365,14 @@ static bool preempt_run_frame(GBContext* ctx) {
 static void preempt_before_frame(void) {
     GBContext* ctx = g_registered_ctx;
     /* A scripted input run expects each input on its own frame. */
-    const int frames = (ctx && g_script_count == 0) ? preemptive_frames() : 0;
+    const bool eligible = !gb_snapshot_has_opaque_game_state();
+    const int requested = preemptive_frames();
+    static bool warned_opaque_state = false;
+    if (requested && !eligible && !warned_opaque_state) {
+        fprintf(stderr, "[preempt] unavailable: game-defined frame/snapshot state has not qualified replay\n");
+        warned_opaque_state = true;
+    }
+    const int frames = (ctx && g_script_count == 0 && eligible) ? requested : 0;
     if (!frames) {
         if (g_preempt.buffer) preempt_free();
         return;

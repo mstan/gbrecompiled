@@ -20,6 +20,8 @@ typedef struct {
     void (*restore)(struct GBContext*, const void*, size_t);
 } GBSnapshotExtension;
 bool gb_snapshot_set_extension(const GBSnapshotExtension* extension);
+/* Opaque game/frame state has no qualified per-replay callback contract. */
+bool gb_snapshot_has_opaque_game_state(void);
 
 /* One compressed, versioned codec for files and rb-engine. Caller frees data.
  * Load validates the entire blob before committing; host pointers, transports

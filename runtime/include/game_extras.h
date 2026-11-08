@@ -23,9 +23,12 @@ struct GBContext;
  * Good place to call gb_debug_server_init(). */
 void game_on_init(struct GBContext *ctx);
 
-/* Called once per frame, before game logic runs.
+/* Called once per visible host frame, before game logic runs.
  * Good place to call gb_debug_server_poll() and
- * gb_debug_server_wait_if_paused(). */
+ * gb_debug_server_wait_if_paused(). These host hooks are not called during
+ * internal preemptive replay. Guest-affecting frame bookkeeping must register
+ * GBGameState or a GBSnapshotExtension; those games are ineligible for preempt
+ * until a per-replay simulation-hook contract is qualified. */
 void game_on_frame(struct GBContext *ctx);
 
 /* Called after VBlank / frame completion.

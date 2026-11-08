@@ -69,6 +69,7 @@ bool g_disk_cache = true;
 
 /* Probe child exit code for "loaded, but GL rejected a pass at draw time". */
 constexpr int kProbeDrewNothing = 4;
+constexpr int kProbeLoadFailed = 5;
 
 /* Compile mode of the running chain, and what ANGLE's D3DCompile calls get
  * (read on ANGLE's compile threads). They differ only while a load runs. */
@@ -828,6 +829,10 @@ GBLrsProbeResult gb_lrs_probe_poll(void) {
      * small codes mean it never reached the probe (no window, no librashader),
      * which proves nothing either way. NTSTATUS errors (0xC...) are crashes. */
     if (code == 0) return unoptimized ? GB_LRS_PROBE_OK_UNOPTIMIZED : GB_LRS_PROBE_OK;
+    if (code == kProbeLoadFailed) {
+        g_error = path + " could not be loaded in a test run, so it was not loaded";
+        return GB_LRS_PROBE_FAILED;
+    }
     if (code == kProbeDrewNothing) {
         g_error = path + " cannot be drawn on this renderer (GL rejected one of its passes in a test run), "
                          "so it was not loaded";
@@ -882,6 +887,10 @@ GBLrsProbeResult gb_lrs_probe_poll(void) {
      * codes mean it never reached the probe (no window, no librashader),
      * which proves nothing either way. */
     if (code == 0) return GB_LRS_PROBE_OK;
+    if (code == kProbeLoadFailed) {
+        g_error = path + " could not be loaded in a test run, so it was not loaded";
+        return GB_LRS_PROBE_FAILED;
+    }
     if (code == kProbeDrewNothing) {
         g_error = path + " cannot be drawn on this renderer (GL rejected one of its passes in a test run), "
                          "so it was not loaded";
@@ -930,7 +939,7 @@ int gb_lrs_probe_child(const char* preset) {
     fprintf(stderr, "[SHADER] probe %s: %s\n", !loaded ? "load error" : drew ? "ok" : "drew nothing",
             loaded ? path : gb_lrs_error());
     fflush(stderr);
-    return drew ? 0 : kProbeDrewNothing;
+    return !loaded ? kProbeLoadFailed : drew ? 0 : kProbeDrewNothing;
 }
 
 void gb_lrs_shutdown(void) {

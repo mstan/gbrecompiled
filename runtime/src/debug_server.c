@@ -478,10 +478,11 @@ static void handle_run_status(int id, const char* json)
 {
     (void)json;
     send_fmt("{\"id\":%d,\"ok\":true,\"running\":%s,\"paused\":%s,"
-             "\"frame\":%llu,\"guest_frame\":%llu,\"boot_active\":%s,\"boot\":\"%s\"}",
+             "\"frame\":%llu,\"guest_frame\":%llu,\"preempt_replays\":%llu,\"boot_active\":%s,\"boot\":\"%s\"}",
              id, s_ctx && !s_paused ? "true" : "false", s_paused ? "true" : "false",
              (unsigned long long)s_frame_count,
              (unsigned long long)(s_ctx ? s_ctx->completed_frames : 0),
+             (unsigned long long)gb_platform_preempt_replays(),
              s_ctx && s_ctx->boot_rom_active ? "true" : "false", gb_boot_implementation());
 }
 

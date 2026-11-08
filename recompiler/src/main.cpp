@@ -1420,7 +1420,7 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
             ir_program, rom.data(), rom.size(), gen_opts);
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n';
-        return 1;
+        return false;
     }
 
     if (!gbrecomp::codegen::write_output(output, output_dir.string())) {
@@ -1461,7 +1461,13 @@ static int compile_boot_rom(int argc, char* argv[]) {
     options.emit_main_entry_point = false;
     options.emit_cmake = false;
     options.parallel_codegen_jobs = 1;
-    auto output = gbrecomp::codegen::generate_output(program, rom->data(), rom->size(), options);
+    gbrecomp::codegen::GeneratedOutput output;
+    try {
+        output = gbrecomp::codegen::generate_output(program, rom->data(), rom->size(), options);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
     if (!gbrecomp::codegen::write_output(output, options.output_dir)) return 1;
     // A predictable compilation output lets runtime CMake depend on the host
     // producer without a second configure for a variable source-list pass.
@@ -2104,8 +2110,14 @@ int main(int argc, char* argv[]) {
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
 
-    auto output = gbrecomp::codegen::generate_output(
-        ir_program, rom.data(), rom.size(), gen_opts);
+    gbrecomp::codegen::GeneratedOutput output;
+    try {
+        output = gbrecomp::codegen::generate_output(
+            ir_program, rom.data(), rom.size(), gen_opts);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
     
     // Create output directory
     fs::path out_path = output_dir;

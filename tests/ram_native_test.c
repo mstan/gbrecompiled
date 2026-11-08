@@ -56,15 +56,19 @@ int main(void) {
     if (!GBRT_RAM_HLE) CHECK(changed->total_interpreter_instructions>0);
     gb_context_destroy(changed);
     GBContext* variant=machine(60,0xff80,false,false);
-    variant->hram[2]=0xc3; /* A second byte image cannot authorize the first IR body. */
+    /* The source-page immediate is live data, not an instruction byte. A
+     * patched page must use that page while retaining native execution. */
+    variant->hram[2]=0xc3;
+    for (unsigned i=0;i<160;++i) gb_write8(variant,(uint16_t)(0xc300+i),(uint8_t)(i^0x5a));
     gb_dispatch(variant,variant->pc);
-    CHECK(variant->total_dispatch_fallbacks>0 && variant->halted && variant->pc==0x101);
+    CHECK(variant->total_dispatch_fallbacks==0 && variant->halted && variant->pc==0x101);
+    for (unsigned i=0;i<160;++i) CHECK(variant->oam[i]==(uint8_t)(i^0x5a));
     gb_context_destroy(variant);
     GBContext* truncated=machine(1,0xff90,false,false);
     truncated->hram[0x10]=0x3e;truncated->hram[0x11]=0x23;truncated->hram[0x12]=0x76;
     gb_dispatch(truncated,truncated->pc);
     CHECK(truncated->total_dispatch_fallbacks>0 && truncated->halted && truncated->a==0x23);
     gb_context_destroy(truncated);
-    puts("native copied RAM entry/resume works across caller banks; changed bytes reject AOT body");
+    puts("native copied RAM entry/resume works across caller banks; live DMA page is honored and changed opcodes reject AOT body");
     return 0;
 }

@@ -52,6 +52,9 @@ add_library(gbrt STATIC
     src/cheats.c
     src/relay_client.c
     src/shader_pipeline.cpp
+    src/librashader_chain.cpp
+    src/slang_preset.cpp
+    src/gl_program_cache.cpp
     src/gb_printer.c
     src/gb_asset_loader.c
     src/gb_sha1.c
@@ -114,6 +117,12 @@ elseif(GBRT_BOOT_IMPLEMENTATION STREQUAL "LLE")
     endforeach()
 else()
     message(FATAL_ERROR "GBRT_BOOT_IMPLEMENTATION must be LLE or HLE")
+endif()
+
+# librashader (src/librashader_chain.cpp) is opened at run time, never linked:
+# only the loader's dlopen needs a library, and only off Windows.
+if(CMAKE_DL_LIBS)
+    target_link_libraries(gbrt PUBLIC ${CMAKE_DL_LIBS})
 endif()
 
 # Online netplay relay client (rendezvous-server HTTP, via libcurl). OFF by
@@ -283,9 +292,10 @@ if(SDL2_FOUND)
     endif()
 endif()
 
-# Winsock for debug server TCP; comdlg32 for the launcher's file picker (GetOpenFileName)
+# Winsock for debug server TCP; comdlg32 for the launcher's file picker (GetOpenFileName);
+# shell32 for the Recycle Bin (gb_host_trash)
 if(WIN32)
-    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32)
+    target_link_libraries(gbrt PUBLIC ws2_32 comdlg32 shell32)
 endif()
 
 # ---------------------------------------------------------------------------

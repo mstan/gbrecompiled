@@ -1414,8 +1414,14 @@ static bool generate_multi_rom_module(const fs::path& rom_path,
     gen_opts.bss_rom_data = options.bss_rom_data;
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
-    auto output = gbrecomp::codegen::generate_output(
-        ir_program, rom.data(), rom.size(), gen_opts);
+    gbrecomp::codegen::GeneratedOutput output;
+    try {
+        output = gbrecomp::codegen::generate_output(
+            ir_program, rom.data(), rom.size(), gen_opts);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return false;
+    }
 
     if (!gbrecomp::codegen::write_output(output, output_dir.string())) {
         std::cerr << "Error: Failed to write output files for " << rom_path << "\n";
@@ -1455,7 +1461,13 @@ static int compile_boot_rom(int argc, char* argv[]) {
     options.emit_main_entry_point = false;
     options.emit_cmake = false;
     options.parallel_codegen_jobs = 1;
-    auto output = gbrecomp::codegen::generate_output(program, rom->data(), rom->size(), options);
+    gbrecomp::codegen::GeneratedOutput output;
+    try {
+        output = gbrecomp::codegen::generate_output(program, rom->data(), rom->size(), options);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
     if (!gbrecomp::codegen::write_output(output, options.output_dir)) return 1;
     // A predictable compilation output lets runtime CMake depend on the host
     // producer without a second configure for a variable source-list pass.
@@ -1969,6 +1981,18 @@ int main(int argc, char* argv[]) {
                   << dr.start << "-0x" << dr.end << std::dec << "\n";
     }
 
+    for (const auto& ic : game_config.inline_calls) {
+        analyze_opts.inline_calls.push_back(
+            {ic.routine, ic.no_return, ic.far_target, ic.arg_bytes, ic.record_bytes});
+        std::cout << "Config inline call: 0x" << std::hex << ic.routine << std::dec
+                  << (ic.far_target ? (ic.no_return ? " (far jump)" : " (far call)") : " (inline args)")
+                  << "\n";
+    }
+    analyze_opts.jump_table_rsts = game_config.jump_table_rsts;
+    analyze_opts.scan_inline_calls = game_config.scan_inline_calls.value_or(false);
+    analyze_opts.scan_banks = game_config.scan_banks;
+    analyze_opts.pointer_scan = game_config.pointer_scan.value_or(true);
+
     // Add HRAM overlays from TOML config file (in addition to auto-detected ones)
     for (const auto& ov : config_hram_overlays) {
         gbrecomp::AnalyzerOptions::RamOverlay overlay;
@@ -2052,6 +2076,8 @@ int main(int argc, char* argv[]) {
      *                             another body in one executable
      *   [options] multi_body      PRIMARY project of a multi-body executable:
      *                             main() boots whichever body the game picks */
+    gen_opts.exhaustive_rom = game_config.exhaustive_rom.value_or(false);
+    gen_opts.resumable_instructions = game_config.resumable_instructions.value_or(false);
     gen_opts.symbol_prefix = game_config.symbol_prefix;
     gen_opts.patch_file = game_config.patch_file;
     gen_opts.multi_body = game_config.multi_body.value_or(false);
@@ -2084,8 +2110,14 @@ int main(int argc, char* argv[]) {
     append_codegen_ram_overlays(rom, analyze_opts.ram_overlays, gen_opts);
 
 
-    auto output = gbrecomp::codegen::generate_output(
-        ir_program, rom.data(), rom.size(), gen_opts);
+    gbrecomp::codegen::GeneratedOutput output;
+    try {
+        output = gbrecomp::codegen::generate_output(
+            ir_program, rom.data(), rom.size(), gen_opts);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
     
     // Create output directory
     fs::path out_path = output_dir;

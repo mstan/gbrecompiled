@@ -81,6 +81,12 @@ typedef struct {
     uint64_t total_lcd_transition_count;
     uint64_t total_lcd_off_span_count;
     uint64_t completed_frames;
+    uint8_t hold_active, hold_released, hold_suspended;
+    uint32_t hold_cycles;
+    uint64_t hold_holds, hold_limit_hits;
+    int16_t oam_x16[40], shadow_x16[40], obj_true_raw16;
+    uint8_t obj_rel8, obj_ctx_valid;
+    uint16_t shadow_oam_page;
 } GBSavestateCoreState;
 
 static void gbrt_capture_core_state(const GBContext* ctx, GBSavestateCoreState* state) {
@@ -146,6 +152,19 @@ static void gbrt_capture_core_state(const GBContext* ctx, GBSavestateCoreState* 
     state->total_lcd_transition_count = ctx->total_lcd_transition_count;
     state->total_lcd_off_span_count = ctx->total_lcd_off_span_count;
     state->completed_frames = ctx->completed_frames;
+    state->hold_active = ctx->frame_hold.active;
+    state->hold_released = ctx->frame_hold.released;
+    state->hold_suspended = ctx->frame_hold.suspended;
+    state->hold_cycles = ctx->frame_hold.cycles;
+    state->hold_holds = ctx->frame_hold.holds;
+    state->hold_limit_hits = ctx->frame_hold.limit_hits;
+    memcpy(state->oam_x16, g_gbws_oam_x16, sizeof(state->oam_x16));
+    memcpy(state->shadow_x16, g_gbws_shadow_x16, sizeof(state->shadow_x16));
+    state->obj_true_raw16 = g_gbws_obj_true_raw16;
+    state->obj_rel8 = g_gbws_obj_rel8;
+    state->obj_ctx_valid = g_gbws_obj_ctx_valid;
+    state->shadow_oam_page = g_gbws_shadow_oam_page;
+
 }
 
 static void gbrt_restore_core_state(GBContext* ctx, const GBSavestateCoreState* state) {
@@ -210,4 +229,17 @@ static void gbrt_restore_core_state(GBContext* ctx, const GBSavestateCoreState* 
     ctx->total_lcd_transition_count = state->total_lcd_transition_count;
     ctx->total_lcd_off_span_count = state->total_lcd_off_span_count;
     ctx->completed_frames = state->completed_frames;
+    ctx->frame_hold.active = state->hold_active;
+    ctx->frame_hold.released = state->hold_released;
+    ctx->frame_hold.suspended = state->hold_suspended;
+    ctx->frame_hold.cycles = state->hold_cycles;
+    ctx->frame_hold.holds = state->hold_holds;
+    ctx->frame_hold.limit_hits = state->hold_limit_hits;
+    memcpy(g_gbws_oam_x16, state->oam_x16, sizeof(state->oam_x16));
+    memcpy(g_gbws_shadow_x16, state->shadow_x16, sizeof(state->shadow_x16));
+    g_gbws_obj_true_raw16 = state->obj_true_raw16;
+    g_gbws_obj_rel8 = state->obj_rel8;
+    g_gbws_obj_ctx_valid = state->obj_ctx_valid;
+    g_gbws_shadow_oam_page = state->shadow_oam_page;
+
 }

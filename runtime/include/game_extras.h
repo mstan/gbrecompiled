@@ -23,9 +23,12 @@ struct GBContext;
  * Good place to call gb_debug_server_init(). */
 void game_on_init(struct GBContext *ctx);
 
-/* Called once per frame, before game logic runs.
+/* Called once per visible host frame, before game logic runs.
  * Good place to call gb_debug_server_poll() and
- * gb_debug_server_wait_if_paused(). */
+ * gb_debug_server_wait_if_paused(). These host hooks are not called during
+ * internal preemptive replay. Guest-affecting frame bookkeeping must register
+ * GBGameState or a GBSnapshotExtension; those games are ineligible for preempt
+ * until a per-replay simulation-hook contract is qualified. */
 void game_on_frame(struct GBContext *ctx);
 
 /* Called after VBlank / frame completion.
@@ -118,6 +121,15 @@ const char *game_get_name(void);
  * color-capable and colorizable cart uses it). DMG-only titles (Tetris, Super
  * Mario Land) override this to "gb" in their extras.c. */
 const char *game_get_platform(void);
+
+/* Default hardware mode for this cart before any saved per-game choice, as a
+ * GBHardwareModePref value (gbrt.h). A saved menu choice still wins.
+ * Default: GB_HARDWARE_MODE_AUTO (derive from the cart header). */
+int game_default_hardware_mode(void);
+
+/* Preemptive frames (platform_sdl.h) for this game before the player sets
+ * any. Default: 0 (off). */
+int game_default_preemptive_frames(void);
 
 /* Handle a CLI argument. Return 1 if consumed, 0 to ignore. */
 int game_handle_arg(const char *arg, const char *next_arg);

@@ -16,6 +16,7 @@
  */
 
 #include "cheats.h"
+#include "gb_host_paths.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -198,11 +199,14 @@ static char* strip_quotes(char* s) {
     return s;
 }
 
+/* Each file's cheatN go after the cheats already loaded, so two files
+ * don't overwrite each other's. */
 static void parse_cht_file(const char* path) {
     FILE* f = fopen(path, "r");
     if (!f) return;
+    const long base = g_cheat_count;
     char line[2048];
-    while (fgets(line, sizeof(line), f) && g_cheat_count < GB_CHEAT_MAX_ENTRIES) {
+    while (fgets(line, sizeof(line), f)) {
         char* eq = strchr(line, '=');
         if (!eq) continue;
         *eq = '\0';
@@ -212,8 +216,9 @@ static void parse_cht_file(const char* path) {
         const char* num_start = key + 5;
         char* num_end = NULL;
         long idx = strtol(num_start, &num_end, 10);
-        if (idx < 0 || idx >= GB_CHEAT_MAX_ENTRIES || !num_end || *num_end != '_')
-            continue;
+        if (idx < 0 || !num_end || *num_end != '_') continue;
+        idx += base;
+        if (idx >= GB_CHEAT_MAX_ENTRIES) continue;
         const char* field = num_end + 1;
         /* Auto-grow the cheat array up to the highest seen index. */
         if (idx >= g_cheat_count) {
@@ -236,46 +241,96 @@ static void parse_cht_file(const char* path) {
          * persisted (if at all) via the platform's prefs. */
     }
     fclose(f);
-}
-
-
-int gb_cheats_load(const char* game_id) {
-    g_cheat_count = 0;
-    memset(g_cheats, 0, sizeof(g_cheats));
-    if (!game_id) return 0;
-
-    char dir[512];
-    snprintf(dir, sizeof(dir), "cheats/%s", game_id);
-    DIR* d = opendir(dir);
-    if (!d) return -1;
-    struct dirent* ent;
-    while ((ent = readdir(d)) != NULL) {
-        size_t nl = strlen(ent->d_name);
-        if (nl < 4) continue;
-        const char* ext = ent->d_name + nl - 4;
-        bool is_cht = (ext[0]=='.' && (ext[1]=='c'||ext[1]=='C')
-                                   && (ext[2]=='h'||ext[2]=='H')
-                                   && (ext[3]=='t'||ext[3]=='T'));
-        if (!is_cht) continue;
-        char path[1024];
-        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
-        parse_cht_file(path);
-    }
-    closedir(d);
 
     /* Discard trailing empty entries that came from index-only
      * lines (e.g. a stray `cheat999_enable=false` past the last
      * real cheat). */
-    while (g_cheat_count > 0 &&
+    while (g_cheat_count > base &&
            g_cheats[g_cheat_count - 1].description[0] == '\0' &&
            g_cheats[g_cheat_count - 1].op_count == 0) {
         g_cheat_count--;
     }
+}
 
-    fprintf(stderr, "[cheats] loaded %d cheats from %s/\n",
-            g_cheat_count, dir);
+static char g_cheat_dir[1024];
+static char g_cheat_game_id[128];
+static bool g_cheat_all_loose;
+
+static bool starts_with_ci(const char* s, const char* prefix) {
+    for (; *prefix; s++, prefix++) {
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) return false;
+    }
+    return true;
+}
+
+static int compare_names(const void* a, const void* b) {
+    return strcmp((const char*)a, (const char*)b);
+}
+
+/* Parse the .cht files in `dir` (sorted by name, for a stable order);
+ * with `prefix`, only those whose name starts with it. */
+static void load_cht_dir(const char* dir, const char* prefix) {
+    DIR* d = opendir(dir);
+    if (!d) return;
+    char (*names)[256] = NULL;
+    size_t count = 0, capacity = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        size_t nl = strlen(ent->d_name);
+        if (nl < 4 || nl >= 256) continue;
+        const char* ext = ent->d_name + nl - 4;
+        bool is_cht = (ext[0]=='.' && (ext[1]=='c'||ext[1]=='C')
+                                   && (ext[2]=='h'||ext[2]=='H')
+                                   && (ext[3]=='t'||ext[3]=='T'));
+        if (!is_cht || (prefix && !starts_with_ci(ent->d_name, prefix))) continue;
+        if (count == capacity) {
+            capacity = capacity ? capacity * 2 : 8;
+            char (*grown)[256] = realloc(names, capacity * sizeof(*names));
+            if (!grown) break;
+            names = grown;
+        }
+        snprintf(names[count++], sizeof(names[0]), "%s", ent->d_name);
+    }
+    closedir(d);
+    if (count) qsort(names, count, sizeof(*names), compare_names);
+    for (size_t i = 0; i < count; i++) {
+        char path[1536];
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        parse_cht_file(path);
+        fprintf(stderr, "[cheats] read %s\n", path);
+    }
+    free(names);
+}
+
+int gb_cheats_load(const char* game_id, bool all_loose) {
+    g_cheat_count = 0;
+    memset(g_cheats, 0, sizeof(g_cheats));
+    snprintf(g_cheat_game_id, sizeof(g_cheat_game_id), "%s", game_id ? game_id : "");
+    g_cheat_all_loose = all_loose;
+    gb_host_state_path("cheats", g_cheat_dir, sizeof(g_cheat_dir));
+
+    if (g_cheat_game_id[0]) {
+        char dir[1280];
+        snprintf(dir, sizeof(dir), "%s/%s", g_cheat_dir, g_cheat_game_id);
+        load_cht_dir(dir, NULL);
+    }
+    if (all_loose || g_cheat_game_id[0]) {
+        load_cht_dir(g_cheat_dir, all_loose ? NULL : g_cheat_game_id);
+    }
+
+    fprintf(stderr, "[cheats] loaded %d cheats from %s\n", g_cheat_count, g_cheat_dir);
     return g_cheat_count;
 }
+
+int gb_cheats_reload(GBContext* ctx) {
+    gb_cheats_disable_all(ctx);
+    char game_id[sizeof(g_cheat_game_id)];
+    snprintf(game_id, sizeof(game_id), "%s", g_cheat_game_id);
+    return gb_cheats_load(game_id, g_cheat_all_loose);
+}
+
+const char* gb_cheats_dir(void)     { return g_cheat_dir; }
+const char* gb_cheats_game_id(void) { return g_cheat_game_id; }
 
 int            gb_cheats_count(void)      { return g_cheat_count; }
 const GBCheat* gb_cheats_get(int idx) {

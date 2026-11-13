@@ -2789,10 +2789,12 @@ static void apply_window_scale_preset(void) {
     g_windowed_width = border_content_width() * g_scale;
     g_windowed_height = border_content_height() * g_scale;
 
+#if !defined(__ANDROID__)
     if (g_window && g_fullscreen_mode == 0) {
         SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
         SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
+#endif
     update_game_viewport();
 }
 
@@ -2837,6 +2839,14 @@ static void set_fullscreen_mode(int mode) {
         return;
     }
 
+#if defined(__ANDROID__)
+    /* Desktop presets remain stored, but Android always renders to the
+     * Activity surface. A windowed resize only changes SDL's cached size. */
+    if (SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP) == 0)
+        g_fullscreen_mode = mode;
+    update_game_viewport();
+    return;
+#endif
     if (mode == 0) {
         if (SDL_SetWindowFullscreen(g_window, 0) == 0) {
             g_fullscreen_mode = 0;
@@ -5187,6 +5197,7 @@ bool gb_platform_init(int scale) {
 #if defined(__ANDROID__)
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
@@ -5232,9 +5243,13 @@ bool gb_platform_init(int scale) {
         g_windowed_width,
         g_windowed_height,
         SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL |
+#if defined(__ANDROID__)
+        SDL_WINDOW_FULLSCREEN_DESKTOP
+#else
         (g_fullscreen_mode == 2 ? SDL_WINDOW_FULLSCREEN :
          g_fullscreen_mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP :
                                    SDL_WINDOW_RESIZABLE)
+#endif
     );
 
     if (!g_window) {

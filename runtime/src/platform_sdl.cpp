@@ -5492,6 +5492,22 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
         (!g_window || event->window.windowID == SDL_GetWindowID(g_window))) {
         return false;
     }
+    /* Android's native pad sends key-up when it yields to a menu. Record
+     * releases before UI capture can consume them, without clearing any
+     * other held key or controller input. */
+#if defined(__ANDROID__)
+    if (event->type == SDL_KEYUP) {
+        for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+            for (int slot = 0; slot < 2; slot++) {
+                if (binding_matches_scancode(g_keyboard_bindings[action][slot], event->key.keysym.scancode))
+                    g_keyboard_binding_pressed[action][slot] = false;
+            }
+        }
+        rebuild_manual_joypad_state_from_bindings();
+        update_effective_joypad_state();
+        update_runtime_action_state(ctx);
+    }
+#endif
     if (handle_binding_capture_event(event)) {
         return true;
     }

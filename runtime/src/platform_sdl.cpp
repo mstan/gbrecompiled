@@ -6750,7 +6750,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
         char filename[160];
-        snprintf(filename, sizeof(filename), "%s_window_%05d.ppm", g_screenshot_prefix, g_frame_count);
+        snprintf(filename, sizeof(filename), "%s_window_%05d.ppm", g_screenshot_prefix.c_str(), g_frame_count);
         save_ppm(filename, argb.data(), draw_w, draw_h, g_frame_count);
     }
     if (!g_window_shot_path.empty()) {

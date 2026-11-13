@@ -13,6 +13,18 @@ import org.libsdl.app.SDLActivity;
 
 public final class GameActivity extends SDLActivity {
     private final HashSet<Integer> held=new HashSet<>();
+    private FrameLayout touchOverlay;
+    private volatile boolean touchControlsAvailable;
+    /** Called through SDL's Android JNI bridge when game/menu input ownership changes. */
+    public void setTouchControlsAvailable(boolean available) {
+        touchControlsAvailable=available;
+        runOnUiThread(() -> {
+            if(touchOverlay==null)return;
+            if(!available)release();
+            // Hide the parent, retaining the player's pad toggle beneath it.
+            touchOverlay.setVisibility(available?View.VISIBLE:View.GONE);
+        });
+    }
     @Override protected void onCreate(Bundle saved) {
         try {
             String base=getFilesDir().getAbsolutePath();
@@ -22,6 +34,8 @@ public final class GameActivity extends SDLActivity {
         } catch(Exception failure) { throw new IllegalStateException(failure); }
         super.onCreate(saved);
         FrameLayout overlay=new FrameLayout(this);
+        touchOverlay=overlay;
+        overlay.setVisibility(touchControlsAvailable?View.VISIBLE:View.GONE);
         FrameLayout pad=new FrameLayout(this);
         pad.setVisibility(View.GONE);
         overlay.addView(pad,new FrameLayout.LayoutParams(-1,-1));

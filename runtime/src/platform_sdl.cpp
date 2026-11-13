@@ -35,6 +35,9 @@ extern "C" void gb_debug_server_set_context(GBContext *ctx);
 #ifdef GB_HAS_SDL2
 #include <SDL.h>
 #include <SDL_opengles2.h>
+#if defined(__ANDROID__)
+#include <jni.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -107,6 +110,25 @@ static GBPlatformTimingInfo g_last_timing = {};
 /* Menu State */
 static bool g_show_menu = false;
 static bool g_show_overlay = false;
+#if defined(__ANDROID__)
+static int s_android_touch_available = -1;
+static void android_set_touch_controls_available(bool available) {
+    if (s_android_touch_available == (int)available) return;
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject activity = (jobject)SDL_AndroidGetActivity();
+    if (!env || !activity) return;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls ? env->GetMethodID(cls, "setTouchControlsAvailable", "(Z)V") : nullptr;
+    if (method) env->CallVoidMethod(activity, method, (jboolean)available);
+    if (env->ExceptionCheck()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Could not update Android touch-control visibility");
+        env->ExceptionClear();
+    }
+    if (cls) env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    s_android_touch_available = (int)available;
+}
+#endif
 #ifdef RECOMP_LAUNCHER
 static RecompRuntimeUi* g_runtime_ui = NULL;
 #endif
@@ -3261,6 +3283,14 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     }
 
     double total_render_start_ms = sdl_now_ms();
+#if defined(__ANDROID__)
+    bool touch_available = !g_show_menu && !g_binding_capture_active;
+#ifdef RECOMP_LAUNCHER
+    touch_available = touch_available &&
+        !(g_runtime_ui && recomp_runtime_ui_is_open(g_runtime_ui));
+#endif
+    android_set_touch_controls_available(touch_available);
+#endif
 
     /* Debug: check framebuffer content on first few guest frames */
     if (count_guest_frame && g_frame_count <= 3) {
@@ -5079,6 +5109,9 @@ extern "C" int gb_platform_preboot_launcher(void) {
         g_script_count == 0 && g_dump_count == 0 &&
         g_dump_present_count == 0 && g_dump_cycle_count == 0 &&
         !env_flag_enabled("GBRECOMP_NO_LAUNCHER")) {
+#if defined(__ANDROID__)
+        android_set_touch_controls_available(false);
+#endif
         if (gb_launcher_preboot() == GB_LAUNCHER_QUIT) {
             /* user closed the launcher window: clean exit, no game boot */
             exit(0);
@@ -5090,6 +5123,9 @@ extern "C" int gb_platform_preboot_launcher(void) {
 }
 
 bool gb_platform_init(int scale) {
+#if defined(__ANDROID__)
+    s_android_touch_available = -1;
+#endif
     g_headless_mode = g_headless_mode || headless_requested();
     g_benchmark_mode = g_benchmark_mode || g_headless_mode ||
                        env_flag_enabled("GBRECOMP_BENCHMARK");

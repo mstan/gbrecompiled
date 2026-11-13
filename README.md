@@ -6,6 +6,8 @@ Game-owned Android releases use the [shared Android host](platform/android/READM
 It builds the same generated game and additional bodies as `libmain.so`, with
 the native BIOS runtime, launcher and rb-engine. The setup imports and verifies
 user-owned ROM/firmware, then prefills the launcher; public APKs contain neither.
+Native touch controls stay hidden while the launcher or runtime menus own input.
+Returning to gameplay restores the player's pad toggle without retaining held touches.
 
 > ### ⚠ This is a development fork. The canonical project is [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled) — go there for stable use.
 >

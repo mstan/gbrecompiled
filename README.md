@@ -8,6 +8,8 @@ the native BIOS runtime, launcher and rb-engine. The setup imports and verifies
 user-owned ROM/firmware, then prefills the launcher; public APKs contain neither.
 Native touch controls stay hidden while the launcher or runtime menus own input.
 Returning to gameplay restores the player's pad toggle without retaining held touches.
+Android uses the full landscape Activity surface for all desktop window presets;
+saved window, aspect and mod preferences remain preserved.
 
 > ### ⚠ This is a development fork. The canonical project is [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled) — go there for stable use.
 >

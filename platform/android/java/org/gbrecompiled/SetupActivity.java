@@ -3,9 +3,12 @@ package org.gbrecompiled;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.graphics.Insets;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.AtomicFile;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -26,6 +29,13 @@ public final class SetupActivity extends Activity {
         LinearLayout layout=new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(24,24,24,24);
+        if(Build.VERSION.SDK_INT>=35) {
+            layout.setOnApplyWindowInsetsListener((view, insets) -> {
+                Insets safe=insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                view.setPadding(24+safe.left,24+safe.top,24+safe.right,24+safe.bottom);
+                return insets;
+            });
+        }
         TextView title=new TextView(this); title.setText(BuildConfig.GAME_TITLE); title.setTextSize(24); layout.addView(title);
         TextView help=new TextView(this);
         String instructions="Import your original game ROM. Setup remembers it for next time.";

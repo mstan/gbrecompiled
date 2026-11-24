@@ -2539,17 +2539,31 @@ static void request_joypad_interrupt(GBContext* ctx) {
     if (ctx->halted) ctx->halted = 0;
 }
 
-/* Called wherever a menu may have opened or closed. Every binding starts
- * released either way, as RetroArch blocks input across a menu toggle: what
- * was held when the menu opened must not stay held for the game, and what was
- * pressed in the menu must not reach it afterwards. The game's sound stops
- * and starts with the game. */
+/* The guest sees neutral input while menus are open. Desktop clears held
+ * bindings on each transition. Android's pad releases its own keys when it
+ * hides, so preserve unrelated gameplay holds and retire their release events
+ * even while the menu has focus. */
 static void menu_visibility_changed(void) {
     static bool was_open = false;
     const bool open = menu_open();
     if (open == was_open) return;
     was_open = open;
+#if defined(__ANDROID__)
+    for (int action = GB_INPUT_ACTION_FAST_FORWARD; action < GB_INPUT_ACTION_COUNT; action++) {
+        for (int slot = 0; slot < 2; slot++) {
+            g_keyboard_binding_pressed[action][slot] = false;
+            g_controller_button_binding_pressed[action][slot] = false;
+            if (g_controller_axis_binding_pressed[action][slot]) {
+                const int axis = g_controller_bindings[action][slot].code;
+                if (axis >= 0 && axis < SDL_CONTROLLER_AXIS_MAX)
+                    g_controller_axis_values[axis] = 0;
+                g_controller_axis_binding_pressed[action][slot] = false;
+            }
+        }
+    }
+#else
     clear_all_binding_pressed_state();
+#endif
     update_effective_joypad_state();
     update_runtime_action_state(g_registered_ctx);
     if (g_menu_pauses_game) reset_audio_output_buffer(true);
@@ -7858,6 +7872,46 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
     return keep_running;
 }
 
+#if defined(__ANDROID__)
+/* Consume releases for inputs the game already held. A new press made while
+ * navigating a menu must never become a gameplay hold. */
+static void android_release_captured_input(const SDL_Event* event, GBContext* ctx) {
+    switch (event->type) {
+        case SDL_KEYUP:
+        case SDL_CONTROLLERBUTTONUP:
+            for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+                for (int slot = 0; slot < 2; slot++) {
+                    if (event->type == SDL_KEYUP &&
+                        binding_matches_scancode(g_keyboard_bindings[action][slot], event->key.keysym.scancode))
+                        g_keyboard_binding_pressed[action][slot] = false;
+                    if (event->type == SDL_CONTROLLERBUTTONUP &&
+                        binding_matches_controller_button(g_controller_bindings[action][slot], event->cbutton.button))
+                        g_controller_button_binding_pressed[action][slot] = false;
+                }
+            }
+            break;
+        case SDL_CONTROLLERAXISMOTION:
+            if (!menu_open() || event->caxis.axis >= SDL_CONTROLLER_AXIS_MAX) return;
+            for (int action = 0; action <= GB_INPUT_ACTION_START; action++) {
+                for (int slot = 0; slot < 2; slot++) {
+                    const GBInputBinding& binding = g_controller_bindings[action][slot];
+                    if (g_controller_axis_binding_pressed[action][slot] &&
+                        binding.code == event->caxis.axis &&
+                        binding_active_for_axis_value(binding, event->caxis.value))
+                        return;
+                }
+            }
+            g_controller_axis_values[event->caxis.axis] = 0;
+            update_controller_axis_binding_state();
+            break;
+        default:
+            return;
+    }
+    update_effective_joypad_state();
+    update_runtime_action_state(ctx);
+}
+#endif
+
 static bool handle_runtime_event_inner(const SDL_Event* event, GBContext* ctx) {
     if (!event) {
         return true;
@@ -7875,21 +7929,9 @@ static bool handle_runtime_event_inner(const SDL_Event* event, GBContext* ctx) {
         (!g_window || event->window.windowID == SDL_GetWindowID(g_window))) {
         return false;
     }
-    /* Android's native pad sends key-up when it yields to a menu. Record
-     * releases before UI capture can consume them, without clearing any
-     * other held key or controller input. */
 #if defined(__ANDROID__)
-    if (event->type == SDL_KEYUP) {
-        for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
-            for (int slot = 0; slot < 2; slot++) {
-                if (binding_matches_scancode(g_keyboard_bindings[action][slot], event->key.keysym.scancode))
-                    g_keyboard_binding_pressed[action][slot] = false;
-            }
-        }
-        rebuild_manual_joypad_state_from_bindings();
-        update_effective_joypad_state();
-        update_runtime_action_state(ctx);
-    }
+    if (menu_open() || g_binding_capture_active)
+        android_release_captured_input(event, ctx);
 #endif
     if (handle_binding_capture_event(event)) {
         return true;

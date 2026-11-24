@@ -28,12 +28,18 @@ public final class SetupActivity extends Activity {
         layout.setPadding(24,24,24,24);
         TextView title=new TextView(this); title.setText(BuildConfig.GAME_TITLE); title.setTextSize(24); layout.addView(title);
         TextView help=new TextView(this);
-        help.setText("Import your own supported ROM and original boot firmware once. Existing imports are prefilled. No ROM or BIOS is included.\n"+
-            (BuildConfig.CGB_ONLY?"Requires the CGB BIOS.":"Original mode needs the DMG BIOS; DX mode needs the CGB BIOS.")+"\nConfigure widescreen and DX in the shared launcher's Mods page. Android gameplay QA was waived for this release.");
+        String instructions="Import your original game ROM. Setup remembers it for next time.";
+        if(BuildConfig.NEEDS_BOOT_FIRMWARE) {
+            instructions += BuildConfig.CGB_ONLY ? "\nImport the original CGB BIOS."
+                : "\nImport the original DMG BIOS for the original game, or the CGB BIOS for DX.";
+        }
+        help.setText(instructions);
         layout.addView(help);
         button(layout,"Import game ROM",1);
-        if(!BuildConfig.CGB_ONLY)button(layout,"Import DMG BIOS (256 bytes)",2);
-        button(layout,"Import CGB BIOS (2304 bytes)",3);
+        if(BuildConfig.NEEDS_BOOT_FIRMWARE) {
+            if(!BuildConfig.CGB_ONLY)button(layout,"Import DMG BIOS (256 bytes)",2);
+            button(layout,"Import CGB BIOS (2304 bytes)",3);
+        }
         status=new TextView(this); layout.addView(status);
         play=new Button(this); play.setText("Open launcher"); layout.addView(play);
         play.setOnClickListener(v -> launch());
@@ -87,9 +93,17 @@ public final class SetupActivity extends Activity {
         refresh();
     }
     private void refresh() {
-        boolean rom=exists(1),dmg=exists(2),cgb=exists(3);
-        status.setText("ROM: "+(rom?"ready":"missing")+"\nDMG BIOS: "+(dmg?"ready":"missing")+"\nCGB BIOS: "+(cgb?"ready":"missing")+"\n"+error);
-        play.setEnabled(rom && (BuildConfig.CGB_ONLY?cgb:dmg||cgb));
+        boolean rom=exists(1);
+        String summary="ROM: "+(rom?"ready":"missing");
+        boolean ready=rom;
+        if(BuildConfig.NEEDS_BOOT_FIRMWARE) {
+            boolean dmg=exists(2),cgb=exists(3);
+            if(!BuildConfig.CGB_ONLY)summary+="\nDMG BIOS: "+(dmg?"ready":"missing");
+            summary+="\nCGB BIOS: "+(cgb?"ready":"missing");
+            ready=ready && (BuildConfig.CGB_ONLY?cgb:dmg||cgb);
+        }
+        status.setText(summary+"\n"+error);
+        play.setEnabled(ready);
     }
     private void copyAsset(String name,File destination) throws IOException {
         String[] children=getAssets().list(name);
@@ -102,7 +116,9 @@ public final class SetupActivity extends Activity {
         try {
             copyAsset("payload",root);
             write(new File(root,"rom.cfg"),(imported(1).getAbsolutePath()+"\n").getBytes("UTF-8"));
-            for(int code=2;code<=3;code++)if(exists(code))write(new File(root,code==2?"bios_dmg.cfg":"bios_cgb.cfg"),(imported(code).getAbsolutePath()+"\n").getBytes("UTF-8"));
+            if(BuildConfig.NEEDS_BOOT_FIRMWARE) {
+                for(int code=2;code<=3;code++)if(exists(code))write(new File(root,code==2?"bios_dmg.cfg":"bios_cgb.cfg"),(imported(code).getAbsolutePath()+"\n").getBytes("UTF-8"));
+            }
             startActivity(new Intent(this,GameActivity.class));
         } catch(Exception failure) { new AlertDialog.Builder(this).setMessage(failure.getMessage()).setPositiveButton("OK",null).show(); }
     }

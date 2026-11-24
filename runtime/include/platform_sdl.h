@@ -413,6 +413,13 @@ bool gb_platform_save_state_path(GBContext* ctx, const char* path);
  */
 bool gb_platform_load_state_path(GBContext* ctx, const char* path);
 
+/**
+ * @brief Headless capture flag parser (--capture-out/-size/-from/-to/-every/-wav,
+ * --exit-at-frame). Returns 1 if the flag consumed its value, -1 if the flag or
+ * value is invalid. Capture runs the real GL pipeline in a hidden window.
+ */
+int gb_platform_capture_arg(const char* flag, const char* value);
+
 #ifdef __cplusplus
 }
 #endif

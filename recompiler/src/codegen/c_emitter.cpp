@@ -3863,8 +3863,16 @@ GeneratedOutput generate_output(const ir::Program& program,
     main_ss << "            gb_platform_set_input_record_file(argv[++i]);\n";
     main_ss << "        } else if (strcmp(argv[i], \"--record\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_platform_start_recording(argv[++i]);\n";
-    main_ss << "        } else if (strcmp(argv[i], \"--script\") == 0 && i + 1 < argc) {\n";
+    main_ss << "        } else if ((strcmp(argv[i], \"--script\") == 0 || strcmp(argv[i], \"--input-script\") == 0) && i + 1 < argc) {\n";
     main_ss << "            gb_platform_load_script_file(argv[++i]);\n";
+    main_ss << "#ifdef GB_HAS_SDL2\n";
+    main_ss << "        } else if (strncmp(argv[i], \"--capture-\", 10) == 0 || strcmp(argv[i], \"--exit-at-frame\") == 0) {\n";
+    main_ss << "            if (gb_platform_capture_arg(argv[i], i + 1 < argc ? argv[i + 1] : NULL) < 0) {\n";
+    main_ss << "                fprintf(stderr, \"invalid capture option: %s\\n\", argv[i]);\n";
+    main_ss << "                return 2;\n";
+    main_ss << "            }\n";
+    main_ss << "            i++;\n";
+    main_ss << "#endif\n";
     main_ss << "        } else if (strcmp(argv[i], \"--view-width\") == 0 && i + 1 < argc) {\n";
     main_ss << "            gb_ws_set_cli_request((int)strtol(argv[++i], NULL, 10));\n";
     main_ss << "        } else if (strcmp(argv[i], \"--dump-frames\") == 0 && i + 1 < argc) {\n";

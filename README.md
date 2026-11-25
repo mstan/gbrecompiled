@@ -299,6 +299,12 @@ incompatible states; the previous version-1 raw struct files are rejected.
 Game enhancements that affect future execution register their state through
 `GBSnapshotExtension`; host pointers and lifetime coverage counters stay live.
 
+For unattended recording, `--capture-out DIR` writes presented PNGs and
+`--capture-wav FILE` writes the 44.1 kHz stereo mix; either option enables a
+hidden, muted capture run. `--capture-from`, `--capture-to` and
+`--capture-every` select the output, with continuous audio between the range
+boundaries even when PNGs are sparse. Output errors return exit status 2.
+
 A TCP debug server listens on `localhost:4370` for runtime inspection and control:
 register state, memory, the always-on frame ring, watchpoints, frame stepping,
 save/load state, transient input injection and screenshots of the presented

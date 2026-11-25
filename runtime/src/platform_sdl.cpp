@@ -4948,7 +4948,7 @@ int gb_platform_capture_arg(const char* flag, const char* value) {
     } else if (strcmp(flag, "--capture-every") == 0) {
         g_cap_every = strtol(value, NULL, 10); if (g_cap_every < 1) g_cap_every = 1; return 1;
     } else if (strcmp(flag, "--capture-wav") == 0) {
-        g_cap_wav_path = value; return 1;
+        g_cap_wav_path = value; g_cap_active = true; return 1;
     } else if (strcmp(flag, "--exit-at-frame") == 0) {
         g_cap_exit_at = strtol(value, NULL, 10); return 1;
     }
@@ -4957,27 +4957,42 @@ int gb_platform_capture_arg(const char* flag, const char* value) {
 
 static void cap_wav_put32(uint8_t* p, uint32_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
 
+[[noreturn]] static void cap_error(const char* operation, const std::string& path) {
+    fprintf(stderr, "[CAPTURE] cannot %s: %s\n", operation, path.c_str());
+    exit(2);
+}
+
+static void cap_prepare_directory(void) {
+    if (g_cap_dir.empty()) return;
+    std::error_code error;
+    fs::create_directories(fs::path(g_cap_dir), error);
+    if (error || !fs::is_directory(fs::path(g_cap_dir), error) || error)
+        cap_error("create frame directory", g_cap_dir);
+}
+
 static void cap_wav_open(void) {
     if (g_cap_wav || g_cap_wav_path.empty()) return;
     g_cap_wav = fopen(g_cap_wav_path.c_str(), "wb");
-    if (!g_cap_wav) {
-        fprintf(stderr, "[CAPTURE] cannot open wav %s\n", g_cap_wav_path.c_str());
-        g_cap_wav_path.clear();
-        return;
-    }
+    if (!g_cap_wav) cap_error("open WAV", g_cap_wav_path);
     uint8_t h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,0,0,0,0,0,0,0,0,4,0,16,0,'d','a','t','a',0,0,0,0};
     cap_wav_put32(h + 24, 44100u);
     cap_wav_put32(h + 28, 44100u * 4u);
-    fwrite(h, 1, sizeof(h), g_cap_wav);
+    if (fwrite(h, 1, sizeof(h), g_cap_wav) != sizeof(h))
+        cap_error("write WAV header", g_cap_wav_path);
 }
 
 static void cap_wav_close(void) {
     if (!g_cap_wav) return;
     uint32_t data_bytes = (uint32_t)(g_cap_wav_samples * 4u);
     uint8_t b[4];
-    fseek(g_cap_wav, 4, SEEK_SET); cap_wav_put32(b, 36u + data_bytes); fwrite(b, 1, 4, g_cap_wav);
-    fseek(g_cap_wav, 40, SEEK_SET); cap_wav_put32(b, data_bytes); fwrite(b, 1, 4, g_cap_wav);
-    fclose(g_cap_wav);
+    if (fseek(g_cap_wav, 4, SEEK_SET) != 0) cap_error("seek WAV", g_cap_wav_path);
+    cap_wav_put32(b, 36u + data_bytes);
+    if (fwrite(b, 1, 4, g_cap_wav) != 4) cap_error("finish WAV header", g_cap_wav_path);
+    if (fseek(g_cap_wav, 40, SEEK_SET) != 0) cap_error("seek WAV", g_cap_wav_path);
+    cap_wav_put32(b, data_bytes);
+    if (fwrite(b, 1, 4, g_cap_wav) != 4 || fflush(g_cap_wav) != 0)
+        cap_error("finish WAV", g_cap_wav_path);
+    if (fclose(g_cap_wav) != 0) cap_error("close WAV", g_cap_wav_path);
     g_cap_wav = NULL;
 }
 
@@ -4990,7 +5005,10 @@ static void cap_audio_tap(int16_t left, int16_t right) {
     if (!g_cap_wav) cap_wav_open();
     if (!g_cap_wav) return;
     int16_t pair[2] = { left, right };
-    fwrite(pair, sizeof(int16_t), 2, g_cap_wav);
+    if (g_cap_wav_samples >= (UINT32_MAX - 36u) / 4u)
+        cap_error("exceed RIFF WAV size limit", g_cap_wav_path);
+    if (fwrite(pair, sizeof(int16_t), 2, g_cap_wav) != 2)
+        cap_error("write WAV samples", g_cap_wav_path);
     g_cap_wav_samples++;
 }
 
@@ -5004,7 +5022,7 @@ static void cap_finish(void) {
 
 /* Read the composed (pre-swap) drawable back and write DIR/frame_%06d.png. */
 static void cap_present(int draw_w, int draw_h) {
-    if (!g_cap_active || g_cap_finished || !cap_in_range()) return;
+    if (!g_cap_active || g_cap_finished || g_cap_dir.empty() || !cap_in_range()) return;
     if (((g_frame_count - g_cap_from) % g_cap_every) != 0) return;
     if (draw_w != g_cap_w || draw_h != g_cap_h) {
         static bool warned = false;
@@ -5027,11 +5045,18 @@ static void cap_present(int draw_w, int draw_h) {
     char name[64];
     snprintf(name, sizeof(name), "frame_%06d.png", g_frame_count);
     std::string path = g_cap_dir + "/" + name;
-    if (stbi_write_png(path.c_str(), draw_w, draw_h, 4, flipped.data(), (int)stride)) {
-        g_cap_frames_written++;
-    } else {
-        fprintf(stderr, "[CAPTURE] failed to write %s\n", path.c_str());
-    }
+    FILE* png = fopen(path.c_str(), "wb");
+    if (!png) cap_error("open PNG", path);
+    const auto write_png_bytes = [](void* file, void* bytes, int size) {
+        FILE* stream = static_cast<FILE*>(file);
+        if (fwrite(bytes, 1, (size_t)size, stream) != (size_t)size)
+            cap_error("write PNG", g_cap_dir);
+    };
+    if (!stbi_write_png_to_func(write_png_bytes, png, draw_w, draw_h, 4,
+                                flipped.data(), (int)stride) || fflush(png) != 0)
+        cap_error("write PNG", path);
+    if (fclose(png) != 0) cap_error("close PNG", path);
+    g_cap_frames_written++;
 }
 
 static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_frame) {
@@ -7499,8 +7524,8 @@ bool gb_platform_init(int scale) {
         g_fullscreen_mode = 0;
         g_windowed_width = g_cap_w;
         g_windowed_height = g_cap_h;
-        std::error_code cap_ec;
-        fs::create_directories(fs::path(g_cap_dir), cap_ec);
+        cap_prepare_directory();
+        cap_wav_open();
     }
     fprintf(stderr, "[SDL] Initializing SDL...\n");
 #if defined(__ANDROID__)

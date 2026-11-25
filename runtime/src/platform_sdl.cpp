@@ -236,6 +236,7 @@ static constexpr int GB_REWIND_MAX_BUFFER_MB = 1024;
 static void rewind_free(void);
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
+static bool g_cap_active = false; /* headless capture (see "Headless capture" below) */
 /* Headless (GBRECOMP_HEADLESS=1): dummy SDL video/audio, no window, no GL —
  * but UNLIKE plain benchmark mode the SDL event queue is still drained
  * through handle_runtime_event(), so a debug client can inject keystrokes
@@ -4246,7 +4247,7 @@ static void apply_window_scale_preset(void) {
     g_windowed_width = border_content_width() * scale;
     g_windowed_height = border_content_height() * scale;
 
-    if (g_window && g_fullscreen_mode == 0) {
+    if (g_window && g_fullscreen_mode == 0 && !g_cap_active) {
         SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
         SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
@@ -4911,6 +4912,151 @@ static bool fast_forward_frame_due(void) {
     }
     last_time = new_time;
     return render;
+}
+
+/* ============================================================================
+ * Headless capture (--capture-out/-size/-from/-to/-every/-wav, --exit-at-frame)
+ *
+ * Runs the real presentation pipeline (GL compose, border, shaders, widescreen)
+ * into a hidden window and reads the composed drawable back. No window is ever
+ * shown, no audio device output is used, and desktop input is ignored. Frames
+ * are numbered by guest frame (same index the input script uses); audio is the
+ * raw APU mix tapped at the sample callback, aligned to --capture-from.
+ * ========================================================================== */
+static std::string g_cap_dir;
+static std::string g_cap_wav_path;
+static int g_cap_w = 960, g_cap_h = 540;
+static long g_cap_from = 0, g_cap_to = 0, g_cap_every = 1, g_cap_exit_at = 0;
+static FILE* g_cap_wav = NULL;
+static uint64_t g_cap_wav_samples = 0;
+static long g_cap_frames_written = 0;
+static bool g_cap_finished = false;
+static std::vector<uint8_t> g_cap_pixels;
+
+int gb_platform_capture_arg(const char* flag, const char* value) {
+    if (!value) return -1;
+    if (strcmp(flag, "--capture-out") == 0) {
+        g_cap_dir = value; g_cap_active = true; return 1;
+    } else if (strcmp(flag, "--capture-size") == 0) {
+        int w = 0, h = 0;
+        if (sscanf(value, "%dx%d", &w, &h) != 2 || w < 16 || h < 16 || w > 16384 || h > 16384) return -1;
+        g_cap_w = w; g_cap_h = h; return 1;
+    } else if (strcmp(flag, "--capture-from") == 0) {
+        g_cap_from = strtol(value, NULL, 10); return 1;
+    } else if (strcmp(flag, "--capture-to") == 0) {
+        g_cap_to = strtol(value, NULL, 10); return 1;
+    } else if (strcmp(flag, "--capture-every") == 0) {
+        g_cap_every = strtol(value, NULL, 10); if (g_cap_every < 1) g_cap_every = 1; return 1;
+    } else if (strcmp(flag, "--capture-wav") == 0) {
+        g_cap_wav_path = value; g_cap_active = true; return 1;
+    } else if (strcmp(flag, "--exit-at-frame") == 0) {
+        g_cap_exit_at = strtol(value, NULL, 10); return 1;
+    }
+    return -1;
+}
+
+static void cap_wav_put32(uint8_t* p, uint32_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
+
+[[noreturn]] static void cap_error(const char* operation, const std::string& path) {
+    fprintf(stderr, "[CAPTURE] cannot %s: %s\n", operation, path.c_str());
+    exit(2);
+}
+
+static void cap_prepare_directory(void) {
+    if (g_cap_dir.empty()) return;
+    std::error_code error;
+    fs::create_directories(fs::path(g_cap_dir), error);
+    if (error || !fs::is_directory(fs::path(g_cap_dir), error) || error)
+        cap_error("create frame directory", g_cap_dir);
+}
+
+static void cap_wav_open(void) {
+    if (g_cap_wav || g_cap_wav_path.empty()) return;
+    g_cap_wav = fopen(g_cap_wav_path.c_str(), "wb");
+    if (!g_cap_wav) cap_error("open WAV", g_cap_wav_path);
+    uint8_t h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,0,0,0,0,0,0,0,0,4,0,16,0,'d','a','t','a',0,0,0,0};
+    cap_wav_put32(h + 24, 44100u);
+    cap_wav_put32(h + 28, 44100u * 4u);
+    if (fwrite(h, 1, sizeof(h), g_cap_wav) != sizeof(h))
+        cap_error("write WAV header", g_cap_wav_path);
+}
+
+static void cap_wav_close(void) {
+    if (!g_cap_wav) return;
+    uint32_t data_bytes = (uint32_t)(g_cap_wav_samples * 4u);
+    uint8_t b[4];
+    if (fseek(g_cap_wav, 4, SEEK_SET) != 0) cap_error("seek WAV", g_cap_wav_path);
+    cap_wav_put32(b, 36u + data_bytes);
+    if (fwrite(b, 1, 4, g_cap_wav) != 4) cap_error("finish WAV header", g_cap_wav_path);
+    if (fseek(g_cap_wav, 40, SEEK_SET) != 0) cap_error("seek WAV", g_cap_wav_path);
+    cap_wav_put32(b, data_bytes);
+    if (fwrite(b, 1, 4, g_cap_wav) != 4 || fflush(g_cap_wav) != 0)
+        cap_error("finish WAV", g_cap_wav_path);
+    if (fclose(g_cap_wav) != 0) cap_error("close WAV", g_cap_wav_path);
+    g_cap_wav = NULL;
+}
+
+static bool cap_in_range(void) {
+    return g_frame_count >= g_cap_from && (g_cap_to <= 0 || g_frame_count <= g_cap_to);
+}
+
+static void cap_audio_tap(int16_t left, int16_t right) {
+    if (!g_cap_active || g_cap_finished || g_cap_wav_path.empty() || !cap_in_range()) return;
+    if (!g_cap_wav) cap_wav_open();
+    if (!g_cap_wav) return;
+    int16_t pair[2] = { left, right };
+    if (g_cap_wav_samples >= (UINT32_MAX - 36u) / 4u)
+        cap_error("exceed RIFF WAV size limit", g_cap_wav_path);
+    if (fwrite(pair, sizeof(int16_t), 2, g_cap_wav) != 2)
+        cap_error("write WAV samples", g_cap_wav_path);
+    g_cap_wav_samples++;
+}
+
+static void cap_finish(void) {
+    if (!g_cap_active || g_cap_finished) return;
+    g_cap_finished = true;
+    cap_wav_close();
+    fprintf(stderr, "capture: %ld frames written, %llu audio samples (44100 Hz), present size %dx%d\n",
+            g_cap_frames_written, (unsigned long long)g_cap_wav_samples, g_cap_w, g_cap_h);
+}
+
+/* Read the composed (pre-swap) drawable back and write DIR/frame_%06d.png. */
+static void cap_present(int draw_w, int draw_h) {
+    if (!g_cap_active || g_cap_finished || g_cap_dir.empty() || !cap_in_range()) return;
+    if (((g_frame_count - g_cap_from) % g_cap_every) != 0) return;
+    if (draw_w != g_cap_w || draw_h != g_cap_h) {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "[CAPTURE] drawable %dx%d differs from requested %dx%d\n", draw_w, draw_h, g_cap_w, g_cap_h);
+            warned = true;
+        }
+    }
+    const size_t stride = (size_t)draw_w * 4;
+    g_cap_pixels.resize(stride * (size_t)draw_h);
+    std::vector<uint8_t> flipped(stride * (size_t)draw_h);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, draw_w, draw_h, GL_RGBA, GL_UNSIGNED_BYTE, g_cap_pixels.data());
+    for (int y = 0; y < draw_h; y++) {
+        const uint8_t* src = g_cap_pixels.data() + (size_t)(draw_h - 1 - y) * stride;
+        uint8_t* dst = flipped.data() + (size_t)y * stride;
+        memcpy(dst, src, stride);
+        for (int x = 0; x < draw_w; x++) dst[x * 4 + 3] = 255;
+    }
+    char name[64];
+    snprintf(name, sizeof(name), "frame_%06d.png", g_frame_count);
+    std::string path = g_cap_dir + "/" + name;
+    FILE* png = fopen(path.c_str(), "wb");
+    if (!png) cap_error("open PNG", path);
+    const auto write_png_bytes = [](void* file, void* bytes, int size) {
+        FILE* stream = static_cast<FILE*>(file);
+        if (fwrite(bytes, 1, (size_t)size, stream) != (size_t)size)
+            cap_error("write PNG", g_cap_dir);
+    };
+    if (!stbi_write_png_to_func(write_png_bytes, png, draw_w, draw_h, 4,
+                                flipped.data(), (int)stride) || fflush(png) != 0)
+        cap_error("write PNG", path);
+    if (fclose(png) != 0) cap_error("close PNG", path);
+    g_cap_frames_written++;
 }
 
 static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_frame) {
@@ -6737,6 +6883,8 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     }
 
     update_swap_interval();
+    if (count_guest_frame) cap_present(draw_w, draw_h);
+
     double present_start_ms = sdl_now_ms();
     SDL_GL_SwapWindow(g_window);
     g_last_timing.present_ms = sdl_now_ms() - present_start_ms;
@@ -6749,6 +6897,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
  * ========================================================================== */
 
 void gb_platform_shutdown(void) {
+    cap_finish();
     gb_serial_link_shutdown();
     gb_lan_shutdown();
     rewind_free();   /* a restarted game starts a new one, as RetroArch does per content */
@@ -7261,6 +7410,7 @@ static void speed_audio_sample(int16_t left, int16_t right) {
 
 static void on_audio_sample(GBContext* ctx, int16_t left, int16_t right) {
     (void)ctx;
+    cap_audio_tap(left, right);
     if (!audio_output_should_run()) return;
     if (effective_speed_percent() == 100) {
         audio_ring_push(left, right);
@@ -7290,7 +7440,7 @@ extern "C" int gb_platform_preboot_launcher(void) {
     g_headless_mode = g_headless_mode || headless_requested();
     g_benchmark_mode = g_benchmark_mode || g_headless_mode ||
                        env_flag_enabled("GBRECOMP_BENCHMARK");
-    if (!g_benchmark_mode &&
+    if (!g_benchmark_mode && !g_cap_active &&
         g_script_count == 0 && g_dump_count == 0 &&
         g_dump_present_count == 0 && g_dump_cycle_count == 0 &&
         !env_flag_enabled("GBRECOMP_NO_LAUNCHER")) {
@@ -7308,6 +7458,12 @@ bool gb_platform_init(int scale) {
     g_headless_mode = g_headless_mode || headless_requested();
     g_benchmark_mode = g_benchmark_mode || g_headless_mode ||
                        env_flag_enabled("GBRECOMP_BENCHMARK");
+    if (g_cap_active) {
+        /* --capture-out needs the real GL pipeline (hidden window), which
+         * benchmark/headless modes skip. */
+        g_headless_mode = false;
+        g_benchmark_mode = false;
+    }
     g_scale = scale;
     if (g_scale < 1) g_scale = 1;
     if (g_scale > 8) g_scale = 8;
@@ -7362,6 +7518,15 @@ bool gb_platform_init(int scale) {
     }
 
 
+    if (g_cap_active) {
+        /* Capture: audio is tapped from the APU mix, never played. */
+        SDL_setenv("SDL_AUDIODRIVER", "dummy", 1);
+        g_fullscreen_mode = 0;
+        g_windowed_width = g_cap_w;
+        g_windowed_height = g_cap_h;
+        cap_prepare_directory();
+        cap_wav_open();
+    }
     fprintf(stderr, "[SDL] Initializing SDL...\n");
 #if defined(__ANDROID__)
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
@@ -7431,7 +7596,7 @@ bool gb_platform_init(int scale) {
         g_fullscreen_mode = 0;   /* a probe must never touch the display mode */
     }
     const Uint32 window_visibility =
-        (shader_probe || env_flag_enabled("GBRECOMP_HIDDEN_WINDOW")) ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN;
+        (g_cap_active || shader_probe || env_flag_enabled("GBRECOMP_HIDDEN_WINDOW")) ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN;
     g_window = SDL_CreateWindow(
         "GB Recompiled",
         SDL_WINDOWPOS_CENTERED,
@@ -7523,6 +7688,14 @@ bool gb_platform_init(int scale) {
      * border preference (resizes the window to 256x224*scale if enabled). */
     scan_border_directory();
     apply_border_change();
+    if (g_cap_active) {
+        /* apply_border_change sized the window to the border at g_scale; the
+         * capture drawable is exactly the requested size. */
+        SDL_SetWindowSize(g_window, g_cap_w, g_cap_h);
+        SDL_PumpEvents();
+        SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+        update_game_viewport();
+    }
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
@@ -8176,8 +8349,13 @@ bool gb_platform_poll_events(GBContext* ctx) {
      * the drain for speed — so an injection forces one pass either way. A
      * debug-injected event therefore always reaches handle_runtime_event(), the
      * same function a real keystroke reaches, with no focus and no window. */
+    if (g_cap_active) {
+        /* Let the hidden window/GL surface settle, but never act on events. */
+        SDL_PumpEvents();
+        SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+    }
     const bool drain_events =
-        !g_benchmark_mode || g_headless_mode || g_injected_event_pending;
+        !g_cap_active && (!g_benchmark_mode || g_headless_mode || g_injected_event_pending);
     g_injected_event_pending = false;
     if (drain_events) {
         while (SDL_PollEvent(&event)) {
@@ -8241,6 +8419,10 @@ bool gb_platform_poll_events(GBContext* ctx) {
     apply_debug_input_override(ctx);
     record_manual_input_state(current_cycles);
 
+    if (g_cap_active && g_cap_exit_at > 0 && g_frame_count >= g_cap_exit_at) {
+        cap_finish();
+        return false;
+    }
     return true;
 }
 
@@ -8674,7 +8856,7 @@ static void before_frame(void) {
 void gb_platform_vsync(uint32_t frame_cycles) {
     static uint64_t next_frame_time = 0;
     static uint64_t frame_remainder = 0;
-    if (g_benchmark_mode || g_app_suspended) {
+    if (g_benchmark_mode || g_app_suspended || g_cap_active) {
         g_last_timing.pacing_cycles = (frame_cycles > 0) ? frame_cycles : 70224u;
         g_last_timing.pacing_ms = 0.0;
         speed_audio_reset();
@@ -9529,6 +9711,7 @@ void gb_platform_set_title(const char* title) {
 }
 
 void gb_platform_set_dump_frames(const char* frames) { (void)frames; }
+int gb_platform_capture_arg(const char* flag, const char* value) { (void)flag; (void)value; return -1; }
 
 void gb_platform_set_dump_cycle_frames(const char* frames) { (void)frames; }
 void gb_platform_check_cycle_dump(GBContext* ctx) { (void)ctx; }

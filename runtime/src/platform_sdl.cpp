@@ -39,6 +39,9 @@ extern "C" void gb_debug_server_set_context(GBContext *ctx);
 #if defined(__SSE2__)
 #include <emmintrin.h>
 #endif
+#if defined(__ANDROID__)
+#include <jni.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -140,6 +143,25 @@ static GBPlatformTimingInfo g_last_timing = {};
  * Escape opens) is g_runtime_ui. */
 static bool g_show_menu = false;
 static bool g_show_overlay = false;
+#if defined(__ANDROID__)
+static int s_android_touch_available = -1;
+static void android_set_touch_controls_available(bool available) {
+    if (s_android_touch_available == (int)available) return;
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject activity = (jobject)SDL_AndroidGetActivity();
+    if (!env || !activity) return;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls ? env->GetMethodID(cls, "setTouchControlsAvailable", "(Z)V") : nullptr;
+    if (method) env->CallVoidMethod(activity, method, (jboolean)available);
+    if (env->ExceptionCheck()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Could not update Android touch-control visibility");
+        env->ExceptionClear();
+    }
+    if (cls) env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    s_android_touch_available = (int)available;
+}
+#endif
 #ifdef RECOMP_LAUNCHER
 static RecompRuntimeUi* g_runtime_ui = NULL;
 #endif
@@ -2518,17 +2540,31 @@ static void request_joypad_interrupt(GBContext* ctx) {
     if (ctx->halted) ctx->halted = 0;
 }
 
-/* Called wherever a menu may have opened or closed. Every binding starts
- * released either way, as RetroArch blocks input across a menu toggle: what
- * was held when the menu opened must not stay held for the game, and what was
- * pressed in the menu must not reach it afterwards. The game's sound stops
- * and starts with the game. */
+/* The guest sees neutral input while menus are open. Desktop clears held
+ * bindings on each transition. Android's pad releases its own keys when it
+ * hides, so preserve unrelated gameplay holds and retire their release events
+ * even while the menu has focus. */
 static void menu_visibility_changed(void) {
     static bool was_open = false;
     const bool open = menu_open();
     if (open == was_open) return;
     was_open = open;
+#if defined(__ANDROID__)
+    for (int action = GB_INPUT_ACTION_FAST_FORWARD; action < GB_INPUT_ACTION_COUNT; action++) {
+        for (int slot = 0; slot < 2; slot++) {
+            g_keyboard_binding_pressed[action][slot] = false;
+            g_controller_button_binding_pressed[action][slot] = false;
+            if (g_controller_axis_binding_pressed[action][slot]) {
+                const int axis = g_controller_bindings[action][slot].code;
+                if (axis >= 0 && axis < SDL_CONTROLLER_AXIS_MAX)
+                    g_controller_axis_values[axis] = 0;
+                g_controller_axis_binding_pressed[action][slot] = false;
+            }
+        }
+    }
+#else
     clear_all_binding_pressed_state();
+#endif
     update_effective_joypad_state();
     update_runtime_action_state(g_registered_ctx);
     if (g_menu_pauses_game) reset_audio_output_buffer(true);
@@ -4247,10 +4283,12 @@ static void apply_window_scale_preset(void) {
     g_windowed_width = border_content_width() * scale;
     g_windowed_height = border_content_height() * scale;
 
+#if !defined(__ANDROID__)
     if (g_window && g_fullscreen_mode == 0 && !g_cap_active) {
         SDL_SetWindowSize(g_window, g_windowed_width, g_windowed_height);
         SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
+#endif
     update_game_viewport();
 }
 
@@ -4295,6 +4333,14 @@ static void set_fullscreen_mode(int mode) {
         return;
     }
 
+#if defined(__ANDROID__)
+    /* Desktop presets remain stored, but Android always renders to the
+     * Activity surface. A windowed resize only changes SDL's cached size. */
+    if (SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP) == 0)
+        g_fullscreen_mode = mode;
+    update_game_viewport();
+    return;
+#endif
     if (mode == 0) {
         if (SDL_SetWindowFullscreen(g_window, 0) == 0) {
             g_fullscreen_mode = 0;
@@ -5194,6 +5240,14 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     }
 
     double total_render_start_ms = sdl_now_ms();
+#if defined(__ANDROID__)
+    bool touch_available = !g_show_menu && !g_binding_capture_active;
+#ifdef RECOMP_LAUNCHER
+    touch_available = touch_available &&
+        !(g_runtime_ui && recomp_runtime_ui_is_open(g_runtime_ui));
+#endif
+    android_set_touch_controls_available(touch_available);
+#endif
 
     /* Debug: check framebuffer content on first few guest frames */
     if (count_guest_frame && g_frame_count <= 3) {
@@ -6866,7 +6920,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
             }
         }
         char filename[160];
-        snprintf(filename, sizeof(filename), "%s_window_%05d.ppm", g_screenshot_prefix, g_frame_count);
+        snprintf(filename, sizeof(filename), "%s_window_%05d.ppm", g_screenshot_prefix.c_str(), g_frame_count);
         save_ppm(filename, argb.data(), draw_w, draw_h, g_frame_count);
     }
     if (!g_window_shot_path.empty()) {
@@ -7444,6 +7498,9 @@ extern "C" int gb_platform_preboot_launcher(void) {
         g_script_count == 0 && g_dump_count == 0 &&
         g_dump_present_count == 0 && g_dump_cycle_count == 0 &&
         !env_flag_enabled("GBRECOMP_NO_LAUNCHER")) {
+#if defined(__ANDROID__)
+        android_set_touch_controls_available(false);
+#endif
         if (gb_launcher_preboot() == GB_LAUNCHER_QUIT) {
             /* user closed the launcher window: clean exit, no game boot */
             exit(0);
@@ -7455,6 +7512,9 @@ extern "C" int gb_platform_preboot_launcher(void) {
 }
 
 bool gb_platform_init(int scale) {
+#if defined(__ANDROID__)
+    s_android_touch_available = -1;
+#endif
     g_headless_mode = g_headless_mode || headless_requested();
     g_benchmark_mode = g_benchmark_mode || g_headless_mode ||
                        env_flag_enabled("GBRECOMP_BENCHMARK");
@@ -7531,6 +7591,7 @@ bool gb_platform_init(int scale) {
 #if defined(__ANDROID__)
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #endif
 #if defined(_WIN32)
     /* Same DPI awareness as the launcher (launcher_platform_open), which sets
@@ -7604,9 +7665,13 @@ bool gb_platform_init(int scale) {
         g_windowed_width,
         g_windowed_height,
         window_visibility | SDL_WINDOW_OPENGL |
+#if defined(__ANDROID__)
+        SDL_WINDOW_FULLSCREEN_DESKTOP
+#else
         (g_fullscreen_mode == 2 ? SDL_WINDOW_FULLSCREEN :
          g_fullscreen_mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP :
                                    SDL_WINDOW_RESIZABLE)
+#endif
     );
 
     if (!g_window) {
@@ -7980,6 +8045,46 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
     return keep_running;
 }
 
+#if defined(__ANDROID__)
+/* Consume releases for inputs the game already held. A new press made while
+ * navigating a menu must never become a gameplay hold. */
+static void android_release_captured_input(const SDL_Event* event, GBContext* ctx) {
+    switch (event->type) {
+        case SDL_KEYUP:
+        case SDL_CONTROLLERBUTTONUP:
+            for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
+                for (int slot = 0; slot < 2; slot++) {
+                    if (event->type == SDL_KEYUP &&
+                        binding_matches_scancode(g_keyboard_bindings[action][slot], event->key.keysym.scancode))
+                        g_keyboard_binding_pressed[action][slot] = false;
+                    if (event->type == SDL_CONTROLLERBUTTONUP &&
+                        binding_matches_controller_button(g_controller_bindings[action][slot], event->cbutton.button))
+                        g_controller_button_binding_pressed[action][slot] = false;
+                }
+            }
+            break;
+        case SDL_CONTROLLERAXISMOTION:
+            if (!menu_open() || event->caxis.axis >= SDL_CONTROLLER_AXIS_MAX) return;
+            for (int action = 0; action <= GB_INPUT_ACTION_START; action++) {
+                for (int slot = 0; slot < 2; slot++) {
+                    const GBInputBinding& binding = g_controller_bindings[action][slot];
+                    if (g_controller_axis_binding_pressed[action][slot] &&
+                        binding.code == event->caxis.axis &&
+                        binding_active_for_axis_value(binding, event->caxis.value))
+                        return;
+                }
+            }
+            g_controller_axis_values[event->caxis.axis] = 0;
+            update_controller_axis_binding_state();
+            break;
+        default:
+            return;
+    }
+    update_effective_joypad_state();
+    update_runtime_action_state(ctx);
+}
+#endif
+
 static bool handle_runtime_event_inner(const SDL_Event* event, GBContext* ctx) {
     if (!event) {
         return true;
@@ -7997,6 +8102,10 @@ static bool handle_runtime_event_inner(const SDL_Event* event, GBContext* ctx) {
         (!g_window || event->window.windowID == SDL_GetWindowID(g_window))) {
         return false;
     }
+#if defined(__ANDROID__)
+    if (menu_open() || g_binding_capture_active)
+        android_release_captured_input(event, ctx);
+#endif
     if (handle_binding_capture_event(event)) {
         return true;
     }

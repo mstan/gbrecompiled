@@ -9,6 +9,9 @@ struct GBContext;
  * until a view uses them. 8192 covers a whole 32 x 32 map of 256-pixel sectors. */
 #define GB_CUSTOM_MAX_WIDTH 8192
 #define GB_CUSTOM_MAX_HEIGHT 8192
+/* Scratch storage for existing compositors that render fixed 144-row views.
+ * Compositors with variable heights size their buffers to the resolved view. */
+#define GB_CUSTOM_FRAME_SIZE (GB_CUSTOM_MAX_WIDTH * 144)
 typedef int (*GBCustomRender)(struct GBContext *, uint32_t *, int, const uint32_t *);
 typedef void (*GBCustomSnapshot)(struct GBContext *);
 typedef void (*GBCustomReadTap)(struct GBContext *, uint16_t);

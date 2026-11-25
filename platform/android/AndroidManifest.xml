@@ -3,7 +3,8 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <application android:label="${gameTitle}" android:allowBackup="true" android:hardwareAccelerated="true">
-        <activity android:name="org.gbrecompiled.SetupActivity" android:exported="true">
+        <activity android:name="org.gbrecompiled.SetupActivity" android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

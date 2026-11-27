@@ -1,5 +1,15 @@
 # GB Recompiled — Development Fork
 
+## Deprecated in favor of gbcllr
+
+This personal development fork is deprecated and archived. My ongoing Game Boy and Game Boy Color engine work has moved to [gbcllr](https://github.com/mstan/gbcllr).
+
+I am grateful to [arcanite24](https://github.com/arcanite24) for the original [gb-recompiled](https://github.com/arcanite24/gb-recompiled), and to the [GB-Recomp contributors](https://github.com/GB-Recomp/gb-recompiled) for the runtime and hardware work this fork builds on. Their work remains meaningful and valuable, and this decision carries no ill will toward the original author or contributors.
+
+I am unifying my engines around common cores and shared integrations. Maintaining a separate fork of another engine makes integration with my other console ecosystems harder, so continuing my work in gbcllr is a better fit for that direction.
+
+This repository remains public and available as a read-only archive for anyone who relies on it. Anyone who wants to continue its development is welcome to fork it.
+
 A **static recompiler** for original Game Boy ROMs that translates SM83 assembly into portable C code. Run classic Game Boy games as native executables — no traditional emulator required.
 
 Game-owned Android releases use the [shared Android host](platform/android/README.md).
